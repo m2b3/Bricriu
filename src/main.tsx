@@ -135,6 +135,14 @@ type StoredSession = {
   contentUsesFileFilter: boolean
 }
 
+type RestoredSession = {
+  tabs: OpenTab[]
+  activePath: string | null
+  expanded: string[]
+  fileQuery: string
+  contentUsesFileFilter: boolean
+}
+
 function App(): JSX.Element {
   const [vaultPath, setVaultPath] = useState(() => localStorage.getItem(LAST_VAULT_KEY) ?? '')
   const [vault, setVault] = useState<VaultInfo | null>(null)
@@ -196,12 +204,9 @@ function App(): JSX.Element {
     })
   }, [])
 
-  const restoreSession = useCallback(async (root: string) => {
+  const loadStoredSession = useCallback(async (root: string): Promise<RestoredSession | null> => {
     const session = readStoredSession(root)
-    if (!session) return
-    setExpanded(new Set(session.expanded))
-    setFileQuery(session.fileQuery)
-    setContentUsesFileFilter(session.contentUsesFileFilter)
+    if (!session) return null
 
     const restoredTabs: OpenTab[] = []
     for (const path of session.openPaths) {
@@ -218,9 +223,14 @@ function App(): JSX.Element {
         // The file may have been moved or deleted outside the app.
       }
     }
-    setTabs(restoredTabs)
     const active = restoredTabs.find((tab) => tab.path === session.activePath) ?? restoredTabs[0] ?? null
-    setActivePath(active?.path ?? null)
+    return {
+      tabs: restoredTabs,
+      activePath: active?.path ?? null,
+      expanded: session.expanded,
+      fileQuery: session.fileQuery,
+      contentUsesFileFilter: session.contentUsesFileFilter
+    }
   }, [])
 
   const reconcileExternalTab = useCallback(async (path: string) => {
@@ -263,19 +273,22 @@ function App(): JSX.Element {
           openedVault = { ...nextVault, git }
         }
       }
+      const restoredSession = await loadStoredSession(openedVault.root)
       setVault(openedVault)
-      setTabs([])
-      setActivePath(null)
+      setTabs(restoredSession?.tabs ?? [])
+      setActivePath(restoredSession?.activePath ?? null)
+      setExpanded(new Set(restoredSession?.expanded ?? []))
+      setFileQuery(restoredSession?.fileQuery ?? '')
+      setContentUsesFileFilter(restoredSession?.contentUsesFileFilter ?? false)
       setContentMatches([])
       await refreshTree()
-      await restoreSession(openedVault.root)
       await invoke('watch_vault')
     } catch (err) {
       setError(String(err))
     } finally {
       setBusy(false)
     }
-  }, [refreshTree, restoreSession, vaultPath])
+  }, [loadStoredSession, refreshTree, vaultPath])
 
   useEffect(() => {
     if (!vault) return
@@ -1249,6 +1262,12 @@ function MarkdownEditor({
         '.cm-content': {
           padding: '22px 28px 48px',
           caretColor: '#226b52'
+        },
+        '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
+          backgroundColor: '#b9d7f2'
+        },
+        '.cm-content ::selection': {
+          backgroundColor: '#b9d7f2'
         },
         '.cm-gutters': {
           backgroundColor: '#f6f4ef',
