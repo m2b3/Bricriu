@@ -1,0 +1,4 @@
+{
+  "autosaveDelayMs": 5000,
+  "checkpointIntervalMs": 180000
+}
