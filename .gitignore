@@ -1,8 +1,8 @@
 node_modules/
-dist/
+/dist/
 src-tauri/target/
 src-tauri/gen/
 *.log
 /tiptap-track-demo/
 /tiptap-track-demo/**
-codemirror-lang-typst/
+/codemirror-lang-typst/

@@ -6,19 +6,28 @@ use grep_searcher::{SearcherBuilder, Sink, SinkMatch};
 use ignore::WalkBuilder;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{hash_map::DefaultHasher, BTreeMap},
-    env,
-    fs,
+    env, fs,
     hash::{Hash, Hasher},
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
+};
+use tauri::Emitter;
+use typst::{
+    diag::{FileError, FileResult},
+    foundations::Bytes,
+    layout::PagedDocument,
+    syntax::{FileId, Source},
+};
+use typst_as_lib::{
+    file_resolver::FileResolver, typst_kit_options::TypstKitFontOptions, TypstEngine,
 };
 
 #[derive(Default)]
@@ -26,6 +35,7 @@ struct AppState {
     vault_root: Mutex<Option<PathBuf>>,
     watcher: Mutex<Option<RecommendedWatcher>>,
     typst_preview: Mutex<Option<TypstPreviewSession>>,
+    typst_embedded: Mutex<Option<EmbeddedTypstSession>>,
 }
 
 struct TypstPreviewSession {
@@ -41,6 +51,24 @@ impl Drop for TypstPreviewSession {
         let _ = self.child.wait();
         let _ = fs::remove_file(&self.input);
     }
+}
+
+struct EmbeddedTypstSession {
+    root: PathBuf,
+    overlay: Arc<Mutex<Option<TypstOverlaySource>>>,
+    engine: TypstEngine,
+}
+
+#[derive(Clone)]
+struct TypstOverlaySource {
+    rel: String,
+    body: String,
+}
+
+#[derive(Clone)]
+struct VaultTypstResolver {
+    root: PathBuf,
+    overlay: Arc<Mutex<Option<TypstOverlaySource>>>,
 }
 
 #[derive(Serialize)]
@@ -176,6 +204,10 @@ fn open_vault(state: tauri::State<AppState>, path: String) -> Result<VaultInfo, 
         .typst_preview
         .lock()
         .map_err(|_| "Typst preview state is locked.")? = None;
+    *state
+        .typst_embedded
+        .lock()
+        .map_err(|_| "Embedded Typst state is locked.")? = None;
 
     Ok(VaultInfo {
         root: root_string,
@@ -228,7 +260,8 @@ fn load_profile() -> Result<AppProfile, String> {
         write_profile_file(&path, &profile)?;
         return Ok(profile);
     }
-    let raw = fs::read_to_string(&path).map_err(|err| format!("Could not read profile.json: {err}"))?;
+    let raw =
+        fs::read_to_string(&path).map_err(|err| format!("Could not read profile.json: {err}"))?;
     let parsed = serde_json::from_str::<AppProfile>(&raw)
         .map_err(|err| format!("Could not parse profile.json: {err}"))?;
     let profile = normalize_profile(parsed);
@@ -250,7 +283,10 @@ fn checkpoint_and_switch_inuse(state: tauri::State<AppState>) -> Result<GitInfo,
     )?;
     let has_staged = !run_git_status(&root, &["diff", "--cached", "--quiet"])?.success;
     if has_staged {
-        let message = format!("NotesProject checkpoint before inuse: {}", checkpoint_timestamp());
+        let message = format!(
+            "NotesProject checkpoint before inuse: {}",
+            checkpoint_timestamp()
+        );
         run_git_checked(
             &root,
             &["commit", "-m", &message],
@@ -362,20 +398,52 @@ fn compile_typst_preview(
     let source_dir = source_abs
         .parent()
         .ok_or_else(|| "Could not resolve Typst source folder.".to_string())?;
-    fs::create_dir_all(source_dir).map_err(|err| format!("Could not create source folder: {err}"))?;
+    fs::create_dir_all(source_dir)
+        .map_err(|err| format!("Could not create source folder: {err}"))?;
 
     let output = typst_preview_path(&root, &normalized)?;
     if let Some(parent) = output.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("Could not create Typst preview folder: {err}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Could not create Typst preview folder: {err}"))?;
+    }
+
+    let embedded_result = compile_typst_embedded(&state, &root, &normalized, &body);
+    let embedded_error = embedded_result.as_ref().err().cloned();
+    match embedded_result {
+        Ok(bytes) => {
+            *state
+                .typst_preview
+                .lock()
+                .map_err(|_| "Typst preview state is locked.")? = None;
+            fs::write(&output, &bytes)
+                .map_err(|err| format!("Could not write Typst preview: {err}"))?;
+            let metadata = fs::metadata(&output)
+                .map_err(|err| format!("Could not read Typst preview: {err}"))?;
+            return Ok(TypstPreview {
+                bytes,
+                updated_at: modified_ms(&metadata),
+            });
+        }
+        Err(_) => {
+            // Fall back to the CLI watcher while the embedded resolver path matures.
+        }
     }
 
     let temp_source = typst_preview_source_path(source_dir, &normalized);
     let _ = fs::remove_file(&output);
-    fs::write(&temp_source, body).map_err(|err| format!("Could not write Typst preview source: {err}"))?;
+    fs::write(&temp_source, body)
+        .map_err(|err| format!("Could not write Typst preview source: {err}"))?;
     ensure_typst_watch(&state, &root, &temp_source, &output)?;
-    wait_for_typst_output(&output, Duration::from_secs(8))?;
+    wait_for_typst_output(&output, Duration::from_secs(8)).map_err(|watch_err| {
+        format!(
+            "{} Embedded compiler also failed: {}",
+            watch_err,
+            embedded_error.unwrap_or_else(|| "unknown error".to_string())
+        )
+    })?;
 
-    let metadata = fs::metadata(&output).map_err(|err| format!("Could not read Typst preview: {err}"))?;
+    let metadata =
+        fs::metadata(&output).map_err(|err| format!("Could not read Typst preview: {err}"))?;
     let bytes = fs::read(&output).map_err(|err| format!("Could not read Typst preview: {err}"))?;
     Ok(TypstPreview {
         bytes,
@@ -397,9 +465,11 @@ fn read_track_state(
     if !sidecar.exists() {
         return Ok(None);
     }
-    let body = fs::read_to_string(&sidecar)
-        .map_err(|err| format!("Could not read track state: {err}"))?;
-    serde_json::from_str(&body).map(Some).map_err(|err| format!("Could not parse track state: {err}"))
+    let body =
+        fs::read_to_string(&sidecar).map_err(|err| format!("Could not read track state: {err}"))?;
+    serde_json::from_str(&body)
+        .map(Some)
+        .map_err(|err| format!("Could not parse track state: {err}"))
 }
 
 #[tauri::command]
@@ -416,7 +486,8 @@ fn save_track_state(
     let normalized = normalize_relative_input(&path)?;
     let sidecar = track_sidecar_path(&root, &normalized)?;
     if let Some(parent) = sidecar.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("Could not create track folder: {err}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Could not create track folder: {err}"))?;
     }
     track_state.path = normalized;
     let body = serde_json::to_string_pretty(&track_state)
@@ -494,7 +565,8 @@ fn rename_note(
         return Err("A note already exists at the target path.".to_string());
     }
     if let Some(parent) = new_abs.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("Could not create target folder: {err}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Could not create target folder: {err}"))?;
     }
     rename_path(&old_abs, &new_abs).map_err(|err| format!("Could not rename note: {err}"))?;
     move_track_sidecar(&root, &old_path, &normalized_new)?;
@@ -541,7 +613,8 @@ fn rename_folder(
         return Err("Cannot move a folder into itself.".to_string());
     }
     if let Some(parent) = new_abs.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("Could not create target folder: {err}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Could not create target folder: {err}"))?;
     }
     rename_path(&old_abs, &new_abs).map_err(|err| format!("Could not rename folder: {err}"))?;
     move_track_sidecar_folder(&root, &old_path, &normalized_new)?;
@@ -786,7 +859,9 @@ fn track_sidecar_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
     }
     path.set_extension(format!(
         "{}.json",
-        path.extension().and_then(|ext| ext.to_str()).unwrap_or_default()
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default()
     ));
     Ok(path)
 }
@@ -798,7 +873,8 @@ fn move_track_sidecar(root: &Path, old_rel: &str, new_rel: &str) -> Result<(), S
     }
     let new_sidecar = track_sidecar_path(root, new_rel)?;
     if let Some(parent) = new_sidecar.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("Could not create track folder: {err}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Could not create track folder: {err}"))?;
     }
     rename_path(&old_sidecar, &new_sidecar)
         .map_err(|err| format!("Could not move track sidecar: {err}"))
@@ -820,7 +896,8 @@ fn move_track_sidecar_folder(root: &Path, old_rel: &str, new_rel: &str) -> Resul
     }
     let new_root = track_folder_path(root, new_rel)?;
     if let Some(parent) = new_root.parent() {
-        fs::create_dir_all(parent).map_err(|err| format!("Could not create track folder: {err}"))?;
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Could not create track folder: {err}"))?;
     }
     rename_path(&old_root, &new_root).map_err(|err| format!("Could not move track folder: {err}"))
 }
@@ -923,7 +1000,10 @@ fn collect_files(root: &Path, include: fn(&Path) -> bool) -> Result<Vec<PathBuf>
     for entry in walker {
         let entry = entry.map_err(|err| format!("Could not walk vault: {err}"))?;
         let path = entry.path();
-        if entry.file_type().map(|file_type| file_type.is_file()).unwrap_or(false)
+        if entry
+            .file_type()
+            .map(|file_type| file_type.is_file())
+            .unwrap_or(false)
             && include(path)
         {
             files.push(path.to_path_buf());
@@ -1026,6 +1106,100 @@ fn is_note_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+impl FileResolver for VaultTypstResolver {
+    fn resolve_binary(&self, id: FileId) -> FileResult<Cow<'_, Bytes>> {
+        let path = id
+            .vpath()
+            .resolve(&self.root)
+            .ok_or_else(|| FileError::NotFound(self.root.clone()))?;
+        let bytes = fs::read(&path).map_err(|err| FileError::from_io(err, &path))?;
+        Ok(Cow::Owned(Bytes::new(bytes)))
+    }
+
+    fn resolve_source(&self, id: FileId) -> FileResult<Cow<'_, Source>> {
+        let rel = id
+            .vpath()
+            .as_rootless_path()
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if let Ok(guard) = self.overlay.lock() {
+            if let Some(overlay) = guard.as_ref() {
+                if overlay.rel == rel {
+                    return Ok(Cow::Owned(Source::new(id, overlay.body.clone())));
+                }
+            }
+        }
+
+        let path = id
+            .vpath()
+            .resolve(&self.root)
+            .ok_or_else(|| FileError::NotFound(self.root.clone()))?;
+        let body = fs::read_to_string(&path).map_err(|err| FileError::from_io(err, &path))?;
+        Ok(Cow::Owned(Source::new(id, body)))
+    }
+}
+
+fn compile_typst_embedded(
+    state: &tauri::State<AppState>,
+    root: &Path,
+    rel: &str,
+    body: &str,
+) -> Result<Vec<u8>, String> {
+    let mut session = state
+        .typst_embedded
+        .lock()
+        .map_err(|_| "Embedded Typst state is locked.")?;
+    if session
+        .as_ref()
+        .map(|current| current.root != root)
+        .unwrap_or(true)
+    {
+        *session = Some(start_embedded_typst(root));
+    }
+    let session = session
+        .as_mut()
+        .ok_or_else(|| "Embedded Typst state is unavailable.".to_string())?;
+    *session
+        .overlay
+        .lock()
+        .map_err(|_| "Embedded Typst overlay is locked.")? = Some(TypstOverlaySource {
+        rel: rel.to_string(),
+        body: body.to_string(),
+    });
+
+    let doc: PagedDocument = session
+        .engine
+        .compile(rel)
+        .output
+        .map_err(|err| format!("Typst compile failed. {err}"))?;
+    typst_pdf::pdf(&doc, &Default::default())
+        .map_err(|err| format!("Typst PDF export failed. {err:?}"))
+}
+
+fn start_embedded_typst(root: &Path) -> EmbeddedTypstSession {
+    let overlay = Arc::new(Mutex::new(None));
+    let resolver = VaultTypstResolver {
+        root: root.to_path_buf(),
+        overlay: overlay.clone(),
+    };
+    let engine = TypstEngine::builder()
+        .add_file_resolver(resolver)
+        .with_package_file_resolver()
+        .search_fonts_with(
+            TypstKitFontOptions::default()
+                .include_system_fonts(true)
+                .include_embedded_fonts(true),
+        )
+        .build();
+    EmbeddedTypstSession {
+        root: root.to_path_buf(),
+        overlay,
+        engine,
+    }
+}
+
 fn ensure_typst_watch(
     state: &tauri::State<AppState>,
     root: &Path,
@@ -1057,7 +1231,11 @@ fn ensure_typst_watch(
     Ok(())
 }
 
-fn start_typst_watch(root: &Path, input: &Path, output: &Path) -> Result<TypstPreviewSession, String> {
+fn start_typst_watch(
+    root: &Path,
+    input: &Path,
+    output: &Path,
+) -> Result<TypstPreviewSession, String> {
     let typst = resolve_typst_executable().unwrap_or_else(|| PathBuf::from("typst"));
     let mut command = Command::new(typst);
     command
@@ -1074,9 +1252,9 @@ fn start_typst_watch(root: &Path, input: &Path, output: &Path) -> Result<TypstPr
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    let child = command
-        .spawn()
-        .map_err(|err| format!("Could not run Typst. Make sure typst is installed and on PATH. {err}"))?;
+    let child = command.spawn().map_err(|err| {
+        format!("Could not run Typst. Make sure typst is installed and on PATH. {err}")
+    })?;
     Ok(TypstPreviewSession {
         root: root.to_path_buf(),
         input: input.to_path_buf(),
@@ -1085,10 +1263,7 @@ fn start_typst_watch(root: &Path, input: &Path, output: &Path) -> Result<TypstPr
     })
 }
 
-fn wait_for_typst_output(
-    output: &Path,
-    timeout: Duration,
-) -> Result<(), String> {
+fn wait_for_typst_output(output: &Path, timeout: Duration) -> Result<(), String> {
     let started = Instant::now();
     loop {
         if let Ok(metadata) = fs::metadata(output) {
@@ -1123,7 +1298,11 @@ fn resolve_typst_from_platform_path() -> Option<PathBuf> {
 fn find_executable_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
     let path = path?;
     env::split_paths(path)
-        .flat_map(|dir| executable_names(name).into_iter().map(move |exe| dir.join(exe)))
+        .flat_map(|dir| {
+            executable_names(name)
+                .into_iter()
+                .map(move |exe| dir.join(exe))
+        })
         .find(|candidate| candidate.is_file())
 }
 
@@ -1301,7 +1480,11 @@ struct NoteSearchSink<'a> {
 impl Sink for NoteSearchSink<'_> {
     type Error = std::io::Error;
 
-    fn matched(&mut self, _searcher: &grep_searcher::Searcher, mat: &SinkMatch<'_>) -> Result<bool, Self::Error> {
+    fn matched(
+        &mut self,
+        _searcher: &grep_searcher::Searcher,
+        mat: &SinkMatch<'_>,
+    ) -> Result<bool, Self::Error> {
         if self.out.len() >= self.limit {
             return Ok(false);
         }
@@ -1314,7 +1497,9 @@ impl Sink for NoteSearchSink<'_> {
         let Some(range) = range else {
             return Ok(true);
         };
-        let line_text = String::from_utf8_lossy(bytes).trim_end_matches(['\r', '\n']).to_string();
+        let line_text = String::from_utf8_lossy(bytes)
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
         self.out.push(ContentMatch {
             path: self.rel_path.clone(),
             line_number: mat.line_number().unwrap_or(0) as usize,
@@ -1418,8 +1603,16 @@ fn current_branch(root: &Path) -> Result<Option<String>, String> {
 }
 
 fn branch_exists(root: &Path, branch: &str) -> Result<bool, String> {
-    Ok(run_git_status(root, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")])?
-        .success)
+    Ok(run_git_status(
+        root,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )?
+    .success)
 }
 
 fn is_worktree_dirty(root: &Path) -> Result<bool, String> {
@@ -1433,7 +1626,11 @@ fn is_worktree_dirty(root: &Path) -> Result<bool, String> {
 
 fn switch_or_create_inuse(root: &Path) -> Result<(), String> {
     if branch_exists(root, "inuse")? {
-        run_git_checked(root, &["switch", "inuse"], "Could not switch to inuse branch.")?;
+        run_git_checked(
+            root,
+            &["switch", "inuse"],
+            "Could not switch to inuse branch.",
+        )?;
     } else {
         run_git_checked(
             root,

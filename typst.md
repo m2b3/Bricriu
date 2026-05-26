@@ -101,6 +101,8 @@ export PNG
 
 8. Add tests for compile command safety and path containment.
 
+9. Track in-memory overlays for all open dirty Typst tabs, not only the active preview target. This would let an unsaved `.typ` file imported by another open `.typ` file participate in preview without requiring a save first.
+
 ## notesproject Integration Plan
 
 ### Phase 1: File Support
