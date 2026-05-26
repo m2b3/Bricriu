@@ -10,8 +10,9 @@ use tauri::Emitter;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
-    collections::BTreeMap,
     cmp::Ordering,
+    collections::BTreeMap,
+    env,
     fs,
     path::{Component, Path, PathBuf},
     process::Command,
@@ -81,6 +82,24 @@ struct NoteContent {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct TypstPreview {
+    bytes: Vec<u8>,
+    updated_at: u64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrackState {
+    path: String,
+    current_doc: serde_json::Value,
+    snapshots: Vec<serde_json::Value>,
+    resolved_changes: Vec<String>,
+    comments: Vec<serde_json::Value>,
+    updated_at: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ContentMatch {
     path: String,
     line_number: usize,
@@ -108,6 +127,8 @@ struct VaultChangeEvent {
 struct AppProfile {
     autosave_delay_ms: u64,
     checkpoint_interval_ms: u64,
+    #[serde(default = "default_close_markdown_before_track")]
+    close_markdown_before_track: bool,
 }
 
 #[tauri::command]
@@ -273,8 +294,8 @@ fn list_tree(state: tauri::State<AppState>) -> Result<Vec<TreeEntry>, String> {
 fn read_note(state: tauri::State<AppState>, path: String) -> Result<NoteContent, String> {
     let root = current_root(&state)?;
     let abs = resolve_safe(&root, &path)?;
-    if !is_markdown_file(&abs) {
-        return Err("Only Markdown files can be opened.".to_string());
+    if !is_note_file(&abs) {
+        return Err("Only Markdown and Typst files can be opened.".to_string());
     }
 
     let body = fs::read_to_string(&abs).map_err(|err| format!("Could not read note: {err}"))?;
@@ -295,14 +316,129 @@ fn save_note(
 ) -> Result<NoteContent, String> {
     let root = current_root(&state)?;
     let abs = resolve_safe(&root, &path)?;
-    if !is_markdown_file(&abs) {
-        return Err("Only Markdown files can be saved.".to_string());
+    if !is_note_file(&abs) {
+        return Err("Only Markdown and Typst files can be saved.".to_string());
     }
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent).map_err(|err| format!("Could not create folder: {err}"))?;
     }
     fs::write(&abs, body).map_err(|err| format!("Could not save note: {err}"))?;
     read_note(state, path)
+}
+
+#[tauri::command]
+fn compile_typst_preview(
+    state: tauri::State<AppState>,
+    path: String,
+    body: String,
+) -> Result<TypstPreview, String> {
+    let root = current_root(&state)?;
+    let normalized = normalize_relative_input(&path)?;
+    let source_abs = resolve_safe(&root, &normalized)?;
+    if !is_typst_file(&source_abs) {
+        return Err("Typst preview is only supported for .typ files.".to_string());
+    }
+    let source_dir = source_abs
+        .parent()
+        .ok_or_else(|| "Could not resolve Typst source folder.".to_string())?;
+    fs::create_dir_all(source_dir).map_err(|err| format!("Could not create source folder: {err}"))?;
+
+    let temp_name = format!(
+        ".notesproject-typst-preview-{}.typ",
+        preview_timestamp()
+    );
+    let temp_source = source_dir.join(temp_name);
+    fs::write(&temp_source, body).map_err(|err| format!("Could not write Typst preview source: {err}"))?;
+
+    let output = typst_preview_path(&root, &normalized)?;
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("Could not create Typst preview folder: {err}"))?;
+    }
+
+    let compile_result = run_typst_compile(&root, &temp_source, &output);
+    let _ = fs::remove_file(&temp_source);
+    compile_result?;
+
+    let metadata = fs::metadata(&output).map_err(|err| format!("Could not read Typst preview: {err}"))?;
+    let bytes = fs::read(&output).map_err(|err| format!("Could not read Typst preview: {err}"))?;
+    Ok(TypstPreview {
+        bytes,
+        updated_at: modified_ms(&metadata),
+    })
+}
+
+#[tauri::command]
+fn read_track_state(
+    state: tauri::State<AppState>,
+    path: String,
+) -> Result<Option<TrackState>, String> {
+    let root = current_root(&state)?;
+    let note_abs = resolve_safe(&root, &path)?;
+    if !is_markdown_file(&note_abs) {
+        return Err("Track state is only supported for Markdown files.".to_string());
+    }
+    let sidecar = track_sidecar_path(&root, &path)?;
+    if !sidecar.exists() {
+        return Ok(None);
+    }
+    let body = fs::read_to_string(&sidecar)
+        .map_err(|err| format!("Could not read track state: {err}"))?;
+    serde_json::from_str(&body).map(Some).map_err(|err| format!("Could not parse track state: {err}"))
+}
+
+#[tauri::command]
+fn save_track_state(
+    state: tauri::State<AppState>,
+    path: String,
+    mut track_state: TrackState,
+) -> Result<(), String> {
+    let root = current_root(&state)?;
+    let note_abs = resolve_safe(&root, &path)?;
+    if !is_markdown_file(&note_abs) {
+        return Err("Track state is only supported for Markdown files.".to_string());
+    }
+    let normalized = normalize_relative_input(&path)?;
+    let sidecar = track_sidecar_path(&root, &normalized)?;
+    if let Some(parent) = sidecar.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("Could not create track folder: {err}"))?;
+    }
+    track_state.path = normalized;
+    let body = serde_json::to_string_pretty(&track_state)
+        .map_err(|err| format!("Could not serialize track state: {err}"))?;
+    fs::write(sidecar, body).map_err(|err| format!("Could not save track state: {err}"))
+}
+
+#[tauri::command]
+fn delete_track_state(state: tauri::State<AppState>, path: String) -> Result<(), String> {
+    let root = current_root(&state)?;
+    let sidecar = track_sidecar_path(&root, &path)?;
+    if sidecar.exists() {
+        fs::remove_file(sidecar).map_err(|err| format!("Could not delete track state: {err}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn write_track_merge_candidate(
+    state: tauri::State<AppState>,
+    path: String,
+    body: String,
+) -> Result<NoteContent, String> {
+    let root = current_root(&state)?;
+    let abs = resolve_safe(&root, &path)?;
+    if !is_markdown_file(&abs) {
+        return Err("Merge candidates are only supported for Markdown files.".to_string());
+    }
+
+    let candidate_rel = merge_candidate_path(&path)?;
+    let candidate_abs = resolve_safe(&root, &candidate_rel)?;
+    if let Some(parent) = candidate_abs.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Could not create merge candidate folder: {err}"))?;
+    }
+    fs::write(&candidate_abs, body)
+        .map_err(|err| format!("Could not write merge candidate: {err}"))?;
+    read_note(state, candidate_rel)
 }
 
 #[tauri::command]
@@ -333,8 +469,8 @@ fn rename_note(
 ) -> Result<NoteContent, String> {
     let root = current_root(&state)?;
     let old_abs = resolve_safe(&root, &old_path)?;
-    if !is_markdown_file(&old_abs) {
-        return Err("Only Markdown files can be renamed.".to_string());
+    if !is_note_file(&old_abs) {
+        return Err("Only Markdown and Typst files can be renamed.".to_string());
     }
     let normalized_new = normalize_note_path(&new_path)?;
     let new_abs = resolve_safe(&root, &normalized_new)?;
@@ -345,6 +481,7 @@ fn rename_note(
         fs::create_dir_all(parent).map_err(|err| format!("Could not create target folder: {err}"))?;
     }
     rename_path(&old_abs, &new_abs).map_err(|err| format!("Could not rename note: {err}"))?;
+    move_track_sidecar(&root, &old_path, &normalized_new)?;
     read_note(state, normalized_new)
 }
 
@@ -352,10 +489,12 @@ fn rename_note(
 fn delete_note(state: tauri::State<AppState>, path: String) -> Result<(), String> {
     let root = current_root(&state)?;
     let abs = resolve_safe(&root, &path)?;
-    if !is_markdown_file(&abs) {
-        return Err("Only Markdown files can be deleted.".to_string());
+    if !is_note_file(&abs) {
+        return Err("Only Markdown and Typst files can be deleted.".to_string());
     }
-    fs::remove_file(abs).map_err(|err| format!("Could not delete note: {err}"))
+    fs::remove_file(abs).map_err(|err| format!("Could not delete note: {err}"))?;
+    remove_track_sidecar(&root, &path)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -388,7 +527,9 @@ fn rename_folder(
     if let Some(parent) = new_abs.parent() {
         fs::create_dir_all(parent).map_err(|err| format!("Could not create target folder: {err}"))?;
     }
-    rename_path(&old_abs, &new_abs).map_err(|err| format!("Could not rename folder: {err}"))
+    rename_path(&old_abs, &new_abs).map_err(|err| format!("Could not rename folder: {err}"))?;
+    move_track_sidecar_folder(&root, &old_path, &normalized_new)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -402,7 +543,9 @@ fn delete_folder(state: tauri::State<AppState>, path: String) -> Result<(), Stri
     if !abs.is_dir() {
         return Err("Folder does not exist.".to_string());
     }
-    fs::remove_dir_all(abs).map_err(|err| format!("Could not delete folder: {err}"))
+    fs::remove_dir_all(abs).map_err(|err| format!("Could not delete folder: {err}"))?;
+    remove_track_sidecar_folder(&root, &normalized)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -424,9 +567,9 @@ fn search_content(
             .map(|path| resolve_safe(&root, &path))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .filter(|path| is_markdown_file(path))
+            .filter(|path| is_note_file(path))
             .collect::<Vec<_>>(),
-        _ => collect_markdown_files(&root)?,
+        _ => collect_note_files(&root)?,
     };
 
     let mut matches = Vec::new();
@@ -548,6 +691,7 @@ fn normalize_note_path(path: &str) -> Result<String, String> {
     let mut normalized = normalize_relative_input(path)?;
     if !normalized.to_lowercase().ends_with(".md")
         && !normalized.to_lowercase().ends_with(".markdown")
+        && !normalized.to_lowercase().ends_with(".typ")
     {
         normalized.push_str(".md");
     }
@@ -571,6 +715,131 @@ fn normalize_relative_input(path: &str) -> Result<String, String> {
         return Err("Path must stay inside the vault.".to_string());
     }
     Ok(normalized)
+}
+
+fn merge_candidate_path(path: &str) -> Result<String, String> {
+    let normalized = normalize_note_path(path)?;
+    let marker = ".track-merge";
+    if let Some(stem) = normalized
+        .strip_suffix(".markdown")
+        .or_else(|| normalized.strip_suffix(".MARKDOWN"))
+    {
+        return Ok(format!("{stem}{marker}.markdown"));
+    }
+    if let Some(stem) = normalized
+        .strip_suffix(".md")
+        .or_else(|| normalized.strip_suffix(".MD"))
+    {
+        return Ok(format!("{stem}{marker}.md"));
+    }
+    Ok(format!("{normalized}{marker}.md"))
+}
+
+fn track_root(root: &Path) -> PathBuf {
+    root.join(".notesproject").join("track")
+}
+
+fn typst_preview_root(root: &Path) -> PathBuf {
+    root.join(".notesproject").join("typst-preview")
+}
+
+fn typst_preview_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    let normalized = normalize_relative_input(rel)?;
+    let mut path = typst_preview_root(root);
+    for part in normalized.split('/') {
+        path.push(part);
+    }
+    path.set_extension("pdf");
+    Ok(path)
+}
+
+fn track_sidecar_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    let normalized = normalize_relative_input(rel)?;
+    let mut path = track_root(root);
+    for part in normalized.split('/') {
+        path.push(part);
+    }
+    path.set_extension(format!(
+        "{}.json",
+        path.extension().and_then(|ext| ext.to_str()).unwrap_or_default()
+    ));
+    Ok(path)
+}
+
+fn move_track_sidecar(root: &Path, old_rel: &str, new_rel: &str) -> Result<(), String> {
+    let old_sidecar = track_sidecar_path(root, old_rel)?;
+    if !old_sidecar.exists() {
+        return Ok(());
+    }
+    let new_sidecar = track_sidecar_path(root, new_rel)?;
+    if let Some(parent) = new_sidecar.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("Could not create track folder: {err}"))?;
+    }
+    rename_path(&old_sidecar, &new_sidecar)
+        .map_err(|err| format!("Could not move track sidecar: {err}"))
+}
+
+fn remove_track_sidecar(root: &Path, rel: &str) -> Result<(), String> {
+    let sidecar = track_sidecar_path(root, rel)?;
+    if sidecar.exists() {
+        fs::remove_file(sidecar).map_err(|err| format!("Could not remove track sidecar: {err}"))?;
+    }
+    prune_empty_track_dirs(root);
+    Ok(())
+}
+
+fn move_track_sidecar_folder(root: &Path, old_rel: &str, new_rel: &str) -> Result<(), String> {
+    let old_root = track_folder_path(root, old_rel)?;
+    if !old_root.exists() {
+        return Ok(());
+    }
+    let new_root = track_folder_path(root, new_rel)?;
+    if let Some(parent) = new_root.parent() {
+        fs::create_dir_all(parent).map_err(|err| format!("Could not create track folder: {err}"))?;
+    }
+    rename_path(&old_root, &new_root).map_err(|err| format!("Could not move track folder: {err}"))
+}
+
+fn remove_track_sidecar_folder(root: &Path, rel: &str) -> Result<(), String> {
+    let sidecar_folder = track_folder_path(root, rel)?;
+    if sidecar_folder.exists() {
+        fs::remove_dir_all(sidecar_folder)
+            .map_err(|err| format!("Could not remove track folder: {err}"))?;
+    }
+    prune_empty_track_dirs(root);
+    Ok(())
+}
+
+fn track_folder_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    let normalized = normalize_folder_path(rel)?;
+    let mut path = track_root(root);
+    for part in normalized.split('/') {
+        path.push(part);
+    }
+    Ok(path)
+}
+
+fn prune_empty_track_dirs(root: &Path) {
+    let track = track_root(root);
+    let _ = prune_empty_dir(&track, &track);
+}
+
+fn prune_empty_dir(root: &Path, dir: &Path) -> std::io::Result<bool> {
+    if !dir.exists() {
+        return Ok(true);
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() && prune_empty_dir(root, &path)? {
+            let _ = fs::remove_dir(&path);
+        }
+    }
+    if dir != root && fs::read_dir(dir)?.next().is_none() {
+        fs::remove_dir(dir)?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn same_path_case_insensitive(left: &Path, right: &Path) -> bool {
@@ -598,10 +867,18 @@ fn read_directory(root: &Path, dir: &Path) -> Result<Vec<TreeEntry>, String> {
     if dir != root {
         return Err("Only root tree listing is supported.".to_string());
     }
-    build_tree_from_files(root, collect_markdown_files(root)?)
+    build_tree_from_files(root, collect_note_files(root)?)
+}
+
+fn collect_note_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    collect_files(root, is_note_file)
 }
 
 fn collect_markdown_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    collect_files(root, is_markdown_file)
+}
+
+fn collect_files(root: &Path, include: fn(&Path) -> bool) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     let walker = WalkBuilder::new(root)
         .hidden(true)
@@ -622,7 +899,7 @@ fn collect_markdown_files(root: &Path) -> Result<Vec<PathBuf>, String> {
         let entry = entry.map_err(|err| format!("Could not walk vault: {err}"))?;
         let path = entry.path();
         if entry.file_type().map(|file_type| file_type.is_file()).unwrap_or(false)
-            && is_markdown_file(path)
+            && include(path)
         {
             files.push(path.to_path_buf());
         }
@@ -704,6 +981,160 @@ fn is_markdown_file(path: &Path) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
         .unwrap_or(false)
+}
+
+fn is_typst_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("typ"))
+        .unwrap_or(false)
+}
+
+fn is_note_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            ext.eq_ignore_ascii_case("md")
+                || ext.eq_ignore_ascii_case("markdown")
+                || ext.eq_ignore_ascii_case("typ")
+        })
+        .unwrap_or(false)
+}
+
+fn run_typst_compile(root: &Path, input: &Path, output: &Path) -> Result<(), String> {
+    let typst = resolve_typst_executable().unwrap_or_else(|| PathBuf::from("typst"));
+    let mut command = Command::new(typst);
+    command.current_dir(root).arg("compile").arg(input).arg(output);
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let result = command
+        .output()
+        .map_err(|err| format!("Could not run Typst. Make sure typst is installed and on PATH. {err}"))?;
+    if result.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
+    let detail = if stderr.is_empty() { stdout } else { stderr };
+    if detail.is_empty() {
+        Err("Typst compile failed.".to_string())
+    } else {
+        Err(format!("Typst compile failed. {detail}"))
+    }
+}
+
+fn resolve_typst_executable() -> Option<PathBuf> {
+    find_executable_on_path("typst", env::var_os("PATH").as_deref())
+        .or_else(resolve_typst_from_platform_path)
+}
+
+#[cfg(windows)]
+fn resolve_typst_from_platform_path() -> Option<PathBuf> {
+    windows_registry_path_values()
+        .iter()
+        .find_map(|path| find_executable_on_path("typst", Some(path.as_ref())))
+}
+
+#[cfg(not(windows))]
+fn resolve_typst_from_platform_path() -> Option<PathBuf> {
+    None
+}
+
+fn find_executable_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let path = path?;
+    env::split_paths(path)
+        .flat_map(|dir| executable_names(name).into_iter().map(move |exe| dir.join(exe)))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(windows)]
+fn executable_names(name: &str) -> Vec<String> {
+    if Path::new(name).extension().is_some() {
+        return vec![name.to_string()];
+    }
+    env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+        .split(';')
+        .filter(|ext| !ext.is_empty())
+        .map(|ext| format!("{name}{ext}"))
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn executable_names(name: &str) -> Vec<String> {
+    vec![name.to_string()]
+}
+
+#[cfg(windows)]
+fn windows_registry_path_values() -> Vec<std::ffi::OsString> {
+    [
+        (r"HKCU\Environment", true),
+        (
+            r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+            true,
+        ),
+    ]
+    .iter()
+    .filter_map(|(key, expand)| windows_registry_path_value(key).map(|path| (path, *expand)))
+    .map(|(path, expand)| {
+        if expand {
+            std::ffi::OsString::from(expand_windows_env_vars(&path))
+        } else {
+            std::ffi::OsString::from(path)
+        }
+    })
+    .collect()
+}
+
+#[cfg(windows)]
+fn windows_registry_path_value(key: &str) -> Option<String> {
+    let mut command = Command::new("reg");
+    command.args(["query", key, "/v", "Path"]);
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().find_map(|line| {
+        ["REG_EXPAND_SZ", "REG_SZ"].iter().find_map(|marker| {
+            line.find(marker)
+                .map(|index| line[index + marker.len()..].trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+    })
+}
+
+#[cfg(windows)]
+fn expand_windows_env_vars(value: &str) -> String {
+    let mut expanded = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find('%') {
+        expanded.push_str(&rest[..start]);
+        let after_start = &rest[start + 1..];
+        if let Some(end) = after_start.find('%') {
+            let name = &after_start[..end];
+            if let Ok(replacement) = env::var(name) {
+                expanded.push_str(&replacement);
+            } else {
+                expanded.push('%');
+                expanded.push_str(name);
+                expanded.push('%');
+            }
+            rest = &after_start[end + 1..];
+        } else {
+            expanded.push_str(&rest[start..]);
+            return expanded;
+        }
+    }
+    expanded.push_str(rest);
+    expanded
 }
 
 fn to_posix_relative(root: &Path, abs: &Path) -> Result<String, String> {
@@ -978,6 +1409,13 @@ fn checkpoint_timestamp() -> String {
         .unwrap_or_else(|_| "unknown-time".to_string())
 }
 
+fn preview_timestamp() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_micros().to_string())
+        .unwrap_or_else(|_| "unknown-time".to_string())
+}
+
 fn profile_path() -> Result<PathBuf, String> {
     std::env::current_dir()
         .map(|dir| dir.join("profile.json"))
@@ -988,6 +1426,7 @@ fn default_profile() -> AppProfile {
     AppProfile {
         autosave_delay_ms: 5_000,
         checkpoint_interval_ms: 3 * 60 * 1000,
+        close_markdown_before_track: default_close_markdown_before_track(),
     }
 }
 
@@ -995,7 +1434,12 @@ fn normalize_profile(profile: AppProfile) -> AppProfile {
     AppProfile {
         autosave_delay_ms: profile.autosave_delay_ms.clamp(1_000, 60_000),
         checkpoint_interval_ms: profile.checkpoint_interval_ms.clamp(60_000, 60 * 60 * 1000),
+        close_markdown_before_track: profile.close_markdown_before_track,
     }
+}
+
+fn default_close_markdown_before_track() -> bool {
+    true
 }
 
 fn write_profile_file(path: &Path, profile: &AppProfile) -> Result<(), String> {
@@ -1017,6 +1461,11 @@ fn main() {
             list_tree,
             read_note,
             save_note,
+            compile_typst_preview,
+            read_track_state,
+            save_track_state,
+            delete_track_state,
+            write_track_merge_candidate,
             create_note,
             rename_note,
             delete_note,

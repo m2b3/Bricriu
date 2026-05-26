@@ -9,6 +9,7 @@ import {
   RangeSetBuilder,
   EditorState,
   EditorSelection,
+  StateField,
   type Extension
 } from '@codemirror/state'
 import { autocompletion, type CompletionContext } from '@codemirror/autocomplete'
@@ -37,9 +38,13 @@ import {
   syntaxHighlighting
 } from '@codemirror/language'
 import { searchKeymap } from '@codemirror/search'
+import { typst } from 'codemirror-lang-typst'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import MarkdownIt from 'markdown-it'
+import { TrackChangesEditor, createInitialTrackState } from './track/TrackChangesEditor'
+import { markdownToTiptap } from './track/markdown'
+import type { TrackState } from './track/types'
 import './styles.css'
 
 type EntryKind = 'file' | 'dir'
@@ -82,6 +87,11 @@ type NoteContent = {
   size: number
 }
 
+type TypstPreview = {
+  bytes: number[]
+  updatedAt: number
+}
+
 type ContentMatch = {
   path: string
   lineNumber: number
@@ -102,12 +112,25 @@ type SearchHighlight = {
   offset: number
 }
 
+type TypstPreviewState = {
+  tabId: string
+  src: string | null
+  loading: boolean
+  error: string | null
+}
+
+type EditorMode = 'markdown' | 'track'
+
 type OpenTab = {
+  id: string
   path: string
+  mode: EditorMode
   body: string
   savedBody: string
+  bodyVersion: number
   updatedAt: number
   size: number
+  trackState?: TrackState
   externalStatus?: 'changed' | 'deleted'
 }
 
@@ -116,22 +139,32 @@ type VaultChangeEvent = {
 }
 
 const programmaticChange = Annotation.define<boolean>()
+const editorDocumentVersion = StateField.define<number>({
+  create: () => 0,
+  update(value, transaction) {
+    return transaction.docChanged ? value + 1 : value
+  }
+})
 const LAST_VAULT_KEY = 'notesproject:last-vault'
 const SESSION_KEY_PREFIX = 'notesproject:session:'
 
 type AppProfile = {
   autosaveDelayMs: number
   checkpointIntervalMs: number
+  closeMarkdownBeforeTrack: boolean
 }
 
 const DEFAULT_PROFILE: AppProfile = {
   autosaveDelayMs: 5000,
-  checkpointIntervalMs: 3 * 60 * 1000
+  checkpointIntervalMs: 3 * 60 * 1000,
+  closeMarkdownBeforeTrack: true
 }
 
 type StoredSession = {
-  openPaths: string[]
-  activePath: string | null
+  openTabs: Array<{ path: string; mode: EditorMode }>
+  openPaths?: string[]
+  activeId?: string | null
+  activePath?: string | null
   expanded: string[]
   fileQuery: string
   contentUsesFileFilter: boolean
@@ -139,7 +172,7 @@ type StoredSession = {
 
 type RestoredSession = {
   tabs: OpenTab[]
-  activePath: string | null
+  activeId: string | null
   expanded: string[]
   fileQuery: string
   contentUsesFileFilter: boolean
@@ -150,7 +183,7 @@ function App(): JSX.Element {
   const [vault, setVault] = useState<VaultInfo | null>(null)
   const [tree, setTree] = useState<TreeEntry[]>([])
   const [tabs, setTabs] = useState<OpenTab[]>([])
-  const [activePath, setActivePath] = useState<string | null>(null)
+  const [activeId, setActiveId] = useState<string | null>(null)
   const [fileQuery, setFileQuery] = useState('')
   const [contentQuery, setContentQuery] = useState('')
   const [contentUsesFileFilter, setContentUsesFileFilter] = useState(false)
@@ -168,15 +201,17 @@ function App(): JSX.Element {
   const [showPreview, setShowPreview] = useState(false)
   const [showBacklinks, setShowBacklinks] = useState(false)
   const [loadingBacklinks, setLoadingBacklinks] = useState(false)
+  const [typstPreview, setTypstPreview] = useState<TypstPreviewState | null>(null)
   const tabsRef = useRef<OpenTab[]>([])
   const touchedPathsRef = useRef<Set<string>>(new Set())
   const vaultRef = useRef<VaultInfo | null>(null)
   const closingRef = useRef(false)
 
   const activeTab = useMemo(
-    () => tabs.find((tab) => tab.path === activePath) ?? null,
-    [activePath, tabs]
+    () => tabs.find((tab) => tab.id === activeId) ?? null,
+    [activeId, tabs]
   )
+  const activePath = activeTab?.path ?? null
   const dirty = !!activeTab && activeTab.body !== activeTab.savedBody
 
   useEffect(() => {
@@ -210,25 +245,36 @@ function App(): JSX.Element {
     const session = readStoredSession(root)
     if (!session) return null
 
+    const storedTabs = session.openTabs ?? session.openPaths?.map((path) => ({ path, mode: 'markdown' as const })) ?? []
     const restoredTabs: OpenTab[] = []
-    for (const path of session.openPaths) {
+    for (const storedTab of storedTabs) {
       try {
-        const note = await invoke<NoteContent>('read_note', { path })
+        const note = await invoke<NoteContent>('read_note', { path: storedTab.path })
+        const trackState = storedTab.mode === 'track'
+          ? await loadOrCreateTrackState(note.path, note.body)
+          : undefined
         restoredTabs.push({
+          id: tabId(note.path, storedTab.mode),
           path: note.path,
+          mode: storedTab.mode,
           body: note.body,
           savedBody: note.body,
+          bodyVersion: 0,
           updatedAt: note.updatedAt,
-          size: note.size
+          size: note.size,
+          trackState
         })
       } catch {
         // The file may have been moved or deleted outside the app.
       }
     }
-    const active = restoredTabs.find((tab) => tab.path === session.activePath) ?? restoredTabs[0] ?? null
+    const active = restoredTabs.find((tab) => tab.id === session.activeId)
+      ?? restoredTabs.find((tab) => tab.path === session.activePath)
+      ?? restoredTabs[0]
+      ?? null
     return {
       tabs: restoredTabs,
-      activePath: active?.path ?? null,
+      activeId: active?.id ?? null,
       expanded: session.expanded,
       fileQuery: session.fileQuery,
       contentUsesFileFilter: session.contentUsesFileFilter
@@ -278,7 +324,7 @@ function App(): JSX.Element {
       const restoredSession = await loadStoredSession(openedVault.root)
       setVault(openedVault)
       setTabs(restoredSession?.tabs ?? [])
-      setActivePath(restoredSession?.activePath ?? null)
+      setActiveId(restoredSession?.activeId ?? null)
       setExpanded(new Set(restoredSession?.expanded ?? []))
       setFileQuery(restoredSession?.fileQuery ?? '')
       setContentUsesFileFilter(restoredSession?.contentUsesFileFilter ?? false)
@@ -319,20 +365,26 @@ function App(): JSX.Element {
   useEffect(() => {
     if (!vault) return
     writeStoredSession(vault.root, {
-      openPaths: tabs.map((tab) => tab.path),
+      openTabs: tabs.map((tab) => ({ path: tab.path, mode: tab.mode })),
+      activeId,
       activePath,
       expanded: [...expanded],
       fileQuery,
       contentUsesFileFilter
     })
-  }, [activePath, contentUsesFileFilter, expanded, fileQuery, tabs, vault])
+  }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, tabs, vault])
 
   const openNote = useCallback(async (path: string, offset: number | null = null) => {
-    const existing = tabs.find((tab) => tab.path === path)
+    const existing = tabs.find((tab) => tab.id === tabId(path, 'markdown'))
     if (existing) {
-      setActivePath(path)
+      setActiveId(existing.id)
       setJumpOffset(offset)
       return
+    }
+    const conflicting = tabs.find((tab) => tab.path === path && tab.mode !== 'markdown' && tab.body !== tab.savedBody)
+    if (conflicting) {
+      const proceed = window.confirm(`${path} is modified in Track mode. Save or close it before opening Markdown mode?`)
+      if (!proceed) return
     }
     setBusy(true)
     setError(null)
@@ -341,14 +393,17 @@ function App(): JSX.Element {
       setTabs((prev) => [
         ...prev,
         {
+          id: tabId(note.path, 'markdown'),
           path: note.path,
+          mode: 'markdown',
           body: note.body,
           savedBody: note.body,
+          bodyVersion: 0,
           updatedAt: note.updatedAt,
           size: note.size
         }
       ])
-      setActivePath(note.path)
+      setActiveId(tabId(note.path, 'markdown'))
       setJumpOffset(offset)
     } catch (err) {
       setError(String(err))
@@ -356,6 +411,58 @@ function App(): JSX.Element {
       setBusy(false)
     }
   }, [tabs])
+
+  const openTrackNote = useCallback(async (path: string) => {
+    const existing = tabs.find((tab) => tab.id === tabId(path, 'track'))
+    if (existing) {
+      setActiveId(existing.id)
+      return
+    }
+    const markdownTab = tabs.find((tab) => tab.path === path && tab.mode === 'markdown')
+    if (markdownTab && profile.closeMarkdownBeforeTrack) {
+      const closeMarkdown = window.confirm(`${path} is already open in Markdown mode. Close that tab before opening Track mode?`)
+      if (closeMarkdown) {
+        const dirtyMarkdown = markdownTab.body !== markdownTab.savedBody
+        const canClose = !dirtyMarkdown || window.confirm(`Close ${markdownTab.path} with unsaved changes?`)
+        if (canClose) {
+          setTabs((prev) => {
+            const index = prev.findIndex((tab) => tab.id === markdownTab.id)
+            const next = prev.filter((tab) => tab.id !== markdownTab.id)
+            if (activeId === markdownTab.id) {
+              const replacement = next[Math.min(index, next.length - 1)] ?? null
+              setActiveId(replacement?.id ?? null)
+            }
+            return next
+          })
+        }
+      }
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      const note = await invoke<NoteContent>('read_note', { path })
+      const trackState = await loadOrCreateTrackState(note.path, note.body)
+      setTabs((prev) => [
+        ...prev,
+        {
+          id: tabId(note.path, 'track'),
+          path: note.path,
+          mode: 'track',
+          body: note.body,
+          savedBody: note.body,
+          bodyVersion: 0,
+          updatedAt: note.updatedAt,
+          size: note.size,
+          trackState
+        }
+      ])
+      setActiveId(tabId(note.path, 'track'))
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }, [activeId, profile.closeMarkdownBeforeTrack, tabs])
 
   const openSearchMatch = useCallback((match: ContentMatch) => {
     const query = contentQuery.trim()
@@ -369,14 +476,35 @@ function App(): JSX.Element {
     setBusy(true)
     setError(null)
     try {
+      if (activeTab.mode === 'track') {
+        const disk = await invoke<NoteContent>('read_note', { path: activeTab.path })
+        if (disk.body !== activeTab.savedBody) {
+          const candidate = await invoke<NoteContent>('write_track_merge_candidate', {
+            path: activeTab.path,
+            body: requestedBody
+          })
+          if (activeTab.trackState) {
+            await invoke('save_track_state', { path: activeTab.path, trackState: activeTab.trackState })
+          }
+          setTouchedPaths((prev) => new Set([...prev, candidate.path]))
+          await refreshTree()
+          setError(`Disk changed for ${activeTab.path}. Wrote Track output to ${candidate.path} for diff/merge.`)
+          return
+        }
+      }
       const saved = await invoke<NoteContent>('save_note', {
         path: activeTab.path,
         body: requestedBody
       })
+      if (activeTab.mode === 'track' && activeTab.trackState) {
+        await invoke('save_track_state', { path: activeTab.path, trackState: activeTab.trackState })
+      }
       setTabs((prev) =>
         prev.map((tab) =>
-          tab.path === saved.path
+          tab.id === activeTab.id
             ? {
+                ...tab,
+                id: activeTab.id,
                 path: saved.path,
                 body: tab.body === requestedBody ? saved.body : tab.body,
                 savedBody: saved.body,
@@ -398,14 +526,33 @@ function App(): JSX.Element {
 
   const saveTab = useCallback(async (tab: OpenTab) => {
     const requestedBody = tab.body
+    if (tab.mode === 'track') {
+      const disk = await invoke<NoteContent>('read_note', { path: tab.path })
+      if (disk.body !== tab.savedBody) {
+        const candidate = await invoke<NoteContent>('write_track_merge_candidate', {
+          path: tab.path,
+          body: requestedBody
+        })
+        if (tab.trackState) {
+          await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
+        }
+        setTouchedPaths((prev) => new Set([...prev, candidate.path]))
+        await refreshTree()
+        setError(`Disk changed for ${tab.path}. Wrote Track output to ${candidate.path} for diff/merge.`)
+        return
+      }
+    }
     const saved = await invoke<NoteContent>('save_note', {
       path: tab.path,
       body: requestedBody
     })
+    if (tab.mode === 'track' && tab.trackState) {
+      await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
+    }
     setTabs((prev) =>
       prev.map((item) =>
-        item.path === saved.path
-          ? {
+        item.id === tab.id
+            ? {
               ...item,
               body: item.body === requestedBody ? saved.body : item.body,
               savedBody: saved.body,
@@ -443,10 +590,27 @@ function App(): JSX.Element {
     const paths = new Set(touchedPathsRef.current)
 
     for (const tab of dirtyTabs) {
+      if (tab.mode === 'track') {
+        const disk = await invoke<NoteContent>('read_note', { path: tab.path })
+        if (disk.body !== tab.savedBody) {
+          const candidate = await invoke<NoteContent>('write_track_merge_candidate', {
+            path: tab.path,
+            body: tab.body
+          })
+          if (tab.trackState) {
+            await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
+          }
+          paths.add(candidate.path)
+          continue
+        }
+      }
       const saved = await invoke<NoteContent>('save_note', {
         path: tab.path,
         body: tab.body
       })
+      if (tab.mode === 'track' && tab.trackState) {
+        await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
+      }
       paths.add(saved.path)
     }
 
@@ -463,16 +627,19 @@ function App(): JSX.Element {
     try {
       const note = await invoke<NoteContent>('create_note', { path, body: '' })
       setTabs((prev) => [
-        ...prev.filter((tab) => tab.path !== note.path),
+        ...prev.filter((tab) => tab.id !== tabId(note.path, 'markdown')),
         {
+          id: tabId(note.path, 'markdown'),
           path: note.path,
+          mode: 'markdown',
           body: note.body,
           savedBody: note.body,
+          bodyVersion: 0,
           updatedAt: note.updatedAt,
           size: note.size
         }
       ])
-      setActivePath(note.path)
+      setActiveId(tabId(note.path, 'markdown'))
       setJumpOffset(0)
       await refreshTree()
     } catch (err) {
@@ -509,23 +676,30 @@ function App(): JSX.Element {
         prev.map((tab) =>
           tab.path === oldPath
             ? {
+                ...tab,
+                id: tabId(note.path, tab.mode),
                 path: note.path,
                 body: note.body,
                 savedBody: note.body,
+                bodyVersion: tab.bodyVersion + 1,
                 updatedAt: note.updatedAt,
-                size: note.size
+                size: note.size,
+                trackState: tab.trackState ? { ...tab.trackState, path: note.path } : undefined
               }
             : tab
         )
       )
-      if (activePath === oldPath) setActivePath(note.path)
+      setActiveId((current) => {
+        const activeTab = tabs.find((tab) => tab.id === current)
+        return activeTab?.path === oldPath ? tabId(note.path, activeTab.mode) : current
+      })
       await refreshTree()
     } catch (err) {
       setError(String(err))
     } finally {
       setBusy(false)
     }
-  }, [activePath, refreshTree])
+  }, [activePath, refreshTree, tabs])
 
   const deleteNoteAction = useCallback(async (path: string) => {
     const tab = tabs.find((tab) => tab.path === path)
@@ -544,7 +718,7 @@ function App(): JSX.Element {
         const next = prev.filter((tab) => tab.path !== path)
         if (activePath === path) {
           const replacement = next[Math.min(index, next.length - 1)] ?? null
-          setActivePath(replacement?.path ?? null)
+          setActiveId(replacement?.id ?? null)
         }
         return next
       })
@@ -566,12 +740,20 @@ function App(): JSX.Element {
       setTabs((prev) =>
         prev.map((tab) =>
           tab.path.startsWith(`${oldPath}/`)
-            ? { ...tab, path: `${nextPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/${tab.path.slice(oldPath.length + 1)}` }
+            ? {
+                ...tab,
+                path: `${nextPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/${tab.path.slice(oldPath.length + 1)}`,
+                id: tabId(`${nextPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/${tab.path.slice(oldPath.length + 1)}`, tab.mode),
+                trackState: tab.trackState
+                  ? { ...tab.trackState, path: `${nextPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/${tab.path.slice(oldPath.length + 1)}` }
+                  : undefined
+              }
             : tab
         )
       )
       if (activePath?.startsWith(`${oldPath}/`)) {
-        setActivePath(`${nextPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/${activePath.slice(oldPath.length + 1)}`)
+        const currentMode = activeTab?.mode ?? 'markdown'
+        setActiveId(tabId(`${nextPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/${activePath.slice(oldPath.length + 1)}`, currentMode))
       }
       await refreshTree()
     } catch (err) {
@@ -579,7 +761,7 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [activePath, refreshTree])
+  }, [activePath, activeTab?.mode, refreshTree])
 
   const deleteFolderAction = useCallback(async (path: string) => {
     const affectedDirty = tabs.some((tab) => tab.path.startsWith(`${path}/`) && tab.body !== tab.savedBody)
@@ -594,7 +776,7 @@ function App(): JSX.Element {
     try {
       await invoke('delete_folder', { path })
       setTabs((prev) => prev.filter((tab) => !tab.path.startsWith(`${path}/`)))
-      if (activePath?.startsWith(`${path}/`)) setActivePath(null)
+      if (activePath?.startsWith(`${path}/`)) setActiveId(null)
       await refreshTree()
     } catch (err) {
       setError(String(err))
@@ -603,30 +785,44 @@ function App(): JSX.Element {
     }
   }, [activePath, refreshTree, tabs])
 
-  const closeTab = useCallback((path: string) => {
-    const closing = tabs.find((tab) => tab.path === path)
+  const closeTab = useCallback((id: string) => {
+    const closing = tabs.find((tab) => tab.id === id)
     if (closing && closing.body !== closing.savedBody) {
-      const proceed = window.confirm(`Close ${path} with unsaved changes?`)
+      const proceed = window.confirm(`Close ${closing.path} with unsaved changes?`)
       if (!proceed) return
     }
     setTabs((prev) => {
-      const index = prev.findIndex((tab) => tab.path === path)
-      const next = prev.filter((tab) => tab.path !== path)
-      if (activePath === path) {
+      const index = prev.findIndex((tab) => tab.id === id)
+      const next = prev.filter((tab) => tab.id !== id)
+      if (activeId === id) {
         const replacement = next[Math.min(index, next.length - 1)] ?? null
-        setActivePath(replacement?.path ?? null)
+        setActiveId(replacement?.id ?? null)
       }
       return next
     })
-  }, [activePath, tabs])
+  }, [activeId, tabs])
 
-  const updateTabBody = useCallback((path: string, body: string) => {
+  const updateTabBody = useCallback((id: string, body: string) => {
     setTabs((prev) =>
       prev.map((tab) =>
-        tab.path === path
+        tab.id === id
           ? {
               ...tab,
-              body
+              body,
+              bodyVersion: body === tab.body ? tab.bodyVersion : tab.bodyVersion + 1
+            }
+          : tab
+      )
+    )
+  }, [])
+
+  const updateTrackState = useCallback((id: string, trackState: TrackState) => {
+    setTabs((prev) =>
+      prev.map((tab) =>
+        tab.id === id
+          ? {
+              ...tab,
+              trackState
             }
           : tab
       )
@@ -688,28 +884,28 @@ function App(): JSX.Element {
       }
 
       if (key === 'w') {
-        if (!activePath) return
+        if (!activeId) return
         event.preventDefault()
-        closeTab(activePath)
+        closeTab(activeId)
         return
       }
 
       if (key === 'tab' || key === 'pagedown' || key === ']') {
-        if (tabs.length <= 1 || !activePath) return
+        if (tabs.length <= 1 || !activeId) return
         event.preventDefault()
-        selectAdjacentTab(tabs, activePath, event.shiftKey ? -1 : 1, setActivePath)
+        selectAdjacentTab(tabs, activeId, event.shiftKey ? -1 : 1, setActiveId)
         return
       }
 
       if (key === 'pageup' || key === '[') {
-        if (tabs.length <= 1 || !activePath) return
+        if (tabs.length <= 1 || !activeId) return
         event.preventDefault()
-        selectAdjacentTab(tabs, activePath, -1, setActivePath)
+        selectAdjacentTab(tabs, activeId, -1, setActiveId)
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activePath, closeTab, saveActive, tabs])
+  }, [activeId, closeTab, saveActive, tabs])
 
   useEffect(() => {
     setSearchRevealedFolders(new Set())
@@ -758,7 +954,7 @@ function App(): JSX.Element {
   }, [contentQuery, contentUsesFileFilter, filteredFilePaths, vault])
 
   useEffect(() => {
-    if (!vault || !activePath || !showBacklinks) {
+    if (!vault || !activePath || !isMarkdownPath(activePath) || !showBacklinks) {
       setBacklinks([])
       setLoadingBacklinks(false)
       return
@@ -790,9 +986,59 @@ function App(): JSX.Element {
   const totalFiles = useMemo(() => countFiles(tree), [tree])
   const allFilePaths = useMemo(() => collectFilePaths(tree), [tree])
   const previewHtml = useMemo(
-    () => renderMarkdownPreview(activeTab?.body ?? '', allFilePaths),
-    [activeTab?.body, allFilePaths]
+    () => ({
+      html: renderMarkdownPreview(activeTab?.body ?? '', allFilePaths),
+      version: activeTab?.bodyVersion ?? 0
+    }),
+    [activeTab?.body, activeTab?.bodyVersion, allFilePaths]
   )
+  const activeIsTypst = !!activeTab && isTypstPath(activeTab.path)
+
+  useEffect(() => {
+    if (!showPreview || !activeTab || !isTypstPath(activeTab.path)) return
+    const tab = activeTab
+    let cancelled = false
+    setTypstPreview((current) => ({
+      tabId: tab.id,
+      src: current?.tabId === tab.id ? current.src : null,
+      loading: true,
+      error: null
+    }))
+    const timer = window.setTimeout(async () => {
+      try {
+        const preview = await invoke<TypstPreview>('compile_typst_preview', {
+          path: tab.path,
+          body: tab.body
+        })
+        if (cancelled) return
+        const blob = new Blob([new Uint8Array(preview.bytes)], { type: 'application/pdf' })
+        setTypstPreview({
+          tabId: tab.id,
+          src: URL.createObjectURL(blob),
+          loading: false,
+          error: null
+        })
+      } catch (err) {
+        if (cancelled) return
+        setTypstPreview({
+          tabId: tab.id,
+          src: null,
+          loading: false,
+          error: String(err)
+        })
+      }
+    }, 650)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [activeTab?.body, activeTab?.id, activeTab?.path, showPreview])
+
+  useEffect(() => {
+    const src = typstPreview?.src
+    if (!src?.startsWith('blob:')) return
+    return () => URL.revokeObjectURL(src)
+  }, [typstPreview?.src])
 
   return (
     <main className="app-shell">
@@ -884,6 +1130,7 @@ function App(): JSX.Element {
                 })
               }}
               onOpen={(path) => void openNote(path)}
+              onOpenTrack={(path) => void openTrackNote(path)}
               onRenameFile={(path) => void renameNoteAction(path)}
               onDeleteFile={(path) => void deleteNoteAction(path)}
               onRenameFolder={(path) => void renameFolderAction(path)}
@@ -896,7 +1143,7 @@ function App(): JSX.Element {
         </section>
 
         <footer className="sidebar-footer">
-          <span>{totalFiles} Markdown files</span>
+          <span>{totalFiles} files</span>
           {busy && <span>Working...</span>}
         </footer>
       </aside>
@@ -922,7 +1169,7 @@ function App(): JSX.Element {
               type="button"
               className={showBacklinks ? 'secondary-button active' : 'secondary-button'}
               onClick={() => setShowBacklinks((current) => !current)}
-              disabled={!activeTab}
+              disabled={!activeTab || !isMarkdownPath(activeTab.path)}
             >
               Backlinks
             </button>
@@ -941,31 +1188,47 @@ function App(): JSX.Element {
 
         <TabStrip
           tabs={tabs}
-          activePath={activePath}
-          onSelect={setActivePath}
+          activeId={activeId}
+          onSelect={setActiveId}
           onClose={closeTab}
         />
 
         {error && <div className="error-banner">{error}</div>}
 
         <div className={(showPreview || showBacklinks) && activeTab ? 'workspace split' : 'workspace'}>
-          <MarkdownEditor
-            activePath={activePath}
-            body={activeTab?.body ?? ''}
-            disabled={!activeTab}
-            notePaths={allFilePaths}
-            searchHighlight={searchHighlight?.path === activePath ? searchHighlight : null}
-            jumpOffset={jumpOffset}
-            onJumpHandled={() => setJumpOffset(null)}
-            onChange={updateTabBody}
-            onOpenWikiLink={(path) => void openNote(path)}
-          />
-          {showPreview && activeTab && (
-            <MarkdownPreview
-              html={previewHtml}
+          {activeTab?.mode === 'track' && activeTab.trackState ? (
+            <TrackChangesEditor
+              tabId={activeTab.id}
+              path={activeTab.path}
+              state={activeTab.trackState}
+              onMarkdownChange={updateTabBody}
+              onTrackStateChange={updateTrackState}
+            />
+          ) : (
+            <MarkdownEditor
+              activePath={activeTab?.id ?? null}
+              filePath={activeTab?.path ?? null}
+              body={activeTab?.body ?? ''}
+              disabled={!activeTab}
               notePaths={allFilePaths}
+              searchHighlight={searchHighlight?.path === activePath ? searchHighlight : null}
+              jumpOffset={jumpOffset}
+              onJumpHandled={() => setJumpOffset(null)}
+              onChange={updateTabBody}
               onOpenWikiLink={(path) => void openNote(path)}
             />
+          )}
+          {showPreview && activeTab && (
+            activeIsTypst ? (
+              <TypstPreviewPane preview={typstPreview?.tabId === activeTab.id ? typstPreview : null} />
+            ) : (
+              <MarkdownPreview
+                html={previewHtml.html}
+                version={previewHtml.version}
+                notePaths={allFilePaths}
+                onOpenWikiLink={(path) => void openNote(path)}
+              />
+            )
           )}
           {showBacklinks && activeTab && (
             <BacklinksPanel
@@ -1169,16 +1432,19 @@ function escapeHtml(value: string): string {
 
 function MarkdownPreview({
   html,
+  version,
   notePaths,
   onOpenWikiLink
 }: {
   html: string
+  version: number
   notePaths: string[]
   onOpenWikiLink: (path: string) => void
 }): JSX.Element {
   return (
     <article
       className="preview-pane"
+      data-body-version={version}
       onClick={(event) => {
         const target = event.target as HTMLElement | null
         const link = target?.closest('a.preview-wiki') as HTMLAnchorElement | null
@@ -1194,8 +1460,29 @@ function MarkdownPreview({
   )
 }
 
+function TypstPreviewPane({ preview }: { preview: TypstPreviewState | null }): JSX.Element {
+  return (
+    <article className="preview-pane typst-preview-pane">
+      {preview?.loading && <div className="preview-status">Compiling...</div>}
+      {preview?.error && <pre className="preview-error">{preview.error}</pre>}
+      {preview?.src && !preview.error && (
+        <iframe
+          key={preview.src}
+          className="typst-preview-frame"
+          src={preview.src}
+          title="Typst preview"
+        />
+      )}
+      {!preview?.loading && !preview?.error && !preview?.src && (
+        <div className="preview-status">No Typst preview yet.</div>
+      )}
+    </article>
+  )
+}
+
 function MarkdownEditor({
   activePath,
+  filePath,
   body,
   disabled,
   notePaths,
@@ -1206,6 +1493,7 @@ function MarkdownEditor({
   onOpenWikiLink
 }: {
   activePath: string | null
+  filePath: string | null
   body: string
   disabled: boolean
   notePaths: string[]
@@ -1254,10 +1542,10 @@ function MarkdownEditor({
 
     const extensions: Extension[] = [
       history({ minDepth: 10000, newGroupDelay: 500 }),
+      editorDocumentVersion,
       drawSelection(),
       lineNumbers(),
       highlightActiveLine(),
-      markdown(),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       noteMarkdownTools(notePathsRef, searchHighlightRef, onOpenWikiLinkRef),
       EditorView.lineWrapping,
@@ -1324,10 +1612,7 @@ function MarkdownEditor({
 
     const view = new EditorView({
       parent: host,
-      state: EditorState.create({
-        doc: body,
-        extensions
-      })
+      state: createEditorState(body, extensions, filePath)
     })
     viewRef.current = view
     return () => {
@@ -1369,7 +1654,7 @@ function MarkdownEditor({
 
     pathRef.current = activePath
     if (!activePath) {
-      view.setState(createEditorState('', baseExtensionsRef.current ?? []))
+      view.setState(createEditorState('', baseExtensionsRef.current ?? [], filePath))
       applyEditable(view, editableRef.current, false)
       return
     }
@@ -1388,10 +1673,10 @@ function MarkdownEditor({
       return
     }
 
-    view.setState(createEditorState(body, baseExtensionsRef.current ?? []))
+    view.setState(createEditorState(body, baseExtensionsRef.current ?? [], filePath))
     applyEditable(view, editableRef.current, true)
     view.scrollDOM.scrollTop = 0
-  }, [activePath, body])
+  }, [activePath, body, filePath])
 
   useEffect(() => {
     const view = viewRef.current
@@ -1428,12 +1713,12 @@ function noteMarkdownTools(
       decorations: DecorationSet
 
       constructor(view: EditorView) {
-        this.decorations = buildNoteDecorations(view, notePathsRef.current, searchHighlightRef.current)
+        this.decorations = buildVersionedNoteDecorations(view, notePathsRef.current, searchHighlightRef.current)
       }
 
       update(update: ViewUpdate) {
         if (update.docChanged || update.viewportChanged || update.transactions.length > 0) {
-          this.decorations = buildNoteDecorations(update.view, notePathsRef.current, searchHighlightRef.current)
+          this.decorations = buildVersionedNoteDecorations(update.view, notePathsRef.current, searchHighlightRef.current)
         }
       }
     },
@@ -1476,10 +1761,21 @@ function noteMarkdownTools(
   ]
 }
 
-function buildNoteDecorations(
+function buildVersionedNoteDecorations(
   view: EditorView,
   notePaths: string[],
   searchHighlight: SearchHighlight | null
+): DecorationSet {
+  const version = view.state.field(editorDocumentVersion)
+  const decorations = buildNoteDecorations(view, notePaths, searchHighlight, version)
+  return version === view.state.field(editorDocumentVersion) ? decorations : Decoration.none
+}
+
+function buildNoteDecorations(
+  view: EditorView,
+  notePaths: string[],
+  searchHighlight: SearchHighlight | null,
+  version: number
 ): DecorationSet {
   const ranges: Array<{ from: number; to: number; decoration: Decoration }> = []
   const doc = view.state.doc
@@ -1494,7 +1790,7 @@ function buildNoteDecorations(
       const blockTo = blockFrom + blockMatch[0].length
       blockMathRanges.push({ from: blockFrom, to: blockTo })
       ranges.push({ from: blockTo, to: blockTo, decoration: Decoration.widget({
-        widget: new MathPreviewWidget(blockMatch[1].trim(), true),
+        widget: new MathPreviewWidget(blockMatch[1].trim(), true, version),
         block: true,
         side: 1
       }) })
@@ -1534,7 +1830,7 @@ function buildNoteDecorations(
         const end = line.from + math.to
         if (!blockMathRanges.some((range) => start >= range.from && end <= range.to)) {
           ranges.push({ from: end, to: end, decoration: Decoration.widget({
-            widget: new MathPreviewWidget(math.source, false),
+            widget: new MathPreviewWidget(math.source, false, version),
             side: 1
           }) })
         }
@@ -1579,18 +1875,20 @@ function buildNoteDecorations(
 class MathPreviewWidget extends WidgetType {
   constructor(
     private readonly source: string,
-    private readonly displayMode: boolean
+    private readonly displayMode: boolean,
+    private readonly version: number
   ) {
     super()
   }
 
   eq(other: MathPreviewWidget): boolean {
-    return this.source === other.source && this.displayMode === other.displayMode
+    return this.source === other.source && this.displayMode === other.displayMode && this.version === other.version
   }
 
   toDOM(): HTMLElement {
     const element = document.createElement(this.displayMode ? 'div' : 'span')
     element.className = this.displayMode ? 'cm-math-preview block' : 'cm-math-preview inline'
+    element.dataset.editorVersion = String(this.version)
     try {
       element.innerHTML = katex.renderToString(this.source, {
         displayMode: this.displayMode,
@@ -1713,11 +2011,19 @@ function GitBadge({ git }: { git: GitInfo }): JSX.Element {
   )
 }
 
-function createEditorState(doc: string, extensions: Extension[]): EditorState {
+function createEditorState(doc: string, extensions: Extension[], path: string | null): EditorState {
   return EditorState.create({
     doc,
-    extensions
+    extensions: [editorLanguage(path), ...extensions]
   })
+}
+
+function editorLanguage(path: string | null): Extension {
+  return isTypstPath(path) ? typst() : markdown()
+}
+
+function isTypstPath(path: string | null): boolean {
+  return !!path && path.toLowerCase().endsWith('.typ')
 }
 
 function rememberEditorEcho(
@@ -1970,30 +2276,30 @@ function toggleMarkdownWrap(view: EditorView, marker: string): boolean {
 
 function TabStrip({
   tabs,
-  activePath,
+  activeId,
   onSelect,
   onClose
 }: {
   tabs: OpenTab[]
-  activePath: string | null
-  onSelect: (path: string) => void
-  onClose: (path: string) => void
+  activeId: string | null
+  onSelect: (id: string) => void
+  onClose: (id: string) => void
 }): JSX.Element | null {
   if (tabs.length === 0) return null
   return (
     <nav className="tab-strip" aria-label="Open files">
       {tabs.map((tab) => {
-        const active = tab.path === activePath
+        const active = tab.id === activeId
         const dirty = tab.body !== tab.savedBody
         return (
           <button
-            key={tab.path}
+            key={tab.id}
             type="button"
             className={active ? 'tab active' : 'tab'}
-            onClick={() => onSelect(tab.path)}
-            title={tab.path}
+            onClick={() => onSelect(tab.id)}
+            title={tab.mode === 'track' ? `${tab.path} - Track` : tab.path}
           >
-            <span className="tab-title">{basename(tab.path)}</span>
+            <span className="tab-title">{basename(tab.path)}{tab.mode === 'track' ? ' - Track' : ''}</span>
             {dirty && <span className="tab-dirty" aria-label="Modified" />}
             {tab.externalStatus && <span className="tab-external" aria-label={tab.externalStatus} />}
             <span
@@ -2003,13 +2309,13 @@ function TabStrip({
               aria-label={`Close ${tab.path}`}
               onClick={(event) => {
                 event.stopPropagation()
-                onClose(tab.path)
+                onClose(tab.id)
               }}
               onKeyDown={(event) => {
                 if (event.key !== 'Enter' && event.key !== ' ') return
                 event.preventDefault()
                 event.stopPropagation()
-                onClose(tab.path)
+                onClose(tab.id)
               }}
             >
               x
@@ -2027,6 +2333,7 @@ function FileTree({
   expanded,
   onToggle,
   onOpen,
+  onOpenTrack,
   onRenameFile,
   onDeleteFile,
   onRenameFolder,
@@ -2039,6 +2346,7 @@ function FileTree({
   expanded: Set<string>
   onToggle: (path: string) => void
   onOpen: (path: string) => void
+  onOpenTrack: (path: string) => void
   onRenameFile: (path: string) => void
   onDeleteFile: (path: string) => void
   onRenameFolder: (path: string) => void
@@ -2047,7 +2355,7 @@ function FileTree({
   depth?: number
 }): JSX.Element {
   if (entries.length === 0) {
-    return <div className="empty-list">No Markdown files</div>
+    return <div className="empty-list">No note files</div>
   }
 
   return (
@@ -2069,9 +2377,26 @@ function FileTree({
               title={entry.path}
             >
               <span className="tree-chevron">{isDir ? (isExpanded ? 'v' : '>') : ''}</span>
-              <span className="tree-icon">{isDir ? 'folder' : 'md'}</span>
+              <span className="tree-icon">{isDir ? 'folder' : fileIcon(entry.path)}</span>
               <span className="tree-name">{entry.name}</span>
               <span className="tree-actions">
+                <span
+                  role="button"
+                  tabIndex={0}
+                  title={isDir ? 'Open folder' : isMarkdownPath(entry.path) ? 'Open with Track Changes' : 'Track Changes is Markdown-only'}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    if (!isDir && isMarkdownPath(entry.path)) onOpenTrack(entry.path)
+                  }}
+                  onKeyDown={(event) => {
+                    if (isDir || !isMarkdownPath(entry.path) || (event.key !== 'Enter' && event.key !== ' ')) return
+                    event.preventDefault()
+                    event.stopPropagation()
+                    onOpenTrack(entry.path)
+                  }}
+                >
+                  track
+                </span>
                 <span
                   role="button"
                   tabIndex={0}
@@ -2120,6 +2445,7 @@ function FileTree({
                   expanded={expanded}
                   onToggle={onToggle}
                   onOpen={onOpen}
+                  onOpenTrack={onOpenTrack}
                   onRenameFile={onRenameFile}
                   onDeleteFile={onDeleteFile}
                   onRenameFolder={onRenameFolder}
@@ -2243,16 +2569,34 @@ function basename(path: string): string {
   return normalized.split('/').filter(Boolean).pop() ?? path
 }
 
+function isMarkdownPath(path: string): boolean {
+  return /\.(md|markdown)$/i.test(path)
+}
+
+function fileIcon(path: string): string {
+  return isTypstPath(path) ? 'typ' : 'md'
+}
+
 function selectAdjacentTab(
   tabs: OpenTab[],
-  activePath: string,
+  activeId: string,
   direction: -1 | 1,
-  select: (path: string) => void
+  select: (id: string) => void
 ): void {
-  const index = tabs.findIndex((tab) => tab.path === activePath)
+  const index = tabs.findIndex((tab) => tab.id === activeId)
   if (index < 0) return
   const nextIndex = (index + direction + tabs.length) % tabs.length
-  select(tabs[nextIndex].path)
+  select(tabs[nextIndex].id)
+}
+
+function tabId(path: string, mode: EditorMode): string {
+  return `${mode}:${path}`
+}
+
+async function loadOrCreateTrackState(path: string, body: string): Promise<TrackState> {
+  const saved = await invoke<TrackState | null>('read_track_state', { path })
+  if (saved) return saved
+  return createInitialTrackState(path, markdownToTiptap(body))
 }
 
 function sessionKey(root: string): string {
@@ -2264,10 +2608,17 @@ function readStoredSession(root: string): StoredSession | null {
     const raw = localStorage.getItem(sessionKey(root))
     if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<StoredSession>
+    const openTabs = Array.isArray(parsed.openTabs)
+      ? parsed.openTabs.filter((tab): tab is { path: string; mode: EditorMode } =>
+          typeof tab?.path === 'string' && (tab.mode === 'markdown' || tab.mode === 'track')
+        )
+      : []
     return {
+      openTabs,
       openPaths: Array.isArray(parsed.openPaths)
         ? parsed.openPaths.filter((path): path is string => typeof path === 'string')
         : [],
+      activeId: typeof parsed.activeId === 'string' ? parsed.activeId : null,
       activePath: typeof parsed.activePath === 'string' ? parsed.activePath : null,
       expanded: Array.isArray(parsed.expanded)
         ? parsed.expanded.filter((path): path is string => typeof path === 'string')

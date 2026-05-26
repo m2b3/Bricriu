@@ -5,3 +5,4 @@ src-tauri/gen/
 *.log
 /tiptap-track-demo/
 /tiptap-track-demo/**
+codemirror-lang-typst/
