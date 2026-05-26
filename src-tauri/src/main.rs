@@ -11,19 +11,36 @@ use tauri::Emitter;
 use std::os::windows::process::CommandExt;
 use std::{
     cmp::Ordering,
-    collections::BTreeMap,
+    collections::{hash_map::DefaultHasher, BTreeMap},
     env,
     fs,
+    hash::{Hash, Hasher},
     path::{Component, Path, PathBuf},
-    process::Command,
+    process::{Child, Command, Stdio},
     sync::Mutex,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Default)]
 struct AppState {
     vault_root: Mutex<Option<PathBuf>>,
     watcher: Mutex<Option<RecommendedWatcher>>,
+    typst_preview: Mutex<Option<TypstPreviewSession>>,
+}
+
+struct TypstPreviewSession {
+    root: PathBuf,
+    input: PathBuf,
+    output: PathBuf,
+    child: Child,
+}
+
+impl Drop for TypstPreviewSession {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = fs::remove_file(&self.input);
+    }
 }
 
 #[derive(Serialize)]
@@ -155,6 +172,10 @@ fn open_vault(state: tauri::State<AppState>, path: String) -> Result<VaultInfo, 
         .vault_root
         .lock()
         .map_err(|_| "Vault state is locked.")? = Some(root);
+    *state
+        .typst_preview
+        .lock()
+        .map_err(|_| "Typst preview state is locked.")? = None;
 
     Ok(VaultInfo {
         root: root_string,
@@ -343,21 +364,16 @@ fn compile_typst_preview(
         .ok_or_else(|| "Could not resolve Typst source folder.".to_string())?;
     fs::create_dir_all(source_dir).map_err(|err| format!("Could not create source folder: {err}"))?;
 
-    let temp_name = format!(
-        ".notesproject-typst-preview-{}.typ",
-        preview_timestamp()
-    );
-    let temp_source = source_dir.join(temp_name);
-    fs::write(&temp_source, body).map_err(|err| format!("Could not write Typst preview source: {err}"))?;
-
     let output = typst_preview_path(&root, &normalized)?;
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent).map_err(|err| format!("Could not create Typst preview folder: {err}"))?;
     }
 
-    let compile_result = run_typst_compile(&root, &temp_source, &output);
-    let _ = fs::remove_file(&temp_source);
-    compile_result?;
+    let temp_source = typst_preview_source_path(source_dir, &normalized);
+    let _ = fs::remove_file(&output);
+    fs::write(&temp_source, body).map_err(|err| format!("Could not write Typst preview source: {err}"))?;
+    ensure_typst_watch(&state, &root, &temp_source, &output)?;
+    wait_for_typst_output(&output, Duration::from_secs(8))?;
 
     let metadata = fs::metadata(&output).map_err(|err| format!("Could not read Typst preview: {err}"))?;
     let bytes = fs::read(&output).map_err(|err| format!("Could not read Typst preview: {err}"))?;
@@ -753,6 +769,15 @@ fn typst_preview_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn typst_preview_source_path(source_dir: &Path, rel: &str) -> PathBuf {
+    let mut hasher = DefaultHasher::new();
+    rel.hash(&mut hasher);
+    source_dir.join(format!(
+        ".notesproject-typst-preview-{:016x}.typ",
+        hasher.finish()
+    ))
+}
+
 fn track_sidecar_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let normalized = normalize_relative_input(rel)?;
     let mut path = track_root(root);
@@ -1001,28 +1026,80 @@ fn is_note_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn run_typst_compile(root: &Path, input: &Path, output: &Path) -> Result<(), String> {
+fn ensure_typst_watch(
+    state: &tauri::State<AppState>,
+    root: &Path,
+    input: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    let mut session = state
+        .typst_preview
+        .lock()
+        .map_err(|_| "Typst preview state is locked.")?;
+
+    let needs_new_session = match session.as_mut() {
+        Some(current)
+            if current.root == root && current.input == input && current.output == output =>
+        {
+            match current.child.try_wait() {
+                Ok(None) => false,
+                Ok(Some(_)) | Err(_) => true,
+            }
+        }
+        Some(_) | None => true,
+    };
+
+    if needs_new_session {
+        *session = None;
+        *session = Some(start_typst_watch(root, input, output)?);
+    }
+
+    Ok(())
+}
+
+fn start_typst_watch(root: &Path, input: &Path, output: &Path) -> Result<TypstPreviewSession, String> {
     let typst = resolve_typst_executable().unwrap_or_else(|| PathBuf::from("typst"));
     let mut command = Command::new(typst);
-    command.current_dir(root).arg("compile").arg(input).arg(output);
+    command
+        .current_dir(root)
+        .arg("watch")
+        .arg(input)
+        .arg(output)
+        .arg("--root")
+        .arg(root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    let result = command
-        .output()
+    let child = command
+        .spawn()
         .map_err(|err| format!("Could not run Typst. Make sure typst is installed and on PATH. {err}"))?;
-    if result.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&result.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&result.stdout).trim().to_string();
-    let detail = if stderr.is_empty() { stdout } else { stderr };
-    if detail.is_empty() {
-        Err("Typst compile failed.".to_string())
-    } else {
-        Err(format!("Typst compile failed. {detail}"))
+    Ok(TypstPreviewSession {
+        root: root.to_path_buf(),
+        input: input.to_path_buf(),
+        output: output.to_path_buf(),
+        child,
+    })
+}
+
+fn wait_for_typst_output(
+    output: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let started = Instant::now();
+    loop {
+        if let Ok(metadata) = fs::metadata(output) {
+            if metadata.len() > 0 {
+                return Ok(());
+            }
+        }
+        if started.elapsed() >= timeout {
+            return Err("Typst preview did not finish compiling in time.".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(40));
     }
 }
 
@@ -1406,13 +1483,6 @@ fn checkpoint_timestamp() -> String {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs().to_string())
-        .unwrap_or_else(|_| "unknown-time".to_string())
-}
-
-fn preview_timestamp() -> String {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_micros().to_string())
         .unwrap_or_else(|_| "unknown-time".to_string())
 }
 
