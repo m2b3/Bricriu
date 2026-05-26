@@ -23,7 +23,7 @@ use tauri::Emitter;
 use typst::{
     diag::{FileError, FileResult},
     foundations::Bytes,
-    layout::PagedDocument,
+    layout::{Abs, PagedDocument},
     syntax::{FileId, Source},
 };
 use typst_as_lib::{
@@ -128,7 +128,7 @@ struct NoteContent {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TypstPreview {
-    bytes: Vec<u8>,
+    svg: String,
     updated_at: u64,
 }
 
@@ -410,17 +410,17 @@ fn compile_typst_preview(
     let embedded_result = compile_typst_embedded(&state, &root, &normalized, &body);
     let embedded_error = embedded_result.as_ref().err().cloned();
     match embedded_result {
-        Ok(bytes) => {
+        Ok(svg) => {
             *state
                 .typst_preview
                 .lock()
                 .map_err(|_| "Typst preview state is locked.")? = None;
-            fs::write(&output, &bytes)
+            fs::write(&output, svg.as_bytes())
                 .map_err(|err| format!("Could not write Typst preview: {err}"))?;
             let metadata = fs::metadata(&output)
                 .map_err(|err| format!("Could not read Typst preview: {err}"))?;
             return Ok(TypstPreview {
-                bytes,
+                svg,
                 updated_at: modified_ms(&metadata),
             });
         }
@@ -445,8 +445,9 @@ fn compile_typst_preview(
     let metadata =
         fs::metadata(&output).map_err(|err| format!("Could not read Typst preview: {err}"))?;
     let bytes = fs::read(&output).map_err(|err| format!("Could not read Typst preview: {err}"))?;
+    let svg = fallback_pdf_embed_svg(&bytes);
     Ok(TypstPreview {
-        bytes,
+        svg,
         updated_at: modified_ms(&metadata),
     })
 }
@@ -1146,7 +1147,7 @@ fn compile_typst_embedded(
     root: &Path,
     rel: &str,
     body: &str,
-) -> Result<Vec<u8>, String> {
+) -> Result<String, String> {
     let mut session = state
         .typst_embedded
         .lock()
@@ -1174,8 +1175,18 @@ fn compile_typst_embedded(
         .compile(rel)
         .output
         .map_err(|err| format!("Typst compile failed. {err}"))?;
-    typst_pdf::pdf(&doc, &Default::default())
-        .map_err(|err| format!("Typst PDF export failed. {err:?}"))
+    Ok(typst_svg::svg_merged(&doc, Abs::pt(12.0)))
+}
+
+fn fallback_pdf_embed_svg(pdf: &[u8]) -> String {
+    format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 180" role="img" aria-label="Typst preview fallback">
+<rect width="720" height="180" fill="#f8fafc"/>
+<text x="32" y="64" font-family="system-ui, sans-serif" font-size="22" fill="#111827">SVG preview unavailable.</text>
+<text x="32" y="104" font-family="system-ui, sans-serif" font-size="15" fill="#4b5563">Compiled PDF fallback is ready ({} bytes), but live preview needs the embedded SVG path.</text>
+</svg>"##,
+        pdf.len()
+    )
 }
 
 fn start_embedded_typst(root: &Path) -> EmbeddedTypstSession {

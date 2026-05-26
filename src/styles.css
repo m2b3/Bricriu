@@ -835,24 +835,40 @@ input:focus {
 }
 
 .typst-preview-pane {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
   padding: 0;
+  position: relative;
 }
 
 .typst-preview-frame {
-  width: 100%;
-  min-height: 0;
-  flex: 1 1 auto;
-  border: 0;
+  min-height: 100%;
   background: #fff;
+  padding: 24px;
+}
+
+.typst-preview-frame svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.16);
 }
 
 .preview-status {
   color: var(--muted);
   font-size: 13px;
   padding: 16px;
+}
+
+.typst-preview-status {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  z-index: 2;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 253, 250, 0.92);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.12);
+  padding: 5px 10px;
 }
 
 .preview-error {

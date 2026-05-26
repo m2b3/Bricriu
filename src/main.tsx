@@ -88,7 +88,7 @@ type NoteContent = {
 }
 
 type TypstPreview = {
-  bytes: number[]
+  svg: string
   updatedAt: number
 }
 
@@ -114,7 +114,7 @@ type SearchHighlight = {
 
 type TypstPreviewState = {
   tabId: string
-  src: string | null
+  svg: string | null
   loading: boolean
   error: string | null
 }
@@ -1000,7 +1000,7 @@ function App(): JSX.Element {
     let cancelled = false
     setTypstPreview((current) => ({
       tabId: tab.id,
-      src: current?.tabId === tab.id ? current.src : null,
+      svg: current?.tabId === tab.id ? current.svg : null,
       loading: true,
       error: null
     }))
@@ -1011,10 +1011,9 @@ function App(): JSX.Element {
           body: tab.body
         })
         if (cancelled) return
-        const blob = new Blob([new Uint8Array(preview.bytes)], { type: 'application/pdf' })
         setTypstPreview({
           tabId: tab.id,
-          src: URL.createObjectURL(blob),
+          svg: preview.svg,
           loading: false,
           error: null
         })
@@ -1022,7 +1021,7 @@ function App(): JSX.Element {
         if (cancelled) return
         setTypstPreview({
           tabId: tab.id,
-          src: null,
+          svg: null,
           loading: false,
           error: String(err)
         })
@@ -1033,12 +1032,6 @@ function App(): JSX.Element {
       window.clearTimeout(timer)
     }
   }, [activeTab?.body, activeTab?.id, activeTab?.path, showPreview])
-
-  useEffect(() => {
-    const src = typstPreview?.src
-    if (!src?.startsWith('blob:')) return
-    return () => URL.revokeObjectURL(src)
-  }, [typstPreview?.src])
 
   return (
     <main className="app-shell">
@@ -1463,17 +1456,20 @@ function MarkdownPreview({
 function TypstPreviewPane({ preview }: { preview: TypstPreviewState | null }): JSX.Element {
   return (
     <article className="preview-pane typst-preview-pane">
-      {preview?.loading && <div className="preview-status">Compiling...</div>}
       {preview?.error && <pre className="preview-error">{preview.error}</pre>}
-      {preview?.src && !preview.error && (
-        <iframe
-          key={preview.src}
+      {preview?.svg && !preview.error && (
+        <div
           className="typst-preview-frame"
-          src={preview.src}
-          title="Typst preview"
+          dangerouslySetInnerHTML={{ __html: preview.svg }}
         />
       )}
-      {!preview?.loading && !preview?.error && !preview?.src && (
+      {preview?.loading && preview.svg && !preview.error && (
+        <div className="preview-status typst-preview-status">Updating...</div>
+      )}
+      {preview?.loading && !preview.svg && !preview.error && (
+        <div className="preview-status">Compiling...</div>
+      )}
+      {!preview?.loading && !preview?.error && !preview?.svg && (
         <div className="preview-status">No Typst preview yet.</div>
       )}
     </article>
