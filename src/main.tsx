@@ -8,6 +8,7 @@ import {
   Compartment,
   RangeSetBuilder,
   EditorState,
+  EditorSelection,
   type Extension
 } from '@codemirror/state'
 import { autocompletion, type CompletionContext } from '@codemirror/autocomplete'
@@ -27,7 +28,8 @@ import {
   defaultKeymap,
   history,
   historyKeymap,
-  indentWithTab
+  indentWithTab,
+  redo
 } from '@codemirror/commands'
 import { markdown } from '@codemirror/lang-markdown'
 import {
@@ -363,19 +365,20 @@ function App(): JSX.Element {
 
   const saveActive = useCallback(async () => {
     if (!activeTab) return
+    const requestedBody = activeTab.body
     setBusy(true)
     setError(null)
     try {
       const saved = await invoke<NoteContent>('save_note', {
         path: activeTab.path,
-        body: activeTab.body
+        body: requestedBody
       })
       setTabs((prev) =>
         prev.map((tab) =>
           tab.path === saved.path
             ? {
                 path: saved.path,
-                body: saved.body,
+                body: tab.body === requestedBody ? saved.body : tab.body,
                 savedBody: saved.body,
                 updatedAt: saved.updatedAt,
                 size: saved.size,
@@ -394,16 +397,17 @@ function App(): JSX.Element {
   }, [activeTab, refreshTree])
 
   const saveTab = useCallback(async (tab: OpenTab) => {
+    const requestedBody = tab.body
     const saved = await invoke<NoteContent>('save_note', {
       path: tab.path,
-      body: tab.body
+      body: requestedBody
     })
     setTabs((prev) =>
       prev.map((item) =>
         item.path === saved.path
           ? {
               ...item,
-              body: saved.body,
+              body: item.body === requestedBody ? saved.body : item.body,
               savedBody: saved.body,
               updatedAt: saved.updatedAt,
               size: saved.size,
@@ -1039,6 +1043,12 @@ function htmlPlaceholder(html: string, snippets: string[]): string {
   return `@@NZHTML${index}@@`
 }
 
+function pushPreviewBlockHtml(out: string[], html: string, snippets: string[]): void {
+  if (out.length > 0 && out[out.length - 1].trim() !== '') out.push('')
+  out.push(htmlPlaceholder(html, snippets))
+  out.push('')
+}
+
 function preprocessPreviewMarkdown(markdown: string, notePaths: string[], snippets: string[]): string {
   const lines = markdown.replace(/\r\n/g, '\n').split('\n')
   const out: string[] = []
@@ -1048,7 +1058,7 @@ function preprocessPreviewMarkdown(markdown: string, notePaths: string[], snippe
   for (const line of lines) {
     if (line.trim() === '$$') {
       if (inDisplayMath) {
-        out.push(htmlPlaceholder(renderDisplayMath(displayMath.join('\n')), snippets))
+        pushPreviewBlockHtml(out, renderDisplayMath(displayMath.join('\n')), snippets)
         displayMath = []
         inDisplayMath = false
       } else {
@@ -1210,6 +1220,7 @@ function MarkdownEditor({
   const editableRef = useRef<Compartment | null>(null)
   const pathRef = useRef<string | null>(null)
   const statesRef = useRef<Map<string, EditorState>>(new Map())
+  const pendingEditorEchoesRef = useRef<Map<string, string[]>>(new Map())
   const baseExtensionsRef = useRef<Extension[] | null>(null)
   const onChangeRef = useRef(onChange)
   const notePathsRef = useRef(notePaths)
@@ -1264,10 +1275,10 @@ function MarkdownEditor({
           caretColor: '#226b52'
         },
         '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
-          backgroundColor: '#b9d7f2'
+          backgroundColor: '#d7c6ff'
         },
         '.cm-content ::selection': {
-          backgroundColor: '#b9d7f2'
+          backgroundColor: '#d7c6ff'
         },
         '.cm-gutters': {
           backgroundColor: '#f6f4ef',
@@ -1286,6 +1297,13 @@ function MarkdownEditor({
         }
       }),
       keymap.of([
+        { key: 'Tab', run: indentMarkdownList },
+        { key: 'Shift-Tab', run: outdentMarkdownList },
+        { key: 'Enter', run: continueMarkdownList },
+        { key: 'Ctrl-b', run: toggleMarkdownBold, preventDefault: true },
+        { key: 'Ctrl-i', run: toggleMarkdownItalic, preventDefault: true },
+        { key: 'Ctrl-y', run: redo, preventDefault: true },
+        { key: 'Ctrl-Shift-z', run: redo, preventDefault: true },
         indentWithTab,
         ...defaultKeymap,
         ...historyKeymap,
@@ -1297,7 +1315,9 @@ function MarkdownEditor({
         if (update.transactions.some((tr) => tr.annotation(programmaticChange))) return
         const path = pathRef.current
         if (!path) return
-        onChangeRef.current(path, update.state.doc.toString())
+        const nextBody = update.state.doc.toString()
+        rememberEditorEcho(pendingEditorEchoesRef.current, path, nextBody)
+        onChangeRef.current(path, nextBody)
       })
     ]
     baseExtensionsRef.current = extensions
@@ -1337,6 +1357,7 @@ function MarkdownEditor({
     if (previousPath === activePath) {
       const current = view.state.doc.toString()
       if (current === body) return
+      if (activePath && consumeEditorEcho(pendingEditorEchoesRef.current, activePath, body)) return
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: body },
         annotations: programmaticChange.of(true),
@@ -1699,6 +1720,34 @@ function createEditorState(doc: string, extensions: Extension[]): EditorState {
   })
 }
 
+function rememberEditorEcho(
+  pendingEchoes: Map<string, string[]>,
+  path: string,
+  body: string
+): void {
+  const echoes = pendingEchoes.get(path) ?? []
+  echoes.push(body)
+  pendingEchoes.set(path, echoes.slice(-20))
+}
+
+function consumeEditorEcho(
+  pendingEchoes: Map<string, string[]>,
+  path: string,
+  body: string
+): boolean {
+  const echoes = pendingEchoes.get(path)
+  if (!echoes) return false
+  const index = echoes.indexOf(body)
+  if (index < 0) return false
+  const remaining = echoes.slice(index + 1)
+  if (remaining.length > 0) {
+    pendingEchoes.set(path, remaining)
+  } else {
+    pendingEchoes.delete(path)
+  }
+  return true
+}
+
 function applyEditable(
   view: EditorView,
   editable: Compartment | null,
@@ -1708,6 +1757,215 @@ function applyEditable(
   view.dispatch({
     effects: editable.reconfigure(EditorView.editable.of(enabled))
   })
+}
+
+function indentMarkdownList(view: EditorView): boolean {
+  const range = view.state.selection.main
+  if (!range.empty) return false
+  const line = view.state.doc.lineAt(range.head)
+  const match = parseMarkdownListLine(line.text)
+  if (!match) return false
+
+  view.dispatch({
+    changes: { from: line.from, insert: '    ' },
+    selection: EditorSelection.cursor(range.head + 4),
+    userEvent: 'input.indent'
+  })
+  renumberMarkdownOrderedLists(view)
+  return true
+}
+
+function outdentMarkdownList(view: EditorView): boolean {
+  const range = view.state.selection.main
+  if (!range.empty) return false
+  const line = view.state.doc.lineAt(range.head)
+  const match = parseMarkdownListLine(line.text)
+  if (!match || match.indent.length === 0) return false
+
+  const remove = Math.min(4, match.indent.length)
+  view.dispatch({
+    changes: { from: line.from, to: line.from + remove },
+    selection: EditorSelection.cursor(Math.max(line.from, range.head - remove)),
+    userEvent: 'input.dedent'
+  })
+  renumberMarkdownOrderedLists(view)
+  return true
+}
+
+function continueMarkdownList(view: EditorView): boolean {
+  const range = view.state.selection.main
+  if (!range.empty) return false
+  const line = view.state.doc.lineAt(range.head)
+  const match = parseMarkdownListLine(line.text)
+  if (!match) return false
+
+  if (match.body.trim().length === 0) {
+    view.dispatch({
+      changes: { from: line.from, to: line.from + match.markerEnd },
+      selection: EditorSelection.cursor(line.from),
+      userEvent: 'input'
+    })
+    renumberMarkdownOrderedLists(view)
+    return true
+  }
+
+  const nextMarker = match.ordered
+    ? `${match.indent}${match.number + 1}${match.delimiter} `
+    : `${match.indent}${match.bullet} `
+  view.dispatch({
+    changes: { from: range.head, insert: `\n${nextMarker}` },
+    selection: EditorSelection.cursor(range.head + nextMarker.length + 1),
+    userEvent: 'input'
+  })
+  renumberMarkdownOrderedLists(view)
+  return true
+}
+
+type MarkdownListLine = {
+  indent: string
+  markerEnd: number
+  body: string
+} & (
+  | {
+      ordered: true
+      number: number
+      delimiter: string
+      bullet?: never
+    }
+  | {
+      ordered: false
+      bullet: string
+      number?: never
+      delimiter?: never
+    }
+)
+
+function parseMarkdownListLine(text: string): MarkdownListLine | null {
+  const ordered = text.match(/^(\s*)(\d+)([.)])(\s+)(.*)$/)
+  if (ordered) {
+    return {
+      ordered: true,
+      indent: ordered[1],
+      number: Number.parseInt(ordered[2], 10),
+      delimiter: ordered[3],
+      markerEnd: ordered[1].length + ordered[2].length + ordered[3].length + ordered[4].length,
+      body: ordered[5]
+    }
+  }
+
+  const bullet = text.match(/^(\s*)([-+*])(\s+)(.*)$/)
+  if (bullet) {
+    return {
+      ordered: false,
+      indent: bullet[1],
+      bullet: bullet[2],
+      markerEnd: bullet[1].length + bullet[2].length + bullet[3].length,
+      body: bullet[4]
+    }
+  }
+
+  return null
+}
+
+function renumberMarkdownOrderedLists(view: EditorView): void {
+  const changes: Array<{ from: number; to: number; insert: string }> = []
+  const counters = new Map<number, number>()
+  let previousWasList = false
+
+  for (let lineNumber = 1; lineNumber <= view.state.doc.lines; lineNumber += 1) {
+    const line = view.state.doc.line(lineNumber)
+    const match = line.text.match(/^(\s*)(\d+)([.)])(\s+)/)
+    const unordered = line.text.match(/^\s*[-+*]\s+/)
+    if (!match) {
+      if (!unordered && line.text.trim().length === 0) {
+        counters.clear()
+        previousWasList = false
+      } else if (!unordered && !previousWasList) {
+        counters.clear()
+      }
+      previousWasList = !!unordered
+      continue
+    }
+
+    const level = Math.floor(indentColumn(match[1]) / 4)
+    for (const key of [...counters.keys()]) {
+      if (key > level) counters.delete(key)
+    }
+    const next = (counters.get(level) ?? 0) + 1
+    counters.set(level, next)
+    const current = Number.parseInt(match[2], 10)
+    if (current !== next) {
+      const from = line.from + match[1].length
+      changes.push({
+        from,
+        to: from + match[2].length,
+        insert: String(next)
+      })
+    }
+    previousWasList = true
+  }
+
+  if (changes.length > 0) {
+    view.dispatch({
+      changes,
+      userEvent: 'input'
+    })
+  }
+}
+
+function indentColumn(indent: string): number {
+  return [...indent].reduce((total, char) => total + (char === '\t' ? 4 : 1), 0)
+}
+
+function toggleMarkdownBold(view: EditorView): boolean {
+  return toggleMarkdownWrap(view, '**')
+}
+
+function toggleMarkdownItalic(view: EditorView): boolean {
+  return toggleMarkdownWrap(view, '*')
+}
+
+function toggleMarkdownWrap(view: EditorView, marker: string): boolean {
+  const transaction = view.state.changeByRange((range) => {
+    if (range.empty) {
+      return {
+        changes: { from: range.head, insert: `${marker}${marker}` },
+        range: EditorSelection.cursor(range.head + marker.length)
+      }
+    }
+
+    const selected = view.state.doc.sliceString(range.from, range.to)
+    const beforeFrom = Math.max(0, range.from - marker.length)
+    const afterTo = Math.min(view.state.doc.length, range.to + marker.length)
+    const before = view.state.doc.sliceString(beforeFrom, range.from)
+    const after = view.state.doc.sliceString(range.to, afterTo)
+
+    if (before === marker && after === marker) {
+      return {
+        changes: [
+          { from: afterTo - marker.length, to: afterTo },
+          { from: beforeFrom, to: range.from }
+        ],
+        range: EditorSelection.range(beforeFrom, range.to - marker.length)
+      }
+    }
+
+    return {
+      changes: [
+        { from: range.from, insert: marker },
+        { from: range.to, insert: marker }
+      ],
+      range: EditorSelection.range(
+        range.from + marker.length,
+        range.to + marker.length
+      )
+    }
+  })
+  view.dispatch({
+    ...transaction,
+    userEvent: 'input'
+  })
+  return true
 }
 
 function TabStrip({

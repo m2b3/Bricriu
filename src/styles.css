@@ -596,6 +596,19 @@ input:focus {
   height: 100%;
 }
 
+.cm-editor .cm-selectionLayer {
+  z-index: 3;
+}
+
+.cm-editor .cm-selectionBackground,
+.cm-editor.cm-focused .cm-selectionBackground {
+  background-color: #b68cff !important;
+}
+
+.cm-editor .cm-content ::selection {
+  background-color: #b68cff !important;
+}
+
 .cm-editor .cm-panels {
   border-color: var(--line);
   background: var(--panel-2);
@@ -965,6 +978,22 @@ input:focus {
 .preview-pane table {
   width: 100%;
   border-collapse: collapse;
+}
+
+.preview-pane ol {
+  list-style-type: decimal;
+}
+
+.preview-pane ol ol {
+  list-style-type: lower-alpha;
+}
+
+.preview-pane ol ol ol {
+  list-style-type: lower-roman;
+}
+
+.preview-pane ol ol ol ol {
+  list-style-type: decimal;
 }
 
 .preview-pane th,
