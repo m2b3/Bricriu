@@ -320,22 +320,10 @@ fn checkpoint_inuse(state: tauri::State<AppState>, paths: Vec<String>) -> Result
 
     let mut staged_any = false;
     for path in paths {
-        let normalized = normalize_relative_input(&path)?;
-        let abs = resolve_safe(&root, &normalized)?;
-        if abs.exists() {
-            run_git_checked(
-                &root,
-                &["add", "--", &normalized],
-                "Could not stage changed file.",
-            )?;
-        } else {
-            run_git_checked(
-                &root,
-                &["rm", "--ignore-unmatch", "--", &normalized],
-                "Could not stage deleted file.",
-            )?;
+        for normalized in checkpoint_paths_for(&root, &path)? {
+            stage_checkpoint_path(&root, &normalized)?;
+            staged_any = true;
         }
-        staged_any = true;
     }
 
     if !staged_any || run_git_status(&root, &["diff", "--cached", "--quiet"])?.success {
@@ -820,6 +808,36 @@ fn normalize_relative_input(path: &str) -> Result<String, String> {
     Ok(normalized)
 }
 
+fn checkpoint_paths_for(root: &Path, rel: &str) -> Result<Vec<String>, String> {
+    let normalized = normalize_relative_input(rel)?;
+    let mut paths = vec![normalized.clone()];
+    if is_markdown_relative_path(&normalized) {
+        let sidecar = to_posix_relative(root, &track_sidecar_path(root, &normalized)?)?;
+        if !paths.contains(&sidecar) {
+            paths.push(sidecar);
+        }
+    }
+    Ok(paths)
+}
+
+fn stage_checkpoint_path(root: &Path, rel: &str) -> Result<(), String> {
+    let abs = resolve_safe(root, rel)?;
+    if abs.exists() {
+        run_git_checked(
+            root,
+            &["add", "--", rel],
+            "Could not stage changed file.",
+        )?;
+    } else {
+        run_git_checked(
+            root,
+            &["rm", "--ignore-unmatch", "--", rel],
+            "Could not stage deleted file.",
+        )?;
+    }
+    Ok(())
+}
+
 fn merge_candidate_path(path: &str) -> Result<String, String> {
     let normalized = normalize_note_path(path)?;
     let marker = ".track-merge";
@@ -1100,6 +1118,12 @@ fn is_markdown_file(path: &Path) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
         .unwrap_or(false)
+}
+
+fn is_markdown_relative_path(path: &str) -> bool {
+    path.to_lowercase()
+        .ends_with(".md")
+        || path.to_lowercase().ends_with(".markdown")
 }
 
 fn is_typst_file(path: &Path) -> bool {

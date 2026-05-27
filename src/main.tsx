@@ -172,6 +172,7 @@ type StoredSession = {
   activeId?: string | null
   activePath?: string | null
   expanded: string[]
+  pinnedPaths?: string[]
   fileQuery: string
   contentUsesFileFilter: boolean
 }
@@ -180,6 +181,7 @@ type RestoredSession = {
   tabs: OpenTab[]
   activeId: string | null
   expanded: string[]
+  pinnedPaths: string[]
   fileQuery: string
   contentUsesFileFilter: boolean
 }
@@ -196,6 +198,7 @@ function App(): JSX.Element {
   const [contentMatches, setContentMatches] = useState<ContentMatch[]>([])
   const [backlinks, setBacklinks] = useState<BacklinkMatch[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  const [pinnedPaths, setPinnedPaths] = useState<Set<string>>(() => new Set())
   const [searchRevealedFolders, setSearchRevealedFolders] = useState<Set<string>>(() => new Set())
   const [jumpOffset, setJumpOffset] = useState<number | null>(null)
   const [searchHighlight, setSearchHighlight] = useState<SearchHighlight | null>(null)
@@ -283,6 +286,7 @@ function App(): JSX.Element {
       tabs: restoredTabs,
       activeId: active?.id ?? null,
       expanded: session.expanded,
+      pinnedPaths: session.pinnedPaths ?? [],
       fileQuery: session.fileQuery,
       contentUsesFileFilter: session.contentUsesFileFilter
     }
@@ -333,6 +337,7 @@ function App(): JSX.Element {
       setTabs(restoredSession?.tabs ?? [])
       setActiveId(restoredSession?.activeId ?? null)
       setExpanded(new Set(restoredSession?.expanded ?? []))
+      setPinnedPaths(new Set(restoredSession?.pinnedPaths ?? []))
       setFileQuery(restoredSession?.fileQuery ?? '')
       setContentUsesFileFilter(restoredSession?.contentUsesFileFilter ?? false)
       setContentMatches([])
@@ -376,10 +381,11 @@ function App(): JSX.Element {
       activeId,
       activePath,
       expanded: [...expanded],
+      pinnedPaths: [...pinnedPaths],
       fileQuery,
       contentUsesFileFilter
     })
-  }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, tabs, vault])
+  }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, pinnedPaths, tabs, vault])
 
   const openNote = useCallback(async (path: string, offset: number | null = null) => {
     const existing = tabs.find((tab) => tab.id === tabId(path, 'markdown'))
@@ -578,9 +584,15 @@ function App(): JSX.Element {
     if (!vault?.git.isRepo || vault.git.currentBranch !== 'inuse') return
     const paths = [...touchedPaths]
     if (paths.length === 0) return
+    const touched = new Set(paths)
     setBusy(true)
     setError(null)
     try {
+      for (const tab of tabs) {
+        if (tab.mode === 'track' && tab.trackState && touched.has(tab.path)) {
+          await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
+        }
+      }
       const git = await invoke<GitInfo>('checkpoint_inuse', { paths })
       setVault((prev) => (prev ? { ...prev, git } : prev))
       setTouchedPaths(new Set())
@@ -589,7 +601,7 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [touchedPaths, vault])
+  }, [tabs, touchedPaths, vault])
 
   const finalizeBeforeClose = useCallback(async () => {
     const vault = vaultRef.current
@@ -834,6 +846,16 @@ function App(): JSX.Element {
           : tab
       )
     )
+    setTouchedPaths((prev) => new Set([...prev, trackState.path]))
+  }, [])
+
+  const togglePinnedPath = useCallback((path: string) => {
+    setPinnedPaths((prev) => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
   }, [])
 
   useEffect(() => {
@@ -1132,6 +1154,7 @@ function App(): JSX.Element {
               entries={filteredTree}
               activePath={activePath}
               expanded={visibleExpanded}
+              pinnedPaths={pinnedPaths}
               onToggle={(path) => {
                 setExpanded((prev) => {
                   const next = new Set(prev)
@@ -1142,6 +1165,7 @@ function App(): JSX.Element {
               }}
               onOpen={(path) => void openNote(path)}
               onOpenTrack={(path) => void openTrackNote(path)}
+              onTogglePin={togglePinnedPath}
               onRenameFile={(path) => void renameNoteAction(path)}
               onDeleteFile={(path) => void deleteNoteAction(path)}
               onRenameFolder={(path) => void renameFolderAction(path)}
@@ -2374,9 +2398,11 @@ function FileTree({
   entries,
   activePath,
   expanded,
+  pinnedPaths,
   onToggle,
   onOpen,
   onOpenTrack,
+  onTogglePin,
   onRenameFile,
   onDeleteFile,
   onRenameFolder,
@@ -2387,9 +2413,11 @@ function FileTree({
   entries: TreeEntry[]
   activePath: string | null
   expanded: Set<string>
+  pinnedPaths: Set<string>
   onToggle: (path: string) => void
   onOpen: (path: string) => void
   onOpenTrack: (path: string) => void
+  onTogglePin: (path: string) => void
   onRenameFile: (path: string) => void
   onDeleteFile: (path: string) => void
   onRenameFolder: (path: string) => void
@@ -2403,15 +2431,16 @@ function FileTree({
 
   return (
     <div className="tree-list">
-      {entries.map((entry) => {
+      {orderTreeEntries(entries, pinnedPaths).map((entry) => {
         const isDir = entry.kind === 'dir'
         const isExpanded = expanded.has(entry.path)
         const active = activePath === entry.path
+        const pinned = pinnedPaths.has(entry.path)
         return (
           <div key={entry.path}>
             <button
               type="button"
-              className={active ? 'tree-row active' : 'tree-row'}
+              className={`${active ? 'tree-row active' : 'tree-row'}${pinned ? ' pinned' : ''}`}
               style={{ paddingLeft: 10 + depth * 16 }}
               onClick={() => {
                 if (isDir) onToggle(entry.path)
@@ -2423,6 +2452,25 @@ function FileTree({
               <span className="tree-icon">{isDir ? 'folder' : fileIcon(entry.path)}</span>
               <span className="tree-name">{entry.name}</span>
               <span className="tree-actions">
+                {!isDir && (
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    title={pinned ? 'Unpin note' : 'Pin note'}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onTogglePin(entry.path)
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter' && event.key !== ' ') return
+                      event.preventDefault()
+                      event.stopPropagation()
+                      onTogglePin(entry.path)
+                    }}
+                  >
+                    {pinned ? 'unpin' : 'pin'}
+                  </span>
+                )}
                 <span
                   role="button"
                   tabIndex={0}
@@ -2486,9 +2534,11 @@ function FileTree({
                   entries={entry.children}
                   activePath={activePath}
                   expanded={expanded}
+                  pinnedPaths={pinnedPaths}
                   onToggle={onToggle}
                   onOpen={onOpen}
                   onOpenTrack={onOpenTrack}
+                  onTogglePin={onTogglePin}
                   onRenameFile={onRenameFile}
                   onDeleteFile={onDeleteFile}
                   onRenameFolder={onRenameFolder}
@@ -2586,6 +2636,15 @@ function filterTree(
   })
 }
 
+function orderTreeEntries(entries: TreeEntry[], pinnedPaths: Set<string>): TreeEntry[] {
+  return [...entries].sort((left, right) => {
+    const leftPinned = left.kind === 'file' && pinnedPaths.has(left.path)
+    const rightPinned = right.kind === 'file' && pinnedPaths.has(right.path)
+    if (leftPinned !== rightPinned) return leftPinned ? -1 : 1
+    return 0
+  })
+}
+
 function countFiles(entries: TreeEntry[]): number {
   return entries.reduce((total, entry) => {
     if (entry.kind === 'file') return total + 1
@@ -2665,6 +2724,9 @@ function readStoredSession(root: string): StoredSession | null {
       activePath: typeof parsed.activePath === 'string' ? parsed.activePath : null,
       expanded: Array.isArray(parsed.expanded)
         ? parsed.expanded.filter((path): path is string => typeof path === 'string')
+        : [],
+      pinnedPaths: Array.isArray(parsed.pinnedPaths)
+        ? parsed.pinnedPaths.filter((path): path is string => typeof path === 'string')
         : [],
       fileQuery: typeof parsed.fileQuery === 'string' ? parsed.fileQuery : '',
       contentUsesFileFilter: parsed.contentUsesFileFilter === true

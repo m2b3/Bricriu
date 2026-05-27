@@ -305,6 +305,10 @@ input:focus {
   color: #123d2e;
 }
 
+.tree-row.pinned {
+  color: #183f34;
+}
+
 .tree-reveal-row {
   color: var(--accent-2);
   font-size: 12px;
