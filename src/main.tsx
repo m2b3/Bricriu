@@ -12,7 +12,7 @@ import {
   StateField,
   type Extension
 } from '@codemirror/state'
-import { autocompletion, type CompletionContext } from '@codemirror/autocomplete'
+import { autocompletion, startCompletion, type CompletionContext } from '@codemirror/autocomplete'
 import {
   Decoration,
   type DecorationSet,
@@ -88,9 +88,12 @@ type NoteContent = {
 }
 
 type TypstPreview = {
-  svg: string
+  format: TypstPreviewFormat
+  content: string
   updatedAt: number
 }
+
+type TypstPreviewFormat = 'svg' | 'html'
 
 type ContentMatch = {
   path: string
@@ -114,7 +117,8 @@ type SearchHighlight = {
 
 type TypstPreviewState = {
   tabId: string
-  svg: string | null
+  format: TypstPreviewFormat
+  content: string | null
   loading: boolean
   error: string | null
 }
@@ -151,12 +155,14 @@ const SESSION_KEY_PREFIX = 'notesproject:session:'
 type AppProfile = {
   autosaveDelayMs: number
   checkpointIntervalMs: number
+  typstPreviewDebounceMs: number
   closeMarkdownBeforeTrack: boolean
 }
 
 const DEFAULT_PROFILE: AppProfile = {
   autosaveDelayMs: 5000,
   checkpointIntervalMs: 3 * 60 * 1000,
+  typstPreviewDebounceMs: 250,
   closeMarkdownBeforeTrack: true
 }
 
@@ -199,6 +205,7 @@ function App(): JSX.Element {
   const [touchedPaths, setTouchedPaths] = useState<Set<string>>(() => new Set())
   const [profile, setProfile] = useState<AppProfile>(DEFAULT_PROFILE)
   const [showPreview, setShowPreview] = useState(false)
+  const [typstPreviewFormat, setTypstPreviewFormat] = useState<TypstPreviewFormat>('svg')
   const [showBacklinks, setShowBacklinks] = useState(false)
   const [loadingBacklinks, setLoadingBacklinks] = useState(false)
   const [typstPreview, setTypstPreview] = useState<TypstPreviewState | null>(null)
@@ -1000,7 +1007,8 @@ function App(): JSX.Element {
     let cancelled = false
     setTypstPreview((current) => ({
       tabId: tab.id,
-      svg: current?.tabId === tab.id ? current.svg : null,
+      format: typstPreviewFormat,
+      content: current?.tabId === tab.id && current.format === typstPreviewFormat ? current.content : null,
       loading: true,
       error: null
     }))
@@ -1008,12 +1016,14 @@ function App(): JSX.Element {
       try {
         const preview = await invoke<TypstPreview>('compile_typst_preview', {
           path: tab.path,
-          body: tab.body
+          body: tab.body,
+          format: typstPreviewFormat
         })
         if (cancelled) return
         setTypstPreview({
           tabId: tab.id,
-          svg: preview.svg,
+          format: preview.format,
+          content: preview.content,
           loading: false,
           error: null
         })
@@ -1021,17 +1031,25 @@ function App(): JSX.Element {
         if (cancelled) return
         setTypstPreview({
           tabId: tab.id,
-          svg: null,
+          format: typstPreviewFormat,
+          content: null,
           loading: false,
           error: String(err)
         })
       }
-    }, 650)
+    }, profile.typstPreviewDebounceMs)
     return () => {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [activeTab?.body, activeTab?.id, activeTab?.path, showPreview])
+  }, [
+    activeTab?.body,
+    activeTab?.id,
+    activeTab?.path,
+    profile.typstPreviewDebounceMs,
+    showPreview,
+    typstPreviewFormat
+  ])
 
   return (
     <main className="app-shell">
@@ -1158,6 +1176,15 @@ function App(): JSX.Element {
             >
               Preview
             </button>
+            {activeIsTypst && showPreview && (
+              <button
+                type="button"
+                className={typstPreviewFormat === 'html' ? 'secondary-button active' : 'secondary-button'}
+                onClick={() => setTypstPreviewFormat((current) => current === 'html' ? 'svg' : 'html')}
+              >
+                HTML
+              </button>
+            )}
             <button
               type="button"
               className={showBacklinks ? 'secondary-button active' : 'secondary-button'}
@@ -1454,22 +1481,29 @@ function MarkdownPreview({
 }
 
 function TypstPreviewPane({ preview }: { preview: TypstPreviewState | null }): JSX.Element {
+  const hasContent = !!preview?.content
   return (
     <article className="preview-pane typst-preview-pane">
       {preview?.error && <pre className="preview-error">{preview.error}</pre>}
-      {preview?.svg && !preview.error && (
-        <div
-          className="typst-preview-frame"
-          dangerouslySetInnerHTML={{ __html: preview.svg }}
-        />
+      {preview?.content && !preview.error && (
+        preview.format === 'html' ? (
+          <iframe
+            className="typst-html-preview-frame"
+            sandbox=""
+            title="Typst HTML preview"
+            srcDoc={preview.content}
+          />
+        ) : (
+          <div
+            className="typst-preview-frame"
+            dangerouslySetInnerHTML={{ __html: preview.content }}
+          />
+        )
       )}
-      {preview?.loading && preview.svg && !preview.error && (
-        <div className="preview-status typst-preview-status">Updating...</div>
-      )}
-      {preview?.loading && !preview.svg && !preview.error && (
+      {preview?.loading && !hasContent && !preview.error && (
         <div className="preview-status">Compiling...</div>
       )}
-      {!preview?.loading && !preview?.error && !preview?.svg && (
+      {!preview?.loading && !preview?.error && !hasContent && (
         <div className="preview-status">No Typst preview yet.</div>
       )}
     </article>
@@ -1584,6 +1618,10 @@ function MarkdownEditor({
         { key: 'Tab', run: indentMarkdownList },
         { key: 'Shift-Tab', run: outdentMarkdownList },
         { key: 'Enter', run: continueMarkdownList },
+        {
+          key: 'Ctrl-Space',
+          run: startCompletion
+        },
         { key: 'Ctrl-b', run: toggleMarkdownBold, preventDefault: true },
         { key: 'Ctrl-i', run: toggleMarkdownItalic, preventDefault: true },
         { key: 'Ctrl-y', run: redo, preventDefault: true },
@@ -1728,6 +1766,14 @@ function noteMarkdownTools(
     autocompletion({
       override: [wikiCompletionSource(notePathsRef)],
       activateOnTyping: true
+    }),
+    EditorView.updateListener.of((update) => {
+      if (!update.docChanged || !update.state.selection.main.empty) return
+      const position = update.state.selection.main.head
+      if (position < 2) return
+      if (update.state.doc.sliceString(position - 2, position) === '[[') {
+        window.setTimeout(() => startCompletion(update.view), 0)
+      }
     }),
     EditorView.domEventHandlers({
       mousedown(event, view) {
@@ -1909,20 +1955,21 @@ function wikiCompletionSource(notePathsRef: React.MutableRefObject<string[]>) {
     const before = context.matchBefore(/\[\[[^\]\n]*/)
     if (!before) return null
     const query = before.text.slice(2).trim().toLowerCase()
+    const notePaths = notePathsRef.current
     if (!context.explicit && before.text === '') return null
-    const options = notePathsRef.current
+    const options = notePaths
       .filter((path) => wikiSearchText(path).includes(query))
       .slice(0, 40)
       .map((path) => ({
         label: wikiLabel(path),
         detail: path,
         type: 'file',
-        apply: `[[${wikiLabel(path)}]]`
+        apply: `${wikiLabel(path)}]]`
       }))
     return {
-      from: before.from,
+      from: before.from + 2,
       options,
-      validFor: /^\[\[[^\]\n]*$/
+      validFor: /^[^\]\n]*$/
     }
   }
 }

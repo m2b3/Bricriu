@@ -2848,6 +2848,7 @@ dependencies = [
  "tauri-build",
  "typst",
  "typst-as-lib",
+ "typst-html",
  "typst-pdf",
  "typst-svg",
 ]

@@ -128,8 +128,16 @@ struct NoteContent {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TypstPreview {
-    svg: String,
+    format: TypstPreviewFormat,
+    content: String,
     updated_at: u64,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum TypstPreviewFormat {
+    Svg,
+    Html,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -172,6 +180,8 @@ struct VaultChangeEvent {
 struct AppProfile {
     autosave_delay_ms: u64,
     checkpoint_interval_ms: u64,
+    #[serde(default = "default_typst_preview_debounce_ms")]
+    typst_preview_debounce_ms: u64,
     #[serde(default = "default_close_markdown_before_track")]
     close_markdown_before_track: bool,
 }
@@ -388,7 +398,9 @@ fn compile_typst_preview(
     state: tauri::State<AppState>,
     path: String,
     body: String,
+    format: Option<TypstPreviewFormat>,
 ) -> Result<TypstPreview, String> {
+    let format = format.unwrap_or(TypstPreviewFormat::Svg);
     let root = current_root(&state)?;
     let normalized = normalize_relative_input(&path)?;
     let source_abs = resolve_safe(&root, &normalized)?;
@@ -407,24 +419,24 @@ fn compile_typst_preview(
             .map_err(|err| format!("Could not create Typst preview folder: {err}"))?;
     }
 
-    let embedded_result = compile_typst_embedded(&state, &root, &normalized, &body);
+    let embedded_result = compile_typst_embedded(&state, &root, &normalized, &body, format);
     let embedded_error = embedded_result.as_ref().err().cloned();
     match embedded_result {
-        Ok(svg) => {
+        Ok(content) => {
             *state
                 .typst_preview
                 .lock()
                 .map_err(|_| "Typst preview state is locked.")? = None;
-            fs::write(&output, svg.as_bytes())
-                .map_err(|err| format!("Could not write Typst preview: {err}"))?;
-            let metadata = fs::metadata(&output)
-                .map_err(|err| format!("Could not read Typst preview: {err}"))?;
             return Ok(TypstPreview {
-                svg,
-                updated_at: modified_ms(&metadata),
+                format,
+                content,
+                updated_at: now_ms(),
             });
         }
         Err(_) => {
+            if matches!(format, TypstPreviewFormat::Html) {
+                return Err(embedded_error.unwrap_or_else(|| "Typst HTML preview failed.".to_string()));
+            }
             // Fall back to the CLI watcher while the embedded resolver path matures.
         }
     }
@@ -445,9 +457,10 @@ fn compile_typst_preview(
     let metadata =
         fs::metadata(&output).map_err(|err| format!("Could not read Typst preview: {err}"))?;
     let bytes = fs::read(&output).map_err(|err| format!("Could not read Typst preview: {err}"))?;
-    let svg = fallback_pdf_embed_svg(&bytes);
+    let content = fallback_pdf_embed_svg(&bytes);
     Ok(TypstPreview {
-        svg,
+        format,
+        content,
         updated_at: modified_ms(&metadata),
     })
 }
@@ -1147,6 +1160,7 @@ fn compile_typst_embedded(
     root: &Path,
     rel: &str,
     body: &str,
+    format: TypstPreviewFormat,
 ) -> Result<String, String> {
     let mut session = state
         .typst_embedded
@@ -1170,12 +1184,24 @@ fn compile_typst_embedded(
         body: body.to_string(),
     });
 
-    let doc: PagedDocument = session
-        .engine
-        .compile(rel)
-        .output
-        .map_err(|err| format!("Typst compile failed. {err}"))?;
-    Ok(typst_svg::svg_merged(&doc, Abs::pt(12.0)))
+    match format {
+        TypstPreviewFormat::Svg => {
+            let doc: PagedDocument = session
+                .engine
+                .compile(rel)
+                .output
+                .map_err(|err| format!("Typst compile failed. {err}"))?;
+            Ok(typst_svg::svg_merged(&doc, Abs::pt(12.0)))
+        }
+        TypstPreviewFormat::Html => {
+            let doc: typst_html::HtmlDocument = session
+                .engine
+                .compile(rel)
+                .output
+                .map_err(|err| format!("Typst HTML compile failed. {err}"))?;
+            typst_html::html(&doc).map_err(|err| format!("Typst HTML export failed. {err:?}"))
+        }
+    }
 }
 
 fn fallback_pdf_embed_svg(pdf: &[u8]) -> String {
@@ -1428,6 +1454,13 @@ fn modified_ms(metadata: &fs::Metadata) -> u64 {
         .modified()
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
@@ -1704,6 +1737,7 @@ fn default_profile() -> AppProfile {
     AppProfile {
         autosave_delay_ms: 5_000,
         checkpoint_interval_ms: 3 * 60 * 1000,
+        typst_preview_debounce_ms: default_typst_preview_debounce_ms(),
         close_markdown_before_track: default_close_markdown_before_track(),
     }
 }
@@ -1712,8 +1746,13 @@ fn normalize_profile(profile: AppProfile) -> AppProfile {
     AppProfile {
         autosave_delay_ms: profile.autosave_delay_ms.clamp(1_000, 60_000),
         checkpoint_interval_ms: profile.checkpoint_interval_ms.clamp(60_000, 60 * 60 * 1000),
+        typst_preview_debounce_ms: profile.typst_preview_debounce_ms.clamp(50, 5_000),
         close_markdown_before_track: profile.close_markdown_before_track,
     }
+}
+
+fn default_typst_preview_debounce_ms() -> u64 {
+    250
 }
 
 fn default_close_markdown_before_track() -> bool {

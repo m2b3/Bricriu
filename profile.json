@@ -1,5 +1,6 @@
 {
   "autosaveDelayMs": 5000,
   "checkpointIntervalMs": 180000,
+  "typstPreviewDebounceMs": 250,
   "closeMarkdownBeforeTrack": true
 }
