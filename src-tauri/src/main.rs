@@ -180,6 +180,8 @@ struct VaultChangeEvent {
 struct AppProfile {
     autosave_delay_ms: u64,
     checkpoint_interval_ms: u64,
+    #[serde(default = "default_git_status_poll_interval_ms")]
+    git_status_poll_interval_ms: u64,
     #[serde(default = "default_typst_preview_debounce_ms")]
     typst_preview_debounce_ms: u64,
     #[serde(default = "default_close_markdown_before_track")]
@@ -337,6 +339,24 @@ fn checkpoint_inuse(state: tauri::State<AppState>, paths: Vec<String>) -> Result
         "Could not create checkpoint commit. Check Git user.name/user.email.",
     )?;
     inspect_git_info(&root, "Checkpoint committed.")
+}
+
+#[tauri::command]
+fn refresh_git_info(state: tauri::State<AppState>) -> Result<GitInfo, String> {
+    let root = current_root(&state)?;
+    if !git_available(&root)? {
+        return Ok(GitInfo {
+            is_repo: false,
+            current_branch: None,
+            inuse_branch: None,
+            status: GitStatus::GitUnavailable,
+            message: "Git is not available on PATH.".to_string(),
+        });
+    }
+    if !is_git_repo(&root)? {
+        return Ok(not_repo_git_info());
+    }
+    inspect_git_info(&root, "Git status refreshed.")
 }
 
 #[tauri::command]
@@ -1812,6 +1832,7 @@ fn default_profile() -> AppProfile {
     AppProfile {
         autosave_delay_ms: 5_000,
         checkpoint_interval_ms: 3 * 60 * 1000,
+        git_status_poll_interval_ms: default_git_status_poll_interval_ms(),
         typst_preview_debounce_ms: default_typst_preview_debounce_ms(),
         close_markdown_before_track: default_close_markdown_before_track(),
     }
@@ -1821,9 +1842,16 @@ fn normalize_profile(profile: AppProfile) -> AppProfile {
     AppProfile {
         autosave_delay_ms: profile.autosave_delay_ms.clamp(1_000, 60_000),
         checkpoint_interval_ms: profile.checkpoint_interval_ms.clamp(60_000, 60 * 60 * 1000),
+        git_status_poll_interval_ms: profile
+            .git_status_poll_interval_ms
+            .clamp(60_000, 60 * 60 * 1000),
         typst_preview_debounce_ms: profile.typst_preview_debounce_ms.clamp(50, 5_000),
         close_markdown_before_track: profile.close_markdown_before_track,
     }
+}
+
+fn default_git_status_poll_interval_ms() -> u64 {
+    5 * 60 * 1000
 }
 
 fn default_typst_preview_debounce_ms() -> u64 {
@@ -1850,6 +1878,7 @@ fn main() {
             watch_vault,
             checkpoint_and_switch_inuse,
             checkpoint_inuse,
+            refresh_git_info,
             list_tree,
             read_note,
             save_note,

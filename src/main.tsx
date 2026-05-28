@@ -155,6 +155,7 @@ const SESSION_KEY_PREFIX = 'notesproject:session:'
 type AppProfile = {
   autosaveDelayMs: number
   checkpointIntervalMs: number
+  gitStatusPollIntervalMs: number
   typstPreviewDebounceMs: number
   closeMarkdownBeforeTrack: boolean
 }
@@ -162,6 +163,7 @@ type AppProfile = {
 const DEFAULT_PROFILE: AppProfile = {
   autosaveDelayMs: 5000,
   checkpointIntervalMs: 3 * 60 * 1000,
+  gitStatusPollIntervalMs: 5 * 60 * 1000,
   typstPreviewDebounceMs: 250,
   closeMarkdownBeforeTrack: true
 }
@@ -373,6 +375,31 @@ function App(): JSX.Element {
       void unlistenPromise.then((unlisten) => unlisten())
     }
   }, [reconcileExternalTab, refreshTree, tabs, vault])
+
+  useEffect(() => {
+    if (!vault?.git.isRepo) return
+    let stopped = false
+
+    const refreshGitInfo = async () => {
+      try {
+        const git = await invoke<GitInfo>('refresh_git_info')
+        if (!stopped) {
+          setVault((prev) => (prev ? { ...prev, git } : prev))
+        }
+      } catch (err) {
+        if (!stopped) setError(String(err))
+      }
+    }
+
+    const timer = window.setInterval(() => {
+      void refreshGitInfo()
+    }, profile.gitStatusPollIntervalMs)
+
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+  }, [profile.gitStatusPollIntervalMs, vault?.git.isRepo, vault?.root])
 
   useEffect(() => {
     if (!vault) return
