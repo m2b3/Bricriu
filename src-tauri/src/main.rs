@@ -423,7 +423,9 @@ fn compile_typst_preview(
         }
         Err(_) => {
             if matches!(format, TypstPreviewFormat::Html) {
-                return Err(embedded_error.unwrap_or_else(|| "Typst HTML preview failed.".to_string()));
+                return Err(
+                    embedded_error.unwrap_or_else(|| "Typst HTML preview failed.".to_string())
+                );
             }
             // Fall back to the CLI watcher while the embedded resolver path matures.
         }
@@ -502,7 +504,7 @@ fn delete_track_state(state: tauri::State<AppState>, path: String) -> Result<(),
     let root = current_root(&state)?;
     let sidecar = track_sidecar_path(&root, &path)?;
     if sidecar.exists() {
-        fs::remove_file(sidecar).map_err(|err| format!("Could not delete track state: {err}"))?;
+        recycle_or_delete_path(&sidecar, "Could not delete track state.")?;
     }
     Ok(())
 }
@@ -582,7 +584,7 @@ fn delete_note(state: tauri::State<AppState>, path: String) -> Result<(), String
     if !is_note_file(&abs) {
         return Err("Only Markdown and Typst files can be deleted.".to_string());
     }
-    fs::remove_file(abs).map_err(|err| format!("Could not delete note: {err}"))?;
+    recycle_or_delete_path(&abs, "Could not delete note.")?;
     remove_track_sidecar(&root, &path)?;
     Ok(())
 }
@@ -634,7 +636,7 @@ fn delete_folder(state: tauri::State<AppState>, path: String) -> Result<(), Stri
     if !abs.is_dir() {
         return Err("Folder does not exist.".to_string());
     }
-    fs::remove_dir_all(abs).map_err(|err| format!("Could not delete folder: {err}"))?;
+    recycle_or_delete_path(&abs, "Could not delete folder.")?;
     remove_track_sidecar_folder(&root, &normalized)?;
     Ok(())
 }
@@ -823,11 +825,7 @@ fn checkpoint_paths_for(root: &Path, rel: &str) -> Result<Vec<String>, String> {
 fn stage_checkpoint_path(root: &Path, rel: &str) -> Result<(), String> {
     let abs = resolve_safe(root, rel)?;
     if abs.exists() {
-        run_git_checked(
-            root,
-            &["add", "--", rel],
-            "Could not stage changed file.",
-        )?;
+        run_git_checked(root, &["add", "--", rel], "Could not stage changed file.")?;
     } else {
         run_git_checked(
             root,
@@ -915,7 +913,7 @@ fn move_track_sidecar(root: &Path, old_rel: &str, new_rel: &str) -> Result<(), S
 fn remove_track_sidecar(root: &Path, rel: &str) -> Result<(), String> {
     let sidecar = track_sidecar_path(root, rel)?;
     if sidecar.exists() {
-        fs::remove_file(sidecar).map_err(|err| format!("Could not remove track sidecar: {err}"))?;
+        recycle_or_delete_path(&sidecar, "Could not remove track sidecar.")?;
     }
     prune_empty_track_dirs(root);
     Ok(())
@@ -937,8 +935,7 @@ fn move_track_sidecar_folder(root: &Path, old_rel: &str, new_rel: &str) -> Resul
 fn remove_track_sidecar_folder(root: &Path, rel: &str) -> Result<(), String> {
     let sidecar_folder = track_folder_path(root, rel)?;
     if sidecar_folder.exists() {
-        fs::remove_dir_all(sidecar_folder)
-            .map_err(|err| format!("Could not remove track folder: {err}"))?;
+        recycle_or_delete_path(&sidecar_folder, "Could not remove track folder.")?;
     }
     prune_empty_track_dirs(root);
     Ok(())
@@ -995,6 +992,62 @@ fn rename_path(old_abs: &Path, new_abs: &Path) -> std::io::Result<()> {
         return Ok(());
     }
     fs::rename(old_abs, new_abs)
+}
+
+fn recycle_or_delete_path(path: &Path, context: &str) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    recycle_or_delete_existing_path(path).map_err(|err| format!("{context} {err}"))
+}
+
+#[cfg(windows)]
+fn recycle_or_delete_existing_path(path: &Path) -> Result<(), String> {
+    let script = r#"
+Add-Type -AssemblyName Microsoft.VisualBasic
+$path = $args[0]
+if (Test-Path -LiteralPath $path -PathType Container) {
+  [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
+    $path,
+    [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
+    [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
+  )
+} else {
+  [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile(
+    $path,
+    [Microsoft.VisualBasic.FileIO.UIOption]::OnlyErrorDialogs,
+    [Microsoft.VisualBasic.FileIO.RecycleOption]::SendToRecycleBin
+  )
+}
+"#;
+    let mut command = Command::new("powershell");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .arg(path)
+        .stdout(Stdio::null());
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = command
+        .output()
+        .map_err(|err| format!("Could not send item to Recycle Bin: {err}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if detail.is_empty() {
+        Err("Could not send item to Recycle Bin.".to_string())
+    } else {
+        Err(format!("Could not send item to Recycle Bin: {detail}"))
+    }
+}
+
+#[cfg(not(windows))]
+fn recycle_or_delete_existing_path(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        fs::remove_dir_all(path).map_err(|err| err.to_string())
+    } else {
+        fs::remove_file(path).map_err(|err| err.to_string())
+    }
 }
 
 fn read_directory(root: &Path, dir: &Path) -> Result<Vec<TreeEntry>, String> {
@@ -1121,9 +1174,7 @@ fn is_markdown_file(path: &Path) -> bool {
 }
 
 fn is_markdown_relative_path(path: &str) -> bool {
-    path.to_lowercase()
-        .ends_with(".md")
-        || path.to_lowercase().ends_with(".markdown")
+    path.to_lowercase().ends_with(".md") || path.to_lowercase().ends_with(".markdown")
 }
 
 fn is_typst_file(path: &Path) -> bool {

@@ -941,8 +941,12 @@ function App(): JSX.Element {
   }, [fileQuery])
 
   const filteredTree = useMemo(
-    () => filterTree(tree, fileQuery, searchRevealedFolders),
-    [fileQuery, searchRevealedFolders, tree]
+    () => filterTree(tree, fileQuery, searchRevealedFolders, pinnedPaths),
+    [fileQuery, pinnedPaths, searchRevealedFolders, tree]
+  )
+  const pinnedEntries = useMemo(
+    () => collectPinnedFiles(tree, pinnedPaths),
+    [pinnedPaths, tree]
   )
   const filteredFilePaths = useMemo(() => collectFilePaths(filteredTree), [filteredTree])
   const visibleExpanded = useMemo(() => {
@@ -1143,12 +1147,20 @@ function App(): JSX.Element {
 
         <section className="tree-panel">
           {contentQuery.trim() ? (
-            <SearchResults
-              matches={contentMatches}
-              searching={searching}
-              activePath={activePath}
-              onOpen={openSearchMatch}
-            />
+            <>
+              <PinnedNotes
+                entries={pinnedEntries}
+                activePath={activePath}
+                onOpen={(path) => void openNote(path)}
+                onTogglePin={togglePinnedPath}
+              />
+              <SearchResults
+                matches={contentMatches}
+                searching={searching}
+                activePath={activePath}
+                onOpen={openSearchMatch}
+              />
+            </>
           ) : (
             <FileTree
               entries={filteredTree}
@@ -2568,6 +2580,59 @@ function FileTree({
   )
 }
 
+function PinnedNotes({
+  entries,
+  activePath,
+  onOpen,
+  onTogglePin
+}: {
+  entries: TreeEntry[]
+  activePath: string | null
+  onOpen: (path: string) => void
+  onTogglePin: (path: string) => void
+}): JSX.Element | null {
+  if (entries.length === 0) return null
+  return (
+    <div className="pinned-notes">
+      <div className="pinned-notes-label">Pinned</div>
+      <div className="tree-list">
+        {entries.map((entry) => (
+          <button
+            key={entry.path}
+            type="button"
+            className={`${activePath === entry.path ? 'tree-row active' : 'tree-row'} pinned`}
+            onClick={() => onOpen(entry.path)}
+            title={entry.path}
+          >
+            <span className="tree-chevron" />
+            <span className="tree-icon">{fileIcon(entry.path)}</span>
+            <span className="tree-name">{entry.name}</span>
+            <span className="tree-actions">
+              <span
+                role="button"
+                tabIndex={0}
+                title="Unpin note"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onTogglePin(entry.path)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') return
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onTogglePin(entry.path)
+                }}
+              >
+                unpin
+              </span>
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function SearchResults({
   matches,
   searching,
@@ -2607,7 +2672,8 @@ function SearchResults({
 function filterTree(
   entries: TreeEntry[],
   query: string,
-  revealedFolders: Set<string>
+  revealedFolders: Set<string>,
+  pinnedPaths: Set<string>
 ): TreeEntry[] {
   const needle = query.trim().toLowerCase()
   if (!needle) return entries
@@ -2616,19 +2682,20 @@ function filterTree(
     const selfMatches =
       entry.name.toLowerCase().includes(needle) ||
       entry.path.toLowerCase().includes(needle)
-    if (entry.kind === 'file') return selfMatches ? [entry] : []
+    const pinned = entry.kind === 'file' && pinnedPaths.has(entry.path)
+    if (entry.kind === 'file') return selfMatches || pinned ? [entry] : []
 
     if (selfMatches) {
       if (revealedFolders.has(entry.path)) {
         return [entry]
       }
-      const children = filterTree(entry.children, query, revealedFolders)
+      const children = filterTree(entry.children, query, revealedFolders, pinnedPaths)
       const visibleTopLevel = new Set(children.map((child) => child.path))
       const hiddenChildren = entry.children.filter((child) => !visibleTopLevel.has(child.path))
       return [{ ...entry, children, hiddenChildren }]
     }
 
-    const children = filterTree(entry.children, query, revealedFolders)
+    const children = filterTree(entry.children, query, revealedFolders, pinnedPaths)
     if (children.length > 0) {
       return [{ ...entry, children }]
     }
@@ -2657,6 +2724,23 @@ function collectFilePaths(entries: TreeEntry[]): string[] {
     if (entry.kind === 'file') return [entry.path]
     return collectFilePaths(entry.children)
   })
+}
+
+function collectPinnedFiles(entries: TreeEntry[], pinnedPaths: Set<string>): TreeEntry[] {
+  const filesByPath = new Map<string, TreeEntry>()
+  const visit = (items: TreeEntry[]) => {
+    for (const item of items) {
+      if (item.kind === 'file') {
+        filesByPath.set(item.path, item)
+      } else {
+        visit(item.children)
+      }
+    }
+  }
+  visit(entries)
+  return [...pinnedPaths]
+    .map((path) => filesByPath.get(path))
+    .filter((entry): entry is TreeEntry => Boolean(entry))
 }
 
 function collectDirPaths(entries: TreeEntry[]): string[] {

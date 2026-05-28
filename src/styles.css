@@ -309,6 +309,19 @@ input:focus {
   color: #183f34;
 }
 
+.pinned-notes {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+}
+
+.pinned-notes-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 9px 6px;
+}
+
 .tree-reveal-row {
   color: var(--accent-2);
   font-size: 12px;
