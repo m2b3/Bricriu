@@ -62,6 +62,7 @@ type TreeEntry = {
 type VaultInfo = {
   root: string
   name: string
+  pathsCaseSensitive: boolean
   git: GitInfo
 }
 
@@ -168,6 +169,8 @@ const DEFAULT_PROFILE: AppProfile = {
   closeMarkdownBeforeTrack: true
 }
 
+let currentPathsCaseSensitive = true
+
 type StoredSession = {
   openTabs: Array<{ path: string; mode: EditorMode }>
   openPaths?: string[]
@@ -242,6 +245,7 @@ function App(): JSX.Element {
 
   useEffect(() => {
     vaultRef.current = vault
+    currentPathsCaseSensitive = vault?.pathsCaseSensitive ?? true
   }, [vault])
 
   const refreshTree = useCallback(async () => {
@@ -265,8 +269,10 @@ function App(): JSX.Element {
         const trackState = storedTab.mode === 'track'
           ? await loadOrCreateTrackState(note.path, note.body)
           : undefined
-        restoredTabs.push({
-          id: tabId(note.path, storedTab.mode),
+        const id = tabId(note.path, storedTab.mode)
+        const existingIndex = restoredTabs.findIndex((tab) => tab.id === id)
+        const restoredTab = {
+          id,
           path: note.path,
           mode: storedTab.mode,
           body: note.body,
@@ -275,13 +281,15 @@ function App(): JSX.Element {
           updatedAt: note.updatedAt,
           size: note.size,
           trackState
-        })
+        }
+        if (existingIndex >= 0) restoredTabs[existingIndex] = restoredTab
+        else restoredTabs.push(restoredTab)
       } catch {
         // The file may have been moved or deleted outside the app.
       }
     }
     const active = restoredTabs.find((tab) => tab.id === session.activeId)
-      ?? restoredTabs.find((tab) => tab.path === session.activePath)
+      ?? restoredTabs.find((tab) => session.activePath != null && samePath(tab.path, session.activePath))
       ?? restoredTabs[0]
       ?? null
     return {
@@ -299,16 +307,16 @@ function App(): JSX.Element {
       const note = await invoke<NoteContent>('read_note', { path })
       setTabs((prev) =>
         prev.map((tab) => {
-          if (tab.path !== path) return tab
+          if (!samePath(tab.path, path)) return tab
           if (tab.savedBody === note.body) {
-            return { ...tab, updatedAt: note.updatedAt, size: note.size, externalStatus: undefined }
+            return { ...tab, path: note.path, id: tabId(note.path, tab.mode), updatedAt: note.updatedAt, size: note.size, externalStatus: undefined }
           }
-          return { ...tab, externalStatus: 'changed' }
+          return { ...tab, path: note.path, id: tabId(note.path, tab.mode), externalStatus: 'changed' }
         })
       )
     } catch {
       setTabs((prev) =>
-        prev.map((tab) => (tab.path === path ? { ...tab, externalStatus: 'deleted' } : tab))
+        prev.map((tab) => (samePath(tab.path, path) ? { ...tab, externalStatus: 'deleted' } : tab))
       )
     }
   }, [])
@@ -334,6 +342,8 @@ function App(): JSX.Element {
           openedVault = { ...nextVault, git }
         }
       }
+      vaultRef.current = openedVault
+      currentPathsCaseSensitive = openedVault.pathsCaseSensitive
       const restoredSession = await loadStoredSession(openedVault.root)
       setVault(openedVault)
       setTabs(restoredSession?.tabs ?? [])
@@ -356,7 +366,7 @@ function App(): JSX.Element {
     if (!vault) return
     let refreshTimer: number | null = null
     const unlistenPromise = listen<VaultChangeEvent>('vault://changed', (event) => {
-      const changedPaths = new Set(event.payload.paths)
+      const changedPaths = new Set(event.payload.paths.map(pathKey))
       if (refreshTimer != null) window.clearTimeout(refreshTimer)
       refreshTimer = window.setTimeout(() => {
         void refreshTree()
@@ -364,7 +374,7 @@ function App(): JSX.Element {
       }, 180)
 
       for (const tab of tabs) {
-        if (changedPaths.has(tab.path)) {
+        if (changedPaths.has(pathKey(tab.path))) {
           void reconcileExternalTab(tab.path)
         }
       }
@@ -421,7 +431,7 @@ function App(): JSX.Element {
       setJumpOffset(offset)
       return
     }
-    const conflicting = tabs.find((tab) => tab.path === path && tab.mode !== 'markdown' && tab.body !== tab.savedBody)
+    const conflicting = tabs.find((tab) => samePath(tab.path, path) && tab.mode !== 'markdown' && tab.body !== tab.savedBody)
     if (conflicting) {
       const proceed = window.confirm(`${path} is modified in Track mode. Save or close it before opening Markdown mode?`)
       if (!proceed) return
@@ -430,10 +440,11 @@ function App(): JSX.Element {
     setError(null)
     try {
       const note = await invoke<NoteContent>('read_note', { path })
+      const id = tabId(note.path, 'markdown')
       setTabs((prev) => [
-        ...prev,
+        ...prev.filter((tab) => tab.id !== id),
         {
-          id: tabId(note.path, 'markdown'),
+          id,
           path: note.path,
           mode: 'markdown',
           body: note.body,
@@ -443,7 +454,7 @@ function App(): JSX.Element {
           size: note.size
         }
       ])
-      setActiveId(tabId(note.path, 'markdown'))
+      setActiveId(id)
       setJumpOffset(offset)
     } catch (err) {
       setError(String(err))
@@ -458,7 +469,7 @@ function App(): JSX.Element {
       setActiveId(existing.id)
       return
     }
-    const markdownTab = tabs.find((tab) => tab.path === path && tab.mode === 'markdown')
+    const markdownTab = tabs.find((tab) => samePath(tab.path, path) && tab.mode === 'markdown')
     if (markdownTab && profile.closeMarkdownBeforeTrack) {
       const closeMarkdown = window.confirm(`${path} is already open in Markdown mode. Close that tab before opening Track mode?`)
       if (closeMarkdown) {
@@ -482,10 +493,11 @@ function App(): JSX.Element {
     try {
       const note = await invoke<NoteContent>('read_note', { path })
       const trackState = await loadOrCreateTrackState(note.path, note.body)
+      const id = tabId(note.path, 'track')
       setTabs((prev) => [
-        ...prev,
+        ...prev.filter((tab) => tab.id !== id),
         {
-          id: tabId(note.path, 'track'),
+          id,
           path: note.path,
           mode: 'track',
           body: note.body,
@@ -496,7 +508,7 @@ function App(): JSX.Element {
           trackState
         }
       ])
-      setActiveId(tabId(note.path, 'track'))
+      setActiveId(id)
     } catch (err) {
       setError(String(err))
     } finally {
@@ -544,7 +556,7 @@ function App(): JSX.Element {
           tab.id === activeTab.id
             ? {
                 ...tab,
-                id: activeTab.id,
+                id: tabId(saved.path, activeTab.mode),
                 path: saved.path,
                 body: tab.body === requestedBody ? saved.body : tab.body,
                 savedBody: saved.body,
@@ -594,6 +606,8 @@ function App(): JSX.Element {
         item.id === tab.id
             ? {
               ...item,
+              id: tabId(saved.path, item.mode),
+              path: saved.path,
               body: item.body === requestedBody ? saved.body : item.body,
               savedBody: saved.body,
               updatedAt: saved.updatedAt,
@@ -616,11 +630,11 @@ function App(): JSX.Element {
     setError(null)
     try {
       for (const tab of tabs) {
-        if (tab.mode === 'track' && tab.trackState && touched.has(tab.path)) {
+        if (tab.mode === 'track' && tab.trackState && hasPath(touched, tab.path)) {
           await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
         }
       }
-      const git = await invoke<GitInfo>('checkpoint_inuse', { paths })
+      const git = await invoke<GitInfo>('checkpoint_inuse', { paths: uniquePaths(paths) })
       setVault((prev) => (prev ? { ...prev, git } : prev))
       setTouchedPaths(new Set())
     } catch (err) {
@@ -661,7 +675,7 @@ function App(): JSX.Element {
     }
 
     if (vault?.git.isRepo && vault.git.currentBranch === 'inuse' && paths.size > 0) {
-      await invoke<GitInfo>('checkpoint_inuse', { paths: [...paths] })
+      await invoke<GitInfo>('checkpoint_inuse', { paths: uniquePaths([...paths]) })
     }
   }, [])
 
@@ -720,7 +734,7 @@ function App(): JSX.Element {
       const note = await invoke<NoteContent>('rename_note', { oldPath, newPath: nextPath })
       setTabs((prev) =>
         prev.map((tab) =>
-          tab.path === oldPath
+          samePath(tab.path, oldPath)
             ? {
                 ...tab,
                 id: tabId(note.path, tab.mode),
@@ -737,7 +751,7 @@ function App(): JSX.Element {
       )
       setActiveId((current) => {
         const activeTab = tabs.find((tab) => tab.id === current)
-        return activeTab?.path === oldPath ? tabId(note.path, activeTab.mode) : current
+        return activeTab && samePath(activeTab.path, oldPath) ? tabId(note.path, activeTab.mode) : current
       })
       await refreshTree()
     } catch (err) {
@@ -748,7 +762,7 @@ function App(): JSX.Element {
   }, [activePath, refreshTree, tabs])
 
   const deleteNoteAction = useCallback(async (path: string) => {
-    const tab = tabs.find((tab) => tab.path === path)
+    const tab = tabs.find((tab) => samePath(tab.path, path))
     if (tab && tab.body !== tab.savedBody) {
       const proceedDirty = window.confirm(`${path} has unsaved changes. Delete it anyway?`)
       if (!proceedDirty) return
@@ -760,9 +774,9 @@ function App(): JSX.Element {
     try {
       await invoke('delete_note', { path })
       setTabs((prev) => {
-        const index = prev.findIndex((tab) => tab.path === path)
-        const next = prev.filter((tab) => tab.path !== path)
-        if (activePath === path) {
+        const index = prev.findIndex((tab) => samePath(tab.path, path))
+        const next = prev.filter((tab) => !samePath(tab.path, path))
+        if (activePath != null && samePath(activePath, path)) {
           const replacement = next[Math.min(index, next.length - 1)] ?? null
           setActiveId(replacement?.id ?? null)
         }
@@ -785,7 +799,7 @@ function App(): JSX.Element {
       await invoke('rename_folder', { oldPath, newPath: nextPath })
       setTabs((prev) =>
         prev.map((tab) =>
-          tab.path.startsWith(`${oldPath}/`)
+          isPathInsideFolder(tab.path, oldPath)
             ? {
                 ...tab,
                 path: `${nextPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/${tab.path.slice(oldPath.length + 1)}`,
@@ -797,7 +811,7 @@ function App(): JSX.Element {
             : tab
         )
       )
-      if (activePath?.startsWith(`${oldPath}/`)) {
+      if (activePath != null && isPathInsideFolder(activePath, oldPath)) {
         const currentMode = activeTab?.mode ?? 'markdown'
         setActiveId(tabId(`${nextPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/${activePath.slice(oldPath.length + 1)}`, currentMode))
       }
@@ -810,7 +824,7 @@ function App(): JSX.Element {
   }, [activePath, activeTab?.mode, refreshTree])
 
   const deleteFolderAction = useCallback(async (path: string) => {
-    const affectedDirty = tabs.some((tab) => tab.path.startsWith(`${path}/`) && tab.body !== tab.savedBody)
+    const affectedDirty = tabs.some((tab) => isPathInsideFolder(tab.path, path) && tab.body !== tab.savedBody)
     if (affectedDirty) {
       const proceedDirty = window.confirm(`Folder ${path} contains open notes with unsaved changes. Delete anyway?`)
       if (!proceedDirty) return
@@ -821,8 +835,8 @@ function App(): JSX.Element {
     setError(null)
     try {
       await invoke('delete_folder', { path })
-      setTabs((prev) => prev.filter((tab) => !tab.path.startsWith(`${path}/`)))
-      if (activePath?.startsWith(`${path}/`)) setActiveId(null)
+      setTabs((prev) => prev.filter((tab) => !isPathInsideFolder(tab.path, path)))
+      if (activePath != null && isPathInsideFolder(activePath, path)) setActiveId(null)
       await refreshTree()
     } catch (err) {
       setError(String(err))
@@ -878,9 +892,8 @@ function App(): JSX.Element {
 
   const togglePinnedPath = useCallback((path: string) => {
     setPinnedPaths((prev) => {
-      const next = new Set(prev)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
+      const next = new Set([...prev].filter((pinnedPath) => !samePath(pinnedPath, path)))
+      if (next.size === prev.size) next.add(path)
       return next
     })
   }, [])
@@ -971,15 +984,16 @@ function App(): JSX.Element {
     () => filterTree(tree, fileQuery, searchRevealedFolders, pinnedPaths),
     [fileQuery, pinnedPaths, searchRevealedFolders, tree]
   )
+  useEffect(() => {
+    if (!fileQuery.trim()) return
+    setExpanded((prev) => new Set([...prev, ...collectDirPaths(filteredTree)]))
+  }, [fileQuery, filteredTree])
+
   const pinnedEntries = useMemo(
     () => collectPinnedFiles(tree, pinnedPaths),
     [pinnedPaths, tree]
   )
   const filteredFilePaths = useMemo(() => collectFilePaths(filteredTree), [filteredTree])
-  const visibleExpanded = useMemo(() => {
-    if (!fileQuery.trim()) return expanded
-    return new Set([...expanded, ...collectDirPaths(filteredTree)])
-  }, [expanded, fileQuery, filteredTree])
 
   useEffect(() => {
     if (!vault || !contentQuery.trim()) {
@@ -1179,7 +1193,10 @@ function App(): JSX.Element {
                 entries={pinnedEntries}
                 activePath={activePath}
                 onOpen={(path) => void openNote(path)}
+                onOpenTrack={(path) => void openTrackNote(path)}
                 onTogglePin={togglePinnedPath}
+                onRenameFile={(path) => void renameNoteAction(path)}
+                onDeleteFile={(path) => void deleteNoteAction(path)}
               />
               <SearchResults
                 matches={contentMatches}
@@ -1189,30 +1206,41 @@ function App(): JSX.Element {
               />
             </>
           ) : (
-            <FileTree
-              entries={filteredTree}
-              activePath={activePath}
-              expanded={visibleExpanded}
-              pinnedPaths={pinnedPaths}
-              onToggle={(path) => {
-                setExpanded((prev) => {
-                  const next = new Set(prev)
-                  if (next.has(path)) next.delete(path)
-                  else next.add(path)
-                  return next
-                })
-              }}
-              onOpen={(path) => void openNote(path)}
-              onOpenTrack={(path) => void openTrackNote(path)}
-              onTogglePin={togglePinnedPath}
-              onRenameFile={(path) => void renameNoteAction(path)}
-              onDeleteFile={(path) => void deleteNoteAction(path)}
-              onRenameFolder={(path) => void renameFolderAction(path)}
-              onDeleteFolder={(path) => void deleteFolderAction(path)}
-              onRevealHidden={(path) => {
-                setSearchRevealedFolders((prev) => new Set([...prev, path]))
-              }}
-            />
+            <>
+              <PinnedNotes
+                entries={pinnedEntries}
+                activePath={activePath}
+                onOpen={(path) => void openNote(path)}
+                onOpenTrack={(path) => void openTrackNote(path)}
+                onTogglePin={togglePinnedPath}
+                onRenameFile={(path) => void renameNoteAction(path)}
+                onDeleteFile={(path) => void deleteNoteAction(path)}
+              />
+              <FileTree
+                entries={filteredTree}
+                activePath={activePath}
+                expanded={expanded}
+                pinnedPaths={pinnedPaths}
+                onToggle={(path) => {
+                  setExpanded((prev) => {
+                    const next = new Set(prev)
+                    if (next.has(path)) next.delete(path)
+                    else next.add(path)
+                    return next
+                  })
+                }}
+                onOpen={(path) => void openNote(path)}
+                onOpenTrack={(path) => void openTrackNote(path)}
+                onTogglePin={togglePinnedPath}
+                onRenameFile={(path) => void renameNoteAction(path)}
+                onDeleteFile={(path) => void deleteNoteAction(path)}
+                onRenameFolder={(path) => void renameFolderAction(path)}
+                onDeleteFolder={(path) => void deleteFolderAction(path)}
+                onRevealHidden={(path) => {
+                  setSearchRevealedFolders((prev) => new Set([...prev, path]))
+                }}
+              />
+            </>
           )}
         </section>
 
@@ -1294,7 +1322,7 @@ function App(): JSX.Element {
               body={activeTab?.body ?? ''}
               disabled={!activeTab}
               notePaths={allFilePaths}
-              searchHighlight={searchHighlight?.path === activePath ? searchHighlight : null}
+              searchHighlight={searchHighlight && activePath != null && samePath(searchHighlight.path, activePath) ? searchHighlight : null}
               jumpOffset={jumpOffset}
               onJumpHandled={() => setJumpOffset(null)}
               onChange={updateTabBody}
@@ -1733,10 +1761,11 @@ function MarkdownEditor({
     const view = viewRef.current
     if (!view) return
     const previousPath = pathRef.current
-    if (previousPath && previousPath !== activePath) {
+    const sameActivePath = previousPath != null && activePath != null && samePath(previousPath, activePath)
+    if (previousPath && !sameActivePath) {
       statesRef.current.set(previousPath, view.state)
     }
-    if (previousPath === activePath) {
+    if (sameActivePath) {
       const current = view.state.doc.toString()
       if (current === body) return
       if (activePath && consumeEditorEcho(pendingEditorEchoesRef.current, activePath, body)) return
@@ -2468,13 +2497,18 @@ function FileTree({
     return <div className="empty-list">No note files</div>
   }
 
+  const visibleEntries = orderTreeEntries(entries, pinnedPaths).filter(
+    (entry) => entry.kind === 'dir' || !hasPath(pinnedPaths, entry.path)
+  )
+  if (visibleEntries.length === 0) return <></>
+
   return (
     <div className="tree-list">
-      {orderTreeEntries(entries, pinnedPaths).map((entry) => {
+      {visibleEntries.map((entry) => {
         const isDir = entry.kind === 'dir'
         const isExpanded = expanded.has(entry.path)
-        const active = activePath === entry.path
-        const pinned = pinnedPaths.has(entry.path)
+        const active = activePath != null && samePath(activePath, entry.path)
+        const pinned = hasPath(pinnedPaths, entry.path)
         return (
           <div key={entry.path}>
             <button
@@ -2611,29 +2645,34 @@ function PinnedNotes({
   entries,
   activePath,
   onOpen,
-  onTogglePin
+  onOpenTrack,
+  onTogglePin,
+  onRenameFile,
+  onDeleteFile
 }: {
   entries: TreeEntry[]
   activePath: string | null
   onOpen: (path: string) => void
+  onOpenTrack: (path: string) => void
   onTogglePin: (path: string) => void
+  onRenameFile: (path: string) => void
+  onDeleteFile: (path: string) => void
 }): JSX.Element | null {
   if (entries.length === 0) return null
   return (
     <div className="pinned-notes">
-      <div className="pinned-notes-label">Pinned</div>
       <div className="tree-list">
         {entries.map((entry) => (
           <button
             key={entry.path}
             type="button"
-            className={`${activePath === entry.path ? 'tree-row active' : 'tree-row'} pinned`}
+            className={`${activePath != null && samePath(activePath, entry.path) ? 'tree-row active' : 'tree-row'} pinned`}
             onClick={() => onOpen(entry.path)}
             title={entry.path}
           >
             <span className="tree-chevron" />
             <span className="tree-icon">{fileIcon(entry.path)}</span>
-            <span className="tree-name">{entry.name}</span>
+            <span className="tree-name">{entry.path}</span>
             <span className="tree-actions">
               <span
                 role="button"
@@ -2651,6 +2690,57 @@ function PinnedNotes({
                 }}
               >
                 unpin
+              </span>
+              <span
+                role="button"
+                tabIndex={0}
+                title={isMarkdownPath(entry.path) ? 'Open with Track Changes' : 'Track Changes is Markdown-only'}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  if (isMarkdownPath(entry.path)) onOpenTrack(entry.path)
+                }}
+                onKeyDown={(event) => {
+                  if (!isMarkdownPath(entry.path) || (event.key !== 'Enter' && event.key !== ' ')) return
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onOpenTrack(entry.path)
+                }}
+              >
+                track
+              </span>
+              <span
+                role="button"
+                tabIndex={0}
+                title="Rename note"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onRenameFile(entry.path)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') return
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onRenameFile(entry.path)
+                }}
+              >
+                rename
+              </span>
+              <span
+                role="button"
+                tabIndex={0}
+                title="Delete note"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onDeleteFile(entry.path)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') return
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onDeleteFile(entry.path)
+                }}
+              >
+                delete
               </span>
             </span>
           </button>
@@ -2683,7 +2773,7 @@ function SearchResults({
         <button
           key={`${match.path}:${match.lineNumber}:${index}`}
           type="button"
-          className={activePath === match.path ? 'result-row active' : 'result-row'}
+          className={activePath != null && samePath(activePath, match.path) ? 'result-row active' : 'result-row'}
           onClick={() => onOpen(match)}
           title={`${match.path}:${match.lineNumber}`}
         >
@@ -2709,8 +2799,7 @@ function filterTree(
     const selfMatches =
       entry.name.toLowerCase().includes(needle) ||
       entry.path.toLowerCase().includes(needle)
-    const pinned = entry.kind === 'file' && pinnedPaths.has(entry.path)
-    if (entry.kind === 'file') return selfMatches || pinned ? [entry] : []
+    if (entry.kind === 'file') return selfMatches ? [entry] : []
 
     if (selfMatches) {
       if (revealedFolders.has(entry.path)) {
@@ -2732,8 +2821,8 @@ function filterTree(
 
 function orderTreeEntries(entries: TreeEntry[], pinnedPaths: Set<string>): TreeEntry[] {
   return [...entries].sort((left, right) => {
-    const leftPinned = left.kind === 'file' && pinnedPaths.has(left.path)
-    const rightPinned = right.kind === 'file' && pinnedPaths.has(right.path)
+    const leftPinned = left.kind === 'file' && hasPath(pinnedPaths, left.path)
+    const rightPinned = right.kind === 'file' && hasPath(pinnedPaths, right.path)
     if (leftPinned !== rightPinned) return leftPinned ? -1 : 1
     return 0
   })
@@ -2758,16 +2847,23 @@ function collectPinnedFiles(entries: TreeEntry[], pinnedPaths: Set<string>): Tre
   const visit = (items: TreeEntry[]) => {
     for (const item of items) {
       if (item.kind === 'file') {
-        filesByPath.set(item.path, item)
+        filesByPath.set(pathKey(item.path), item)
       } else {
         visit(item.children)
       }
     }
   }
   visit(entries)
+  const seen = new Set<string>()
   return [...pinnedPaths]
-    .map((path) => filesByPath.get(path))
+    .map((path) => filesByPath.get(pathKey(path)))
     .filter((entry): entry is TreeEntry => Boolean(entry))
+    .filter((entry) => {
+      const key = pathKey(entry.path)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
 }
 
 function collectDirPaths(entries: TreeEntry[]): string[] {
@@ -2803,7 +2899,36 @@ function selectAdjacentTab(
 }
 
 function tabId(path: string, mode: EditorMode): string {
-  return `${mode}:${path}`
+  return `${mode}:${pathKey(path)}`
+}
+
+function pathKey(path: string): string {
+  const normalized = path.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+  return currentPathsCaseSensitive ? normalized : normalized.toLowerCase()
+}
+
+function samePath(left: string, right: string): boolean {
+  return pathKey(left) === pathKey(right)
+}
+
+function hasPath(paths: Set<string>, path: string): boolean {
+  const key = pathKey(path)
+  return [...paths].some((candidate) => pathKey(candidate) === key)
+}
+
+function isPathInsideFolder(path: string, folder: string): boolean {
+  const folderKey = pathKey(folder)
+  return pathKey(path).startsWith(`${folderKey}/`)
+}
+
+function uniquePaths(paths: string[]): string[] {
+  const seen = new Set<string>()
+  return paths.filter((path) => {
+    const key = pathKey(path)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }
 
 async function loadOrCreateTrackState(path: string, body: string): Promise<TrackState> {

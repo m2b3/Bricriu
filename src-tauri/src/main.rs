@@ -75,6 +75,7 @@ struct VaultTypstResolver {
 struct VaultInfo {
     root: String,
     name: String,
+    paths_case_sensitive: bool,
     git: GitInfo,
 }
 
@@ -224,6 +225,7 @@ fn open_vault(state: tauri::State<AppState>, path: String) -> Result<VaultInfo, 
     Ok(VaultInfo {
         root: root_string,
         name,
+        paths_case_sensitive: paths_case_sensitive(),
         git,
     })
 }
@@ -373,6 +375,9 @@ fn read_note(state: tauri::State<AppState>, path: String) -> Result<NoteContent,
         return Err("Only Markdown and Typst files can be opened.".to_string());
     }
 
+    let abs = abs
+        .canonicalize()
+        .map_err(|err| format!("Could not resolve note path: {err}"))?;
     let body = fs::read_to_string(&abs).map_err(|err| format!("Could not read note: {err}"))?;
     let metadata = fs::metadata(&abs).map_err(|err| format!("Could not read metadata: {err}"))?;
     Ok(NoteContent {
@@ -1489,6 +1494,16 @@ fn to_posix_relative(root: &Path, abs: &Path) -> Result<String, String> {
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/"))
+}
+
+#[cfg(windows)]
+fn paths_case_sensitive() -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+fn paths_case_sensitive() -> bool {
+    true
 }
 
 fn compare_tree_entries(a: &TreeEntry, b: &TreeEntry) -> Ordering {
