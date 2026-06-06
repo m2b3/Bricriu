@@ -205,6 +205,46 @@ input:focus {
   gap: 8px;
 }
 
+.recent-files-select,
+.actions-select {
+  max-width: min(260px, 28vw);
+  min-width: 112px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 7px 28px 7px 9px;
+}
+
+.actions-select {
+  min-width: 104px;
+}
+
+.recent-files-select:disabled,
+.actions-select:disabled {
+  color: var(--muted);
+  opacity: 0.72;
+}
+
+.recent-history-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.recent-history-toggle input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .search-panel {
   display: grid;
   gap: 10px;

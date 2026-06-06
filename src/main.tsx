@@ -88,6 +88,10 @@ type NoteContent = {
   size: number
 }
 
+type SaveNoteCommandResult =
+  | { status: 'saved'; note: NoteContent }
+  | { status: 'conflict'; current: NoteContent }
+
 type TypstPreview = {
   format: TypstPreviewFormat
   content: string
@@ -174,6 +178,7 @@ type AppProfile = {
   gitStatusPollIntervalMs: number
   typstPreviewDebounceMs: number
   closeMarkdownBeforeTrack: boolean
+  persistRecentFiles: boolean
 }
 
 const DEFAULT_PROFILE: AppProfile = {
@@ -181,8 +186,11 @@ const DEFAULT_PROFILE: AppProfile = {
   checkpointIntervalMs: 3 * 60 * 1000,
   gitStatusPollIntervalMs: 5 * 60 * 1000,
   typstPreviewDebounceMs: 250,
-  closeMarkdownBeforeTrack: true
+  closeMarkdownBeforeTrack: true,
+  persistRecentFiles: true
 }
+
+const MAX_RECENT_FILES = 20
 
 let currentPathsCaseSensitive = true
 
@@ -193,6 +201,7 @@ type StoredSession = {
   activePath?: string | null
   expanded: string[]
   pinnedPaths?: string[]
+  recentPaths?: string[]
   fileQuery: string
   contentUsesFileFilter: boolean
 }
@@ -202,6 +211,7 @@ type RestoredSession = {
   activeId: string | null
   expanded: string[]
   pinnedPaths: string[]
+  recentPaths: string[]
   fileQuery: string
   contentUsesFileFilter: boolean
 }
@@ -227,6 +237,7 @@ function App(): JSX.Element {
   const [backlinks, setBacklinks] = useState<BacklinkMatch[]>([])
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
   const [pinnedPaths, setPinnedPaths] = useState<Set<string>>(() => new Set())
+  const [recentPaths, setRecentPaths] = useState<string[]>([])
   const [searchRevealedFolders, setSearchRevealedFolders] = useState<Set<string>>(() => new Set())
   const [jumpOffset, setJumpOffset] = useState<number | null>(null)
   const [searchHighlight, setSearchHighlight] = useState<SearchHighlight | null>(null)
@@ -244,6 +255,13 @@ function App(): JSX.Element {
   const [editorSelectAllRequest, setEditorSelectAllRequest] = useState(0)
   const tabsRef = useRef<OpenTab[]>([])
   const latestBodiesRef = useRef<Map<string, string>>(new Map())
+  const activeIdRef = useRef<string | null>(null)
+  const activePathRef = useRef<string | null>(null)
+  const expandedRef = useRef<Set<string>>(new Set())
+  const pinnedPathsRef = useRef<Set<string>>(new Set())
+  const recentPathsRef = useRef<string[]>([])
+  const fileQueryRef = useRef('')
+  const contentUsesFileFilterRef = useRef(false)
   const touchedPathsRef = useRef<Set<string>>(new Set())
   const vaultRef = useRef<VaultInfo | null>(null)
   const closingRef = useRef(false)
@@ -256,6 +274,25 @@ function App(): JSX.Element {
   const isTabDirty = useCallback((tab: OpenTab) => (
     latestTabBody(tab) !== tab.savedBody
   ), [latestTabBody])
+
+  const rememberRecentPath = useCallback((path: string) => {
+    if (!profile.persistRecentFiles) return
+    setRecentPaths((prev) => {
+      const next = [path, ...prev.filter((candidate) => !samePath(candidate, path))]
+      const trimmed = next.slice(0, MAX_RECENT_FILES)
+      recentPathsRef.current = trimmed
+      return trimmed
+    })
+  }, [profile.persistRecentFiles])
+
+  const forgetRecentPath = useCallback((path: string) => {
+    if (!profile.persistRecentFiles) return
+    setRecentPaths((prev) => {
+      const next = prev.filter((candidate) => !samePath(candidate, path))
+      recentPathsRef.current = next
+      return next
+    })
+  }, [profile.persistRecentFiles])
 
   const activeTab = useMemo(
     () => {
@@ -274,11 +311,37 @@ function App(): JSX.Element {
   useEffect(() => {
     if (activeTab) activeTabHintRef.current = { path: activeTab.path, mode: activeTab.mode }
     if (activeTab && activeTab.id !== activeId) setActiveId(activeTab.id)
+    activeIdRef.current = activeTab?.id ?? activeId
+    activePathRef.current = activeTab?.path ?? null
   }, [activeId, activeTab])
 
   useEffect(() => {
     void invoke<AppProfile>('load_profile')
-      .then((profile) => setProfile(profile))
+      .then((profile) => {
+        setProfile(profile)
+        if (!profile.persistRecentFiles) {
+          recentPathsRef.current = []
+          setRecentPaths([])
+        }
+      })
+      .catch((err) => setError(String(err)))
+  }, [])
+
+  const updateProfile = useCallback((nextProfile: AppProfile) => {
+    setProfile(nextProfile)
+    void invoke<AppProfile>('save_profile', { profile: nextProfile })
+      .then((savedProfile) => {
+        setProfile(savedProfile)
+        if (!savedProfile.persistRecentFiles) {
+          recentPathsRef.current = []
+          setRecentPaths([])
+          const currentVault = vaultRef.current
+          if (currentVault) {
+            const existing = readStoredSession(currentVault.root)
+            if (existing) writeStoredSession(currentVault.root, { ...existing, recentPaths: [] })
+          }
+        }
+      })
       .catch((err) => setError(String(err)))
   }, [])
 
@@ -295,6 +358,26 @@ function App(): JSX.Element {
       }
     }
   }, [isTabDirty, tabs])
+
+  useEffect(() => {
+    recentPathsRef.current = recentPaths
+  }, [recentPaths])
+
+  useEffect(() => {
+    expandedRef.current = expanded
+  }, [expanded])
+
+  useEffect(() => {
+    pinnedPathsRef.current = pinnedPaths
+  }, [pinnedPaths])
+
+  useEffect(() => {
+    fileQueryRef.current = fileQuery
+  }, [fileQuery])
+
+  useEffect(() => {
+    contentUsesFileFilterRef.current = contentUsesFileFilter
+  }, [contentUsesFileFilter])
 
   useEffect(() => {
     touchedPathsRef.current = touchedPaths
@@ -354,10 +437,13 @@ function App(): JSX.Element {
       activeId: active?.id ?? null,
       expanded: session.expanded,
       pinnedPaths: session.pinnedPaths ?? [],
+      recentPaths: profile.persistRecentFiles
+        ? uniquePaths(session.recentPaths ?? []).slice(0, MAX_RECENT_FILES)
+        : [],
       fileQuery: session.fileQuery,
       contentUsesFileFilter: session.contentUsesFileFilter
     }
-  }, [])
+  }, [profile.persistRecentFiles])
 
   const reconcileExternalTab = useCallback(async (path: string) => {
     try {
@@ -410,6 +496,8 @@ function App(): JSX.Element {
       setActiveId(restoredSession?.activeId ?? null)
       setExpanded(new Set(restoredSession?.expanded ?? []))
       setPinnedPaths(new Set(restoredSession?.pinnedPaths ?? []))
+      recentPathsRef.current = profile.persistRecentFiles ? restoredSession?.recentPaths ?? [] : []
+      setRecentPaths(profile.persistRecentFiles ? restoredSession?.recentPaths ?? [] : [])
       setFileQuery(restoredSession?.fileQuery ?? '')
       setContentUsesFileFilter(restoredSession?.contentUsesFileFilter ?? false)
       setContentMatches([])
@@ -420,7 +508,7 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [loadStoredSession, refreshTree, vaultPath])
+  }, [loadStoredSession, profile.persistRecentFiles, refreshTree, vaultPath])
 
   useEffect(() => {
     if (!vault) return
@@ -479,16 +567,18 @@ function App(): JSX.Element {
       activePath,
       expanded: [...expanded],
       pinnedPaths: [...pinnedPaths],
+      recentPaths: profile.persistRecentFiles ? recentPaths : [],
       fileQuery,
       contentUsesFileFilter
     })
-  }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, pinnedPaths, tabs, vault])
+  }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, pinnedPaths, profile.persistRecentFiles, recentPaths, tabs, vault])
 
   const openNote = useCallback(async (path: string, offset: number | null = null) => {
     const existing = tabs.find((tab) => tab.mode === 'markdown' && samePath(tab.path, path))
     if (existing) {
       setActiveId(existing.id)
       setJumpOffset(offset)
+      rememberRecentPath(existing.path)
       return
     }
     const conflicting = tabs.find((tab) => samePath(tab.path, path) && tab.mode !== 'markdown' && isTabDirty(tab))
@@ -516,17 +606,19 @@ function App(): JSX.Element {
       ])
       setActiveId(id)
       setJumpOffset(offset)
+      rememberRecentPath(note.path)
     } catch (err) {
       setError(String(err))
     } finally {
       setBusy(false)
     }
-  }, [isTabDirty, tabs])
+  }, [isTabDirty, rememberRecentPath, tabs])
 
   const openTrackNote = useCallback(async (path: string) => {
     const existing = tabs.find((tab) => tab.mode === 'track' && samePath(tab.path, path))
     if (existing) {
       setActiveId(existing.id)
+      rememberRecentPath(existing.path)
       return
     }
     const markdownTab = tabs.find((tab) => samePath(tab.path, path) && tab.mode === 'markdown')
@@ -569,12 +661,13 @@ function App(): JSX.Element {
         }
       ])
       setActiveId(id)
+      rememberRecentPath(note.path)
     } catch (err) {
       setError(String(err))
     } finally {
       setBusy(false)
     }
-  }, [activeId, isTabDirty, profile.closeMarkdownBeforeTrack, tabs])
+  }, [activeId, isTabDirty, profile.closeMarkdownBeforeTrack, rememberRecentPath, tabs])
 
   const openSearchMatch = useCallback((match: ContentMatch) => {
     const query = contentQuery.trim()
@@ -629,6 +722,7 @@ function App(): JSX.Element {
       )
       setActiveId((current) => (current === activeTab.id ? savedId : current))
       setTouchedPaths((prev) => new Set([...prev, saved.path]))
+      rememberRecentPath(saved.path)
       await refreshTree()
       if (activeTab.mode === 'markdown') setEditorFocusRequest((request) => request + 1)
     } catch (err) {
@@ -636,7 +730,7 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [activeTab, latestTabBody, refreshTree])
+  }, [activeTab, latestTabBody, refreshTree, rememberRecentPath])
 
   const saveTab = useCallback(async (tab: OpenTab) => {
     const requestedBody = latestTabBody(tab)
@@ -681,8 +775,9 @@ function App(): JSX.Element {
     )
     setActiveId((current) => (current === tab.id ? savedId : current))
     setTouchedPaths((prev) => new Set([...prev, saved.path]))
+    rememberRecentPath(saved.path)
     await refreshTree()
-  }, [latestTabBody, refreshTree])
+  }, [latestTabBody, refreshTree, rememberRecentPath])
 
   const checkpointNow = useCallback(async () => {
     if (!vault?.git.isRepo || vault.git.currentBranch !== 'inuse') return
@@ -709,6 +804,18 @@ function App(): JSX.Element {
 
   const finalizeBeforeClose = useCallback(async () => {
     const vault = vaultRef.current
+    if (vault) {
+      writeStoredSession(vault.root, {
+        openTabs: tabsRef.current.map((tab) => ({ path: tab.path, mode: tab.mode })),
+        activeId: activeIdRef.current,
+        activePath: activePathRef.current,
+        expanded: [...expandedRef.current],
+        pinnedPaths: [...pinnedPathsRef.current],
+        recentPaths: profile.persistRecentFiles ? recentPathsRef.current : [],
+        fileQuery: fileQueryRef.current,
+        contentUsesFileFilter: contentUsesFileFilterRef.current
+      })
+    }
     const dirtyTabs = tabsRef.current.filter((tab) => {
       const body = latestBodiesRef.current.get(tab.id) ?? tab.body
       return body !== tab.savedBody
@@ -757,13 +864,14 @@ function App(): JSX.Element {
       ])
       setActiveId(tabId(note.path, 'markdown'))
       setJumpOffset(0)
+      rememberRecentPath(note.path)
       await refreshTree()
     } catch (err) {
       setError(String(err))
     } finally {
       setBusy(false)
     }
-  }, [fileQuery, refreshTree])
+  }, [fileQuery, refreshTree, rememberRecentPath])
 
   const createFolderAction = useCallback(async () => {
     const path = window.prompt('New folder path', '')
@@ -824,13 +932,15 @@ function App(): JSX.Element {
         const activeTab = tabs.find((tab) => tab.id === current)
         return activeTab && samePath(activeTab.path, oldPath) ? tabId(note.path, activeTab.mode) : current
       })
+      forgetRecentPath(oldPath)
+      rememberRecentPath(note.path)
       await refreshTree()
     } catch (err) {
       setError(String(err))
     } finally {
       setBusy(false)
     }
-  }, [isTabDirty, latestTabBody, refreshTree, tabs])
+  }, [forgetRecentPath, isTabDirty, latestTabBody, refreshTree, rememberRecentPath, tabs])
 
   const deleteNoteAction = useCallback(async (path: string) => {
     const tab = tabs.find((tab) => samePath(tab.path, path))
@@ -844,6 +954,7 @@ function App(): JSX.Element {
     setError(null)
     try {
       await invoke('delete_note', { path })
+      forgetRecentPath(path)
       setTabs((prev) => {
         const index = prev.findIndex((tab) => samePath(tab.path, path))
         const next = prev.filter((tab) => !samePath(tab.path, path))
@@ -859,7 +970,7 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [activePath, isTabDirty, refreshTree, tabs])
+  }, [activePath, forgetRecentPath, isTabDirty, refreshTree, tabs])
 
   const renameFolderAction = useCallback(async (oldPath: string) => {
     const nextPath = window.prompt('Rename folder path', oldPath)
@@ -911,6 +1022,13 @@ function App(): JSX.Element {
         const currentMode = activeTab?.mode ?? 'markdown'
         setActiveId(tabId(`${normalizedNextPath}/${activePath.slice(oldPath.length + 1)}`, currentMode))
       }
+      setRecentPaths((prev) =>
+        prev.map((path) =>
+          isPathInsideFolder(path, oldPath)
+            ? `${normalizedNextPath}/${path.slice(oldPath.length + 1)}`
+            : path
+        )
+      )
       await refreshTree()
     } catch (err) {
       setError(String(err))
@@ -931,6 +1049,7 @@ function App(): JSX.Element {
     setError(null)
     try {
       await invoke('delete_folder', { path })
+      setRecentPaths((prev) => prev.filter((recentPath) => !isPathInsideFolder(recentPath, path)))
       setTabs((prev) => prev.filter((tab) => !isPathInsideFolder(tab.path, path)))
       if (activePath != null && isPathInsideFolder(activePath, path)) setActiveId(null)
       await refreshTree()
@@ -971,7 +1090,7 @@ function App(): JSX.Element {
           : tab
       )
     )
-  }, [])
+  }, [profile.persistRecentFiles])
 
   const updateTrackState = useCallback((id: string, trackState: TrackState) => {
     setTabs((prev) =>
@@ -1190,6 +1309,10 @@ function App(): JSX.Element {
 
   const totalFiles = useMemo(() => countFiles(tree), [tree])
   const allFilePaths = useMemo(() => collectFilePaths(tree), [tree])
+  const recentClosedPaths = useMemo(
+    () => recentPaths.filter((path) => !tabs.some((tab) => samePath(tab.path, path))),
+    [recentPaths, tabs]
+  )
   const previewHtml = useMemo(
     () => ({
       html: renderMarkdownPreview(activeTab?.body ?? '', allFilePaths),
@@ -1406,6 +1529,44 @@ function App(): JSX.Element {
             {activeTab?.externalStatus === 'deleted' && <span className="external-pill danger">Deleted on disk</span>}
           </div>
           <div className="editor-actions">
+            <select
+              className="recent-files-select"
+              value=""
+              onChange={(event) => {
+                const path = event.target.value
+                if (!path) return
+                void openNote(path)
+              }}
+              disabled={!vault || recentClosedPaths.length === 0}
+              title="Recent files"
+            >
+              <option value="">Recent</option>
+              {recentClosedPaths.map((path) => (
+                <option key={pathKey(path)} value={path}>{path}</option>
+              ))}
+            </select>
+            <label className="recent-history-toggle" title="Persist recent files">
+              <input
+                type="checkbox"
+                checked={profile.persistRecentFiles}
+                onChange={(event) => updateProfile({ ...profile, persistRecentFiles: event.target.checked })}
+              />
+              <span>History</span>
+            </label>
+            <select
+              className="actions-select"
+              value=""
+              onChange={(event) => {
+                const action = event.target.value
+                event.currentTarget.value = ''
+                if (action === 'delete' && activeTab) void deleteNoteAction(activeTab.path)
+              }}
+              disabled={!activeTab || busy}
+              title="Actions"
+            >
+              <option value="">Actions</option>
+              <option value="delete">Delete current file</option>
+            </select>
             <button
               type="button"
               className={showPreview ? 'secondary-button active' : 'secondary-button'}
@@ -1470,7 +1631,8 @@ function App(): JSX.Element {
             />
             ) : (
               <MarkdownEditor
-                activePath={activeTab?.id ?? null}
+                activePath={activeTab?.path ?? null}
+                changeId={activeTab?.id ?? null}
                 filePath={activeTab?.path ?? null}
               body={activeTab?.body ?? ''}
               disabled={!activeTab}
@@ -1758,6 +1920,7 @@ function TypstPreviewPane({ preview }: { preview: TypstPreviewState | null }): J
 
 function MarkdownEditor({
   activePath,
+  changeId,
   filePath,
   body,
   disabled,
@@ -1771,6 +1934,7 @@ function MarkdownEditor({
   onOpenWikiLink
 }: {
   activePath: string | null
+  changeId: string | null
   filePath: string | null
   body: string
   disabled: boolean
@@ -1787,6 +1951,7 @@ function MarkdownEditor({
   const viewRef = useRef<EditorView | null>(null)
   const editableRef = useRef<Compartment | null>(null)
   const pathRef = useRef<string | null>(null)
+  const changeIdRef = useRef<string | null>(changeId)
   const statesRef = useRef<Map<string, EditorState>>(new Map())
   const pendingEditorEchoesRef = useRef<Map<string, string[]>>(new Map())
   const baseExtensionsRef = useRef<Extension[] | null>(null)
@@ -1798,6 +1963,10 @@ function MarkdownEditor({
   useEffect(() => {
     onChangeRef.current = onChange
   }, [onChange])
+
+  useEffect(() => {
+    changeIdRef.current = changeId
+  }, [changeId])
 
   useEffect(() => {
     notePathsRef.current = notePaths
@@ -1886,10 +2055,11 @@ function MarkdownEditor({
         if (!update.docChanged) return
         if (update.transactions.some((tr) => tr.annotation(programmaticChange))) return
         const path = pathRef.current
-        if (!path) return
+        const changeId = changeIdRef.current
+        if (!path || !changeId) return
         const nextBody = update.state.doc.toString()
         rememberEditorEcho(pendingEditorEchoesRef.current, path, nextBody)
-        onChangeRef.current(path, nextBody)
+        onChangeRef.current(changeId, nextBody)
       })
     ]
     baseExtensionsRef.current = extensions
@@ -1899,6 +2069,7 @@ function MarkdownEditor({
       state: createEditorState(body, extensions, filePath)
     })
     viewRef.current = view
+    pathRef.current = activePath
     return () => {
       view.destroy()
       viewRef.current = null
@@ -1951,11 +2122,13 @@ function MarkdownEditor({
       view.setState(cached)
       applyEditable(view, editableRef.current, true)
       if (cached.doc.toString() !== body) {
+        const scrollTop = view.scrollDOM.scrollTop
         view.dispatch({
           changes: { from: 0, to: view.state.doc.length, insert: body },
           annotations: programmaticChange.of(true),
           selection: { anchor: Math.min(view.state.selection.main.head, body.length) }
         })
+        view.scrollDOM.scrollTop = scrollTop
       }
       return
     }
@@ -3109,9 +3282,13 @@ function uniquePaths(paths: string[]): string[] {
 }
 
 async function saveTabBodyWithConflictCheck(tab: OpenTab, body: string): Promise<SaveResult> {
-  let disk: NoteContent
+  let result: SaveNoteCommandResult
   try {
-    disk = await invoke<NoteContent>('read_note', { path: tab.path })
+    result = await invoke<SaveNoteCommandResult>('save_note_if_unchanged', {
+      path: tab.path,
+      body,
+      expectedBody: tab.savedBody
+    })
   } catch (err) {
     return {
       saved: false,
@@ -3119,7 +3296,8 @@ async function saveTabBodyWithConflictCheck(tab: OpenTab, body: string): Promise
     }
   }
 
-  if (disk.body !== tab.savedBody) {
+  if (result.status === 'conflict') {
+    const disk = result.current
     if (disk.body === body) {
       return { saved: true, note: disk }
     }
@@ -3140,11 +3318,7 @@ async function saveTabBodyWithConflictCheck(tab: OpenTab, body: string): Promise
     }
   }
 
-  const note = await invoke<NoteContent>('save_note', {
-    path: tab.path,
-    body
-  })
-  return { saved: true, note }
+  return { saved: true, note: result.note }
 }
 
 async function saveWindowPlacement(appWindow: ReturnType<typeof getCurrentWindow>): Promise<void> {
@@ -3265,6 +3439,9 @@ function readStoredSession(root: string): StoredSession | null {
         : [],
       pinnedPaths: Array.isArray(parsed.pinnedPaths)
         ? parsed.pinnedPaths.filter((path): path is string => typeof path === 'string')
+        : [],
+      recentPaths: Array.isArray(parsed.recentPaths)
+        ? parsed.recentPaths.filter((path): path is string => typeof path === 'string')
         : [],
       fileQuery: typeof parsed.fileQuery === 'string' ? parsed.fileQuery : '',
       contentUsesFileFilter: parsed.contentUsesFileFilter === true

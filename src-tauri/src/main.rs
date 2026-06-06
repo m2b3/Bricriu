@@ -127,6 +127,13 @@ struct NoteContent {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase", tag = "status")]
+enum SaveNoteResult {
+    Saved { note: NoteContent },
+    Conflict { current: NoteContent },
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TypstPreview {
     format: TypstPreviewFormat,
@@ -187,6 +194,8 @@ struct AppProfile {
     typst_preview_debounce_ms: u64,
     #[serde(default = "default_close_markdown_before_track")]
     close_markdown_before_track: bool,
+    #[serde(default = "default_persist_recent_files")]
+    persist_recent_files: bool,
 }
 
 #[tauri::command]
@@ -279,6 +288,14 @@ fn load_profile() -> Result<AppProfile, String> {
     let parsed = serde_json::from_str::<AppProfile>(&raw)
         .map_err(|err| format!("Could not parse profile.json: {err}"))?;
     let profile = normalize_profile(parsed);
+    write_profile_file(&path, &profile)?;
+    Ok(profile)
+}
+
+#[tauri::command]
+fn save_profile(profile: AppProfile) -> Result<AppProfile, String> {
+    let path = profile_path()?;
+    let profile = normalize_profile(profile);
     write_profile_file(&path, &profile)?;
     Ok(profile)
 }
@@ -404,6 +421,32 @@ fn save_note(
     }
     fs::write(&abs, body).map_err(|err| format!("Could not save note: {err}"))?;
     read_note(state, path)
+}
+
+#[tauri::command]
+fn save_note_if_unchanged(
+    state: tauri::State<AppState>,
+    path: String,
+    body: String,
+    expected_body: String,
+) -> Result<SaveNoteResult, String> {
+    let root = current_root(&state)?;
+    let abs = resolve_safe(&root, &path)?;
+    if !is_note_file(&abs) {
+        return Err("Only Markdown and Typst files can be saved.".to_string());
+    }
+
+    let current_body = fs::read_to_string(&abs).map_err(|err| format!("Could not read note: {err}"))?;
+    if current_body != expected_body {
+        return Ok(SaveNoteResult::Conflict {
+            current: read_note(state, path)?,
+        });
+    }
+
+    write_note_atomically(&abs, &body)?;
+    Ok(SaveNoteResult::Saved {
+        note: read_note(state, path)?,
+    })
 }
 
 #[tauri::command]
@@ -1496,6 +1539,89 @@ fn to_posix_relative(root: &Path, abs: &Path) -> Result<String, String> {
         .join("/"))
 }
 
+fn write_note_atomically(path: &Path, body: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Could not resolve note folder.".to_string())?;
+    fs::create_dir_all(parent).map_err(|err| format!("Could not create folder: {err}"))?;
+
+    let temp = temp_note_path(path);
+    let write_result = (|| -> Result<(), String> {
+        {
+            let mut file = fs::File::create(&temp)
+                .map_err(|err| format!("Could not create temporary note file: {err}"))?;
+            use std::io::Write;
+            file.write_all(body.as_bytes())
+                .map_err(|err| format!("Could not write temporary note file: {err}"))?;
+            file.sync_all()
+                .map_err(|err| format!("Could not flush temporary note file: {err}"))?;
+        }
+        replace_file(&temp, path)
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    write_result
+}
+
+fn temp_note_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("note");
+    let stamp = now_ms();
+    let mut counter = 0u32;
+    loop {
+        let candidate = parent.join(format!(".{file_name}.{stamp}.{counter}.tmp"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+#[cfg(windows)]
+fn replace_file(temp: &Path, target: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let temp_wide = temp
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let target_wide = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+
+    let ok = unsafe {
+        MoveFileExW(
+            temp_wide.as_ptr(),
+            target_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(format!(
+            "Could not replace note: {}",
+            std::io::Error::last_os_error()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(temp: &Path, target: &Path) -> Result<(), String> {
+    fs::rename(temp, target).map_err(|err| format!("Could not replace note: {err}"))
+}
+
 fn display_path(path: &Path) -> String {
     strip_windows_extended_path_prefix(&path.to_string_lossy())
 }
@@ -1818,6 +1944,7 @@ fn default_profile() -> AppProfile {
         git_status_poll_interval_ms: default_git_status_poll_interval_ms(),
         typst_preview_debounce_ms: default_typst_preview_debounce_ms(),
         close_markdown_before_track: default_close_markdown_before_track(),
+        persist_recent_files: default_persist_recent_files(),
     }
 }
 
@@ -1830,6 +1957,7 @@ fn normalize_profile(profile: AppProfile) -> AppProfile {
             .clamp(60_000, 60 * 60 * 1000),
         typst_preview_debounce_ms: profile.typst_preview_debounce_ms.clamp(50, 5_000),
         close_markdown_before_track: profile.close_markdown_before_track,
+        persist_recent_files: profile.persist_recent_files,
     }
 }
 
@@ -1842,6 +1970,10 @@ fn default_typst_preview_debounce_ms() -> u64 {
 }
 
 fn default_close_markdown_before_track() -> bool {
+    true
+}
+
+fn default_persist_recent_files() -> bool {
     true
 }
 
@@ -1858,6 +1990,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             open_vault,
             load_profile,
+            save_profile,
             watch_vault,
             checkpoint_and_switch_inuse,
             checkpoint_inuse,
@@ -1865,6 +1998,7 @@ fn main() {
             list_tree,
             read_note,
             save_note,
+            save_note_if_unchanged,
             compile_typst_preview,
             read_track_state,
             save_track_state,

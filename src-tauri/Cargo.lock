@@ -2851,6 +2851,7 @@ dependencies = [
  "typst-html",
  "typst-pdf",
  "typst-svg",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
