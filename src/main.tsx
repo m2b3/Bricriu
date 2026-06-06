@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { availableMonitors, getCurrentWindow, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window'
 import {
   Annotation,
   Compartment,
@@ -125,6 +125,7 @@ type TypstPreviewState = {
 }
 
 type EditorMode = 'markdown' | 'track'
+type SearchView = 'file' | 'content'
 
 type OpenTab = {
   id: string
@@ -152,6 +153,7 @@ const editorDocumentVersion = StateField.define<number>({
 })
 const LAST_VAULT_KEY = 'notesproject:last-vault'
 const SESSION_KEY_PREFIX = 'notesproject:session:'
+const WINDOW_PLACEMENT_KEY = 'notesproject:window-placement'
 
 type AppProfile = {
   autosaveDelayMs: number
@@ -191,6 +193,13 @@ type RestoredSession = {
   contentUsesFileFilter: boolean
 }
 
+type StoredWindowPlacement = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
 function App(): JSX.Element {
   const [vaultPath, setVaultPath] = useState(() => localStorage.getItem(LAST_VAULT_KEY) ?? '')
   const [vault, setVault] = useState<VaultInfo | null>(null)
@@ -199,6 +208,7 @@ function App(): JSX.Element {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [fileQuery, setFileQuery] = useState('')
   const [contentQuery, setContentQuery] = useState('')
+  const [activeSearchView, setActiveSearchView] = useState<SearchView>('file')
   const [contentUsesFileFilter, setContentUsesFileFilter] = useState(false)
   const [contentMatches, setContentMatches] = useState<ContentMatch[]>([])
   const [backlinks, setBacklinks] = useState<BacklinkMatch[]>([])
@@ -217,17 +227,32 @@ function App(): JSX.Element {
   const [showBacklinks, setShowBacklinks] = useState(false)
   const [loadingBacklinks, setLoadingBacklinks] = useState(false)
   const [typstPreview, setTypstPreview] = useState<TypstPreviewState | null>(null)
+  const [editorFocusRequest, setEditorFocusRequest] = useState(0)
+  const [editorSelectAllRequest, setEditorSelectAllRequest] = useState(0)
   const tabsRef = useRef<OpenTab[]>([])
   const touchedPathsRef = useRef<Set<string>>(new Set())
   const vaultRef = useRef<VaultInfo | null>(null)
   const closingRef = useRef(false)
+  const activeTabHintRef = useRef<{ path: string; mode: EditorMode } | null>(null)
 
   const activeTab = useMemo(
-    () => tabs.find((tab) => tab.id === activeId) ?? null,
+    () => {
+      const byId = tabs.find((tab) => tab.id === activeId)
+      if (byId) return byId
+      const hint = activeTabHintRef.current
+      if (!hint) return null
+      const activeMode = activeId?.startsWith('track:') ? 'track' : activeId?.startsWith('markdown:') ? 'markdown' : hint.mode
+      return tabs.find((tab) => tab.mode === activeMode && samePath(tab.path, hint.path)) ?? null
+    },
     [activeId, tabs]
   )
   const activePath = activeTab?.path ?? null
   const dirty = !!activeTab && activeTab.body !== activeTab.savedBody
+
+  useEffect(() => {
+    if (activeTab) activeTabHintRef.current = { path: activeTab.path, mode: activeTab.mode }
+    if (activeTab && activeTab.id !== activeId) setActiveId(activeTab.id)
+  }, [activeId, activeTab])
 
   useEffect(() => {
     void invoke<AppProfile>('load_profile')
@@ -305,21 +330,24 @@ function App(): JSX.Element {
   const reconcileExternalTab = useCallback(async (path: string) => {
     try {
       const note = await invoke<NoteContent>('read_note', { path })
+      const activeTabForPath = tabs.find((tab) => tab.id === activeId && samePath(tab.path, path))
       setTabs((prev) =>
         prev.map((tab) => {
           if (!samePath(tab.path, path)) return tab
+          const nextId = tabId(note.path, tab.mode)
           if (tab.savedBody === note.body) {
-            return { ...tab, path: note.path, id: tabId(note.path, tab.mode), updatedAt: note.updatedAt, size: note.size, externalStatus: undefined }
+            return { ...tab, path: note.path, id: nextId, updatedAt: note.updatedAt, size: note.size, externalStatus: undefined }
           }
-          return { ...tab, path: note.path, id: tabId(note.path, tab.mode), externalStatus: 'changed' }
+          return { ...tab, path: note.path, id: nextId, externalStatus: 'changed' }
         })
       )
+      if (activeTabForPath) setActiveId(tabId(note.path, activeTabForPath.mode))
     } catch {
       setTabs((prev) =>
         prev.map((tab) => (samePath(tab.path, path) ? { ...tab, externalStatus: 'deleted' } : tab))
       )
     }
-  }, [])
+  }, [activeId, tabs])
 
   const openVault = useCallback(async () => {
     const trimmed = vaultPath.trim()
@@ -548,6 +576,7 @@ function App(): JSX.Element {
         path: activeTab.path,
         body: requestedBody
       })
+      const savedId = tabId(saved.path, activeTab.mode)
       if (activeTab.mode === 'track' && activeTab.trackState) {
         await invoke('save_track_state', { path: activeTab.path, trackState: activeTab.trackState })
       }
@@ -556,7 +585,7 @@ function App(): JSX.Element {
           tab.id === activeTab.id
             ? {
                 ...tab,
-                id: tabId(saved.path, activeTab.mode),
+                id: savedId,
                 path: saved.path,
                 body: tab.body === requestedBody ? saved.body : tab.body,
                 savedBody: saved.body,
@@ -567,8 +596,10 @@ function App(): JSX.Element {
             : tab
         )
       )
+      setActiveId((current) => (current === activeTab.id ? savedId : current))
       setTouchedPaths((prev) => new Set([...prev, saved.path]))
       await refreshTree()
+      if (activeTab.mode === 'markdown') setEditorFocusRequest((request) => request + 1)
     } catch (err) {
       setError(String(err))
     } finally {
@@ -598,6 +629,7 @@ function App(): JSX.Element {
       path: tab.path,
       body: requestedBody
     })
+    const savedId = tabId(saved.path, tab.mode)
     if (tab.mode === 'track' && tab.trackState) {
       await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
     }
@@ -606,7 +638,7 @@ function App(): JSX.Element {
         item.id === tab.id
             ? {
               ...item,
-              id: tabId(saved.path, item.mode),
+              id: savedId,
               path: saved.path,
               body: item.body === requestedBody ? saved.body : item.body,
               savedBody: saved.body,
@@ -617,6 +649,7 @@ function App(): JSX.Element {
           : item
       )
     )
+    setActiveId((current) => (current === tab.id ? savedId : current))
     setTouchedPaths((prev) => new Set([...prev, saved.path]))
     await refreshTree()
   }, [refreshTree])
@@ -920,6 +953,32 @@ function App(): JSX.Element {
 
   useEffect(() => {
     const appWindow = getCurrentWindow()
+    let saveTimer: number | null = null
+
+    const scheduleSave = () => {
+      if (saveTimer != null) window.clearTimeout(saveTimer)
+      saveTimer = window.setTimeout(() => {
+        void saveWindowPlacement(appWindow)
+        saveTimer = null
+      }, 250)
+    }
+
+    void restoreWindowPlacement(appWindow).catch(() => {
+      // Bad saved geometry should not block startup.
+    })
+
+    const unlistenMoved = appWindow.onMoved(scheduleSave)
+    const unlistenResized = appWindow.onResized(scheduleSave)
+
+    return () => {
+      if (saveTimer != null) window.clearTimeout(saveTimer)
+      void unlistenMoved.then((unlisten) => unlisten())
+      void unlistenResized.then((unlisten) => unlisten())
+    }
+  }, [])
+
+  useEffect(() => {
+    const appWindow = getCurrentWindow()
     const unlistenPromise = appWindow.onCloseRequested(async (event) => {
       if (closingRef.current) return
       event.preventDefault()
@@ -927,6 +986,7 @@ function App(): JSX.Element {
       setBusy(true)
       setError(null)
       try {
+        await saveWindowPlacement(appWindow)
         await finalizeBeforeClose()
         await appWindow.destroy()
       } catch (err) {
@@ -952,6 +1012,13 @@ function App(): JSX.Element {
         return
       }
 
+      if (key === 'a' && activeTab?.mode === 'markdown' && isAppChromeTarget(event.target)) {
+        event.preventDefault()
+        setEditorFocusRequest((request) => request + 1)
+        setEditorSelectAllRequest((request) => request + 1)
+        return
+      }
+
       if (key === 'w') {
         if (!activeId) return
         event.preventDefault()
@@ -974,7 +1041,7 @@ function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeId, closeTab, saveActive, tabs])
+  }, [activeId, activeTab?.mode, closeTab, saveActive, tabs])
 
   useEffect(() => {
     setSearchRevealedFolders(new Set())
@@ -1162,7 +1229,11 @@ function App(): JSX.Element {
             <span>File name</span>
             <input
               value={fileQuery}
-              onChange={(event) => setFileQuery(event.target.value)}
+              onChange={(event) => {
+                setActiveSearchView('file')
+                setFileQuery(event.target.value)
+              }}
+              onFocus={() => setActiveSearchView('file')}
               placeholder="Filter paths"
               spellCheck={false}
             />
@@ -1171,7 +1242,11 @@ function App(): JSX.Element {
             <span>Content</span>
             <input
               value={contentQuery}
-              onChange={(event) => setContentQuery(event.target.value)}
+              onChange={(event) => {
+                setActiveSearchView('content')
+                setContentQuery(event.target.value)
+              }}
+              onFocus={() => setActiveSearchView('content')}
               placeholder="Search note text"
               spellCheck={false}
             />
@@ -1187,7 +1262,7 @@ function App(): JSX.Element {
         </section>
 
         <section className="tree-panel">
-          {contentQuery.trim() ? (
+          {activeSearchView === 'content' && contentQuery.trim() ? (
             <>
               <PinnedNotes
                 entries={pinnedEntries}
@@ -1251,7 +1326,15 @@ function App(): JSX.Element {
       </aside>
 
       <section className="editor-pane">
-        <header className="editor-header">
+        <header
+          className="editor-header"
+          onMouseDown={(event) => {
+            const target = event.target as HTMLElement | null
+            if (target?.closest('button, input, select, textarea, a, [role="button"]')) return
+            event.preventDefault()
+            setEditorFocusRequest((request) => request + 1)
+          }}
+        >
           <div className="note-heading">
             <span className="note-path">{activeTab?.path ?? 'Open a Markdown file'}</span>
             {dirty && <span className="dirty-pill">Modified</span>}
@@ -1284,7 +1367,12 @@ function App(): JSX.Element {
             >
               Backlinks
             </button>
-            <button type="button" onClick={() => void saveActive()} disabled={!activeTab || !dirty || busy}>
+            <button
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => void saveActive()}
+              disabled={!activeTab || !dirty || busy}
+            >
               Save
             </button>
             <button
@@ -1315,15 +1403,17 @@ function App(): JSX.Element {
               onMarkdownChange={updateTabBody}
               onTrackStateChange={updateTrackState}
             />
-          ) : (
-            <MarkdownEditor
-              activePath={activeTab?.id ?? null}
-              filePath={activeTab?.path ?? null}
+            ) : (
+              <MarkdownEditor
+                activePath={activeTab?.id ?? null}
+                filePath={activeTab?.path ?? null}
               body={activeTab?.body ?? ''}
               disabled={!activeTab}
               notePaths={allFilePaths}
               searchHighlight={searchHighlight && activePath != null && samePath(searchHighlight.path, activePath) ? searchHighlight : null}
               jumpOffset={jumpOffset}
+              focusRequest={editorFocusRequest}
+              selectAllRequest={editorSelectAllRequest}
               onJumpHandled={() => setJumpOffset(null)}
               onChange={updateTabBody}
               onOpenWikiLink={(path) => void openNote(path)}
@@ -1609,6 +1699,8 @@ function MarkdownEditor({
   notePaths,
   searchHighlight,
   jumpOffset,
+  focusRequest,
+  selectAllRequest,
   onJumpHandled,
   onChange,
   onOpenWikiLink
@@ -1620,6 +1712,8 @@ function MarkdownEditor({
   notePaths: string[]
   searchHighlight: SearchHighlight | null
   jumpOffset: number | null
+  focusRequest: number
+  selectAllRequest: number
   onJumpHandled: () => void
   onChange: (path: string, body: string) => void
   onOpenWikiLink: (path: string) => void
@@ -1769,12 +1863,14 @@ function MarkdownEditor({
       const current = view.state.doc.toString()
       if (current === body) return
       if (activePath && consumeEditorEcho(pendingEditorEchoesRef.current, activePath, body)) return
+      const anchor = Math.min(view.state.selection.main.head, body.length)
+      const scrollTop = view.scrollDOM.scrollTop
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: body },
         annotations: programmaticChange.of(true),
-        selection: { anchor: 0 }
+        selection: { anchor }
       })
-      view.scrollDOM.scrollTop = 0
+      view.scrollDOM.scrollTop = scrollTop
       return
     }
 
@@ -1815,6 +1911,20 @@ function MarkdownEditor({
     view.focus()
     onJumpHandled()
   }, [jumpOffset, onJumpHandled])
+
+  useEffect(() => {
+    if (disabled || focusRequest === 0) return
+    viewRef.current?.focus()
+  }, [disabled, focusRequest])
+
+  useEffect(() => {
+    const view = viewRef.current
+    if (disabled || selectAllRequest === 0 || !view) return
+    view.dispatch({
+      selection: EditorSelection.range(0, view.state.doc.length)
+    })
+    view.focus()
+  }, [disabled, selectAllRequest])
 
   return (
     <div className={disabled ? 'editor-host is-empty' : 'editor-host'}>
@@ -2929,6 +3039,92 @@ function uniquePaths(paths: string[]): string[] {
     seen.add(key)
     return true
   })
+}
+
+async function saveWindowPlacement(appWindow: ReturnType<typeof getCurrentWindow>): Promise<void> {
+  try {
+    const [position, size] = await Promise.all([
+      appWindow.outerPosition(),
+      appWindow.innerSize()
+    ])
+    writeStoredWindowPlacement({
+      x: position.x,
+      y: position.y,
+      width: size.width,
+      height: size.height
+    })
+  } catch {
+    // Window placement is best effort.
+  }
+}
+
+async function restoreWindowPlacement(appWindow: ReturnType<typeof getCurrentWindow>): Promise<void> {
+  const placement = readStoredWindowPlacement()
+  if (!placement) return
+
+  const monitors = await availableMonitors()
+  if (!windowPlacementIsVisible(placement, monitors)) return
+
+  await appWindow.setSize(new PhysicalSize(placement.width, placement.height))
+  await appWindow.setPosition(new PhysicalPosition(placement.x, placement.y))
+}
+
+function readStoredWindowPlacement(): StoredWindowPlacement | null {
+  try {
+    const raw = localStorage.getItem(WINDOW_PLACEMENT_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<StoredWindowPlacement>
+    if (
+      typeof parsed.x !== 'number' ||
+      typeof parsed.y !== 'number' ||
+      typeof parsed.width !== 'number' ||
+      typeof parsed.height !== 'number' ||
+      parsed.width < 480 ||
+      parsed.height < 320
+    ) {
+      return null
+    }
+    return {
+      x: Math.round(parsed.x),
+      y: Math.round(parsed.y),
+      width: Math.round(parsed.width),
+      height: Math.round(parsed.height)
+    }
+  } catch {
+    return null
+  }
+}
+
+function writeStoredWindowPlacement(placement: StoredWindowPlacement): void {
+  try {
+    localStorage.setItem(WINDOW_PLACEMENT_KEY, JSON.stringify(placement))
+  } catch {
+    // Ignore quota/storage failures; placement restore is best effort.
+  }
+}
+
+function windowPlacementIsVisible(
+  placement: StoredWindowPlacement,
+  monitors: Awaited<ReturnType<typeof availableMonitors>>
+): boolean {
+  if (monitors.length === 0) return true
+  const centerX = placement.x + placement.width / 2
+  const centerY = placement.y + placement.height / 2
+  return monitors.some((monitor) => {
+    const area = monitor.workArea
+    return (
+      centerX >= area.position.x &&
+      centerX <= area.position.x + area.size.width &&
+      centerY >= area.position.y &&
+      centerY <= area.position.y + area.size.height
+    )
+  })
+}
+
+function isAppChromeTarget(target: EventTarget | null): boolean {
+  const element = target instanceof HTMLElement ? target : null
+  if (!element) return true
+  return !element.closest('input, textarea, select, button, a, [contenteditable="true"], [role="button"], .cm-editor')
 }
 
 async function loadOrCreateTrackState(path: string, body: string): Promise<TrackState> {

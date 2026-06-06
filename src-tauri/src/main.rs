@@ -208,7 +208,7 @@ fn open_vault(state: tauri::State<AppState>, path: String) -> Result<VaultInfo, 
         .unwrap_or("Vault")
         .to_string();
     let git = prepare_inuse_branch(&root)?;
-    let root_string = root.to_string_lossy().to_string();
+    let root_string = display_path(&root);
     *state
         .vault_root
         .lock()
@@ -1494,6 +1494,19 @@ fn to_posix_relative(root: &Path, abs: &Path) -> Result<String, String> {
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/"))
+}
+
+fn display_path(path: &Path) -> String {
+    strip_windows_extended_path_prefix(&path.to_string_lossy())
+}
+
+fn strip_windows_extended_path_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    path.strip_prefix(r"\\?\")
+        .unwrap_or(path)
+        .to_string()
 }
 
 #[cfg(windows)]
