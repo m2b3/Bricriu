@@ -140,6 +140,19 @@ type OpenTab = {
   externalStatus?: 'changed' | 'deleted'
 }
 
+type SaveConflictResult = {
+  saved: false
+  conflictPath?: string
+  message: string
+}
+
+type SaveSuccessResult = {
+  saved: true
+  note: NoteContent
+}
+
+type SaveResult = SaveSuccessResult | SaveConflictResult
+
 type VaultChangeEvent = {
   paths: string[]
 }
@@ -230,10 +243,19 @@ function App(): JSX.Element {
   const [editorFocusRequest, setEditorFocusRequest] = useState(0)
   const [editorSelectAllRequest, setEditorSelectAllRequest] = useState(0)
   const tabsRef = useRef<OpenTab[]>([])
+  const latestBodiesRef = useRef<Map<string, string>>(new Map())
   const touchedPathsRef = useRef<Set<string>>(new Set())
   const vaultRef = useRef<VaultInfo | null>(null)
   const closingRef = useRef(false)
   const activeTabHintRef = useRef<{ path: string; mode: EditorMode } | null>(null)
+
+  const latestTabBody = useCallback((tab: OpenTab) => (
+    latestBodiesRef.current.get(tab.id) ?? tab.body
+  ), [])
+
+  const isTabDirty = useCallback((tab: OpenTab) => (
+    latestTabBody(tab) !== tab.savedBody
+  ), [latestTabBody])
 
   const activeTab = useMemo(
     () => {
@@ -247,7 +269,7 @@ function App(): JSX.Element {
     [activeId, tabs]
   )
   const activePath = activeTab?.path ?? null
-  const dirty = !!activeTab && activeTab.body !== activeTab.savedBody
+  const dirty = !!activeTab && isTabDirty(activeTab)
 
   useEffect(() => {
     if (activeTab) activeTabHintRef.current = { path: activeTab.path, mode: activeTab.mode }
@@ -262,7 +284,17 @@ function App(): JSX.Element {
 
   useEffect(() => {
     tabsRef.current = tabs
-  }, [tabs])
+    const liveIds = new Set(tabs.map((tab) => tab.id))
+    for (const id of latestBodiesRef.current.keys()) {
+      if (!liveIds.has(id)) latestBodiesRef.current.delete(id)
+    }
+    for (const tab of tabs) {
+      const latestBody = latestBodiesRef.current.get(tab.id)
+      if (latestBody == null || latestBody === tab.savedBody || tab.body !== tab.savedBody) {
+        latestBodiesRef.current.set(tab.id, tab.body)
+      }
+    }
+  }, [isTabDirty, tabs])
 
   useEffect(() => {
     touchedPathsRef.current = touchedPaths
@@ -453,13 +485,13 @@ function App(): JSX.Element {
   }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, pinnedPaths, tabs, vault])
 
   const openNote = useCallback(async (path: string, offset: number | null = null) => {
-    const existing = tabs.find((tab) => tab.id === tabId(path, 'markdown'))
+    const existing = tabs.find((tab) => tab.mode === 'markdown' && samePath(tab.path, path))
     if (existing) {
       setActiveId(existing.id)
       setJumpOffset(offset)
       return
     }
-    const conflicting = tabs.find((tab) => samePath(tab.path, path) && tab.mode !== 'markdown' && tab.body !== tab.savedBody)
+    const conflicting = tabs.find((tab) => samePath(tab.path, path) && tab.mode !== 'markdown' && isTabDirty(tab))
     if (conflicting) {
       const proceed = window.confirm(`${path} is modified in Track mode. Save or close it before opening Markdown mode?`)
       if (!proceed) return
@@ -489,10 +521,10 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [tabs])
+  }, [isTabDirty, tabs])
 
   const openTrackNote = useCallback(async (path: string) => {
-    const existing = tabs.find((tab) => tab.id === tabId(path, 'track'))
+    const existing = tabs.find((tab) => tab.mode === 'track' && samePath(tab.path, path))
     if (existing) {
       setActiveId(existing.id)
       return
@@ -501,7 +533,7 @@ function App(): JSX.Element {
     if (markdownTab && profile.closeMarkdownBeforeTrack) {
       const closeMarkdown = window.confirm(`${path} is already open in Markdown mode. Close that tab before opening Track mode?`)
       if (closeMarkdown) {
-        const dirtyMarkdown = markdownTab.body !== markdownTab.savedBody
+        const dirtyMarkdown = isTabDirty(markdownTab)
         const canClose = !dirtyMarkdown || window.confirm(`Close ${markdownTab.path} with unsaved changes?`)
         if (canClose) {
           setTabs((prev) => {
@@ -542,7 +574,7 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [activeId, profile.closeMarkdownBeforeTrack, tabs])
+  }, [activeId, isTabDirty, profile.closeMarkdownBeforeTrack, tabs])
 
   const openSearchMatch = useCallback((match: ContentMatch) => {
     const query = contentQuery.trim()
@@ -552,30 +584,23 @@ function App(): JSX.Element {
 
   const saveActive = useCallback(async () => {
     if (!activeTab) return
-    const requestedBody = activeTab.body
+    const requestedBody = latestTabBody(activeTab)
     setBusy(true)
     setError(null)
     try {
-      if (activeTab.mode === 'track') {
-        const disk = await invoke<NoteContent>('read_note', { path: activeTab.path })
-        if (disk.body !== activeTab.savedBody) {
-          const candidate = await invoke<NoteContent>('write_track_merge_candidate', {
-            path: activeTab.path,
-            body: requestedBody
-          })
-          if (activeTab.trackState) {
-            await invoke('save_track_state', { path: activeTab.path, trackState: activeTab.trackState })
-          }
-          setTouchedPaths((prev) => new Set([...prev, candidate.path]))
-          await refreshTree()
-          setError(`Disk changed for ${activeTab.path}. Wrote Track output to ${candidate.path} for diff/merge.`)
-          return
+      const result = await saveTabBodyWithConflictCheck(activeTab, requestedBody)
+      if (!result.saved) {
+        if (activeTab.mode === 'track' && activeTab.trackState) {
+          await invoke('save_track_state', { path: activeTab.path, trackState: activeTab.trackState })
         }
+        const conflictPath = result.conflictPath
+        if (conflictPath) setTouchedPaths((prev) => new Set([...prev, conflictPath]))
+        setTabs((prev) => prev.map((tab) => (tab.id === activeTab.id ? { ...tab, externalStatus: 'changed' } : tab)))
+        await refreshTree()
+        setError(result.message)
+        return
       }
-      const saved = await invoke<NoteContent>('save_note', {
-        path: activeTab.path,
-        body: requestedBody
-      })
+      const saved = result.note
       const savedId = tabId(saved.path, activeTab.mode)
       if (activeTab.mode === 'track' && activeTab.trackState) {
         await invoke('save_track_state', { path: activeTab.path, trackState: activeTab.trackState })
@@ -583,16 +608,22 @@ function App(): JSX.Element {
       setTabs((prev) =>
         prev.map((tab) =>
           tab.id === activeTab.id
-            ? {
-                ...tab,
-                id: savedId,
-                path: saved.path,
-                body: tab.body === requestedBody ? saved.body : tab.body,
-                savedBody: saved.body,
-                updatedAt: saved.updatedAt,
-                size: saved.size,
-                externalStatus: undefined
-              }
+            ? (() => {
+                const latestBody = latestBodiesRef.current.get(activeTab.id) ?? tab.body
+                const nextBody = latestBody === requestedBody ? saved.body : latestBody
+                latestBodiesRef.current.delete(activeTab.id)
+                latestBodiesRef.current.set(savedId, nextBody)
+                return {
+                  ...tab,
+                  id: savedId,
+                  path: saved.path,
+                  body: nextBody,
+                  savedBody: saved.body,
+                  updatedAt: saved.updatedAt,
+                  size: saved.size,
+                  externalStatus: undefined
+                }
+              })()
             : tab
         )
       )
@@ -605,30 +636,23 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [activeTab, refreshTree])
+  }, [activeTab, latestTabBody, refreshTree])
 
   const saveTab = useCallback(async (tab: OpenTab) => {
-    const requestedBody = tab.body
-    if (tab.mode === 'track') {
-      const disk = await invoke<NoteContent>('read_note', { path: tab.path })
-      if (disk.body !== tab.savedBody) {
-        const candidate = await invoke<NoteContent>('write_track_merge_candidate', {
-          path: tab.path,
-          body: requestedBody
-        })
-        if (tab.trackState) {
-          await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
-        }
-        setTouchedPaths((prev) => new Set([...prev, candidate.path]))
-        await refreshTree()
-        setError(`Disk changed for ${tab.path}. Wrote Track output to ${candidate.path} for diff/merge.`)
-        return
+    const requestedBody = latestTabBody(tab)
+    const result = await saveTabBodyWithConflictCheck(tab, requestedBody)
+    if (!result.saved) {
+      if (tab.mode === 'track' && tab.trackState) {
+        await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
       }
+      const conflictPath = result.conflictPath
+      if (conflictPath) setTouchedPaths((prev) => new Set([...prev, conflictPath]))
+      setTabs((prev) => prev.map((item) => (item.id === tab.id ? { ...item, externalStatus: 'changed' } : item)))
+      await refreshTree()
+      setError(result.message)
+      return
     }
-    const saved = await invoke<NoteContent>('save_note', {
-      path: tab.path,
-      body: requestedBody
-    })
+    const saved = result.note
     const savedId = tabId(saved.path, tab.mode)
     if (tab.mode === 'track' && tab.trackState) {
       await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
@@ -636,23 +660,29 @@ function App(): JSX.Element {
     setTabs((prev) =>
       prev.map((item) =>
         item.id === tab.id
-            ? {
-              ...item,
-              id: savedId,
-              path: saved.path,
-              body: item.body === requestedBody ? saved.body : item.body,
-              savedBody: saved.body,
-              updatedAt: saved.updatedAt,
-              size: saved.size,
-              externalStatus: undefined
-            }
+          ? (() => {
+              const latestBody = latestBodiesRef.current.get(tab.id) ?? item.body
+              const nextBody = latestBody === requestedBody ? saved.body : latestBody
+              latestBodiesRef.current.delete(tab.id)
+              latestBodiesRef.current.set(savedId, nextBody)
+              return {
+                ...item,
+                id: savedId,
+                path: saved.path,
+                body: nextBody,
+                savedBody: saved.body,
+                updatedAt: saved.updatedAt,
+                size: saved.size,
+                externalStatus: undefined
+              }
+            })()
           : item
       )
     )
     setActiveId((current) => (current === tab.id ? savedId : current))
     setTouchedPaths((prev) => new Set([...prev, saved.path]))
     await refreshTree()
-  }, [refreshTree])
+  }, [latestTabBody, refreshTree])
 
   const checkpointNow = useCallback(async () => {
     if (!vault?.git.isRepo || vault.git.currentBranch !== 'inuse') return
@@ -679,32 +709,25 @@ function App(): JSX.Element {
 
   const finalizeBeforeClose = useCallback(async () => {
     const vault = vaultRef.current
-    const dirtyTabs = tabsRef.current.filter((tab) => tab.body !== tab.savedBody)
+    const dirtyTabs = tabsRef.current.filter((tab) => {
+      const body = latestBodiesRef.current.get(tab.id) ?? tab.body
+      return body !== tab.savedBody
+    })
     const paths = new Set(touchedPathsRef.current)
 
     for (const tab of dirtyTabs) {
-      if (tab.mode === 'track') {
-        const disk = await invoke<NoteContent>('read_note', { path: tab.path })
-        if (disk.body !== tab.savedBody) {
-          const candidate = await invoke<NoteContent>('write_track_merge_candidate', {
-            path: tab.path,
-            body: tab.body
-          })
-          if (tab.trackState) {
-            await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
-          }
-          paths.add(candidate.path)
-          continue
-        }
-      }
-      const saved = await invoke<NoteContent>('save_note', {
-        path: tab.path,
-        body: tab.body
-      })
+      const result = await saveTabBodyWithConflictCheck(tab, latestBodiesRef.current.get(tab.id) ?? tab.body)
       if (tab.mode === 'track' && tab.trackState) {
         await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
       }
-      paths.add(saved.path)
+      if (!result.saved) {
+        if (result.conflictPath) {
+          paths.add(result.conflictPath)
+          continue
+        }
+        throw new Error(result.message)
+      }
+      paths.add(result.note.path)
     }
 
     if (vault?.git.isRepo && vault.git.currentBranch === 'inuse' && paths.size > 0) {
@@ -761,9 +784,24 @@ function App(): JSX.Element {
   const renameNoteAction = useCallback(async (oldPath: string) => {
     const nextPath = window.prompt('Rename note path', oldPath)
     if (!nextPath || nextPath === oldPath) return
+    const dirtyTabsForPath = tabs.filter((tab) => samePath(tab.path, oldPath) && isTabDirty(tab))
+    if (dirtyTabsForPath.length > 0) {
+      const proceed = window.confirm(`${oldPath} has unsaved changes. Save them before renaming?`)
+      if (!proceed) return
+    }
     setBusy(true)
     setError(null)
     try {
+      for (const tab of dirtyTabsForPath) {
+        const result = await saveTabBodyWithConflictCheck(tab, latestTabBody(tab))
+        if (!result.saved) {
+          const conflictPath = result.conflictPath
+          if (conflictPath) setTouchedPaths((prev) => new Set([...prev, conflictPath]))
+          setError(result.message)
+          await refreshTree()
+          return
+        }
+      }
       const note = await invoke<NoteContent>('rename_note', { oldPath, newPath: nextPath })
       setTabs((prev) =>
         prev.map((tab) =>
@@ -792,11 +830,11 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [activePath, refreshTree, tabs])
+  }, [isTabDirty, latestTabBody, refreshTree, tabs])
 
   const deleteNoteAction = useCallback(async (path: string) => {
     const tab = tabs.find((tab) => samePath(tab.path, path))
-    if (tab && tab.body !== tab.savedBody) {
+    if (tab && isTabDirty(tab)) {
       const proceedDirty = window.confirm(`${path} has unsaved changes. Delete it anyway?`)
       if (!proceedDirty) return
     }
@@ -821,32 +859,57 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [activePath, refreshTree, tabs])
+  }, [activePath, isTabDirty, refreshTree, tabs])
 
   const renameFolderAction = useCallback(async (oldPath: string) => {
     const nextPath = window.prompt('Rename folder path', oldPath)
     if (!nextPath || nextPath === oldPath) return
+    const dirtyTabsInFolder = tabs.filter((tab) => isPathInsideFolder(tab.path, oldPath) && isTabDirty(tab))
+    if (dirtyTabsInFolder.length > 0) {
+      const proceed = window.confirm(`Folder ${oldPath} contains open notes with unsaved changes. Save them before renaming?`)
+      if (!proceed) return
+    }
     setBusy(true)
     setError(null)
     try {
+      const savedBodiesById = new Map<string, string>()
+      for (const tab of dirtyTabsInFolder) {
+        const body = latestTabBody(tab)
+        const result = await saveTabBodyWithConflictCheck(tab, body)
+        if (!result.saved) {
+          const conflictPath = result.conflictPath
+          if (conflictPath) setTouchedPaths((prev) => new Set([...prev, conflictPath]))
+          setError(result.message)
+          await refreshTree()
+          return
+        }
+        savedBodiesById.set(tab.id, result.note.body)
+      }
       await invoke('rename_folder', { oldPath, newPath: nextPath })
+      const normalizedNextPath = nextPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
       setTabs((prev) =>
         prev.map((tab) =>
           isPathInsideFolder(tab.path, oldPath)
-            ? {
+            ? (() => {
+                const nextTabPath = `${normalizedNextPath}/${tab.path.slice(oldPath.length + 1)}`
+                const savedBody = savedBodiesById.get(tab.id)
+                return {
                 ...tab,
-                path: `${nextPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/${tab.path.slice(oldPath.length + 1)}`,
-                id: tabId(`${nextPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/${tab.path.slice(oldPath.length + 1)}`, tab.mode),
+                path: nextTabPath,
+                id: tabId(nextTabPath, tab.mode),
+                body: savedBody ?? tab.body,
+                savedBody: savedBody ?? tab.savedBody,
                 trackState: tab.trackState
-                  ? { ...tab.trackState, path: `${nextPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/${tab.path.slice(oldPath.length + 1)}` }
+                  ? { ...tab.trackState, path: nextTabPath }
                   : undefined
-              }
+                }
+              })()
             : tab
         )
       )
       if (activePath != null && isPathInsideFolder(activePath, oldPath)) {
         const currentMode = activeTab?.mode ?? 'markdown'
-        setActiveId(tabId(`${nextPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}/${activePath.slice(oldPath.length + 1)}`, currentMode))
+        setActiveId(tabId(`${normalizedNextPath}/${activePath.slice(oldPath.length + 1)}`, currentMode))
       }
       await refreshTree()
     } catch (err) {
@@ -854,10 +917,10 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [activePath, activeTab?.mode, refreshTree])
+  }, [activePath, activeTab?.mode, isTabDirty, latestTabBody, refreshTree, tabs])
 
   const deleteFolderAction = useCallback(async (path: string) => {
-    const affectedDirty = tabs.some((tab) => isPathInsideFolder(tab.path, path) && tab.body !== tab.savedBody)
+    const affectedDirty = tabs.some((tab) => isPathInsideFolder(tab.path, path) && isTabDirty(tab))
     if (affectedDirty) {
       const proceedDirty = window.confirm(`Folder ${path} contains open notes with unsaved changes. Delete anyway?`)
       if (!proceedDirty) return
@@ -876,11 +939,11 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [activePath, refreshTree, tabs])
+  }, [activePath, isTabDirty, refreshTree, tabs])
 
   const closeTab = useCallback((id: string) => {
     const closing = tabs.find((tab) => tab.id === id)
-    if (closing && closing.body !== closing.savedBody) {
+    if (closing && isTabDirty(closing)) {
       const proceed = window.confirm(`Close ${closing.path} with unsaved changes?`)
       if (!proceed) return
     }
@@ -893,9 +956,10 @@ function App(): JSX.Element {
       }
       return next
     })
-  }, [activeId, tabs])
+  }, [activeId, isTabDirty, tabs])
 
   const updateTabBody = useCallback((id: string, body: string) => {
+    latestBodiesRef.current.set(id, body)
     setTabs((prev) =>
       prev.map((tab) =>
         tab.id === id
@@ -932,7 +996,7 @@ function App(): JSX.Element {
   }, [])
 
   useEffect(() => {
-    const dirtyTabs = tabs.filter((tab) => tab.body !== tab.savedBody)
+    const dirtyTabs = tabs.filter(isTabDirty)
     if (dirtyTabs.length === 0) return
     const timer = window.setTimeout(() => {
       for (const tab of dirtyTabs) {
@@ -940,7 +1004,7 @@ function App(): JSX.Element {
       }
     }, profile.autosaveDelayMs)
     return () => window.clearTimeout(timer)
-  }, [profile.autosaveDelayMs, saveTab, tabs])
+  }, [isTabDirty, profile.autosaveDelayMs, saveTab, tabs])
 
   useEffect(() => {
     if (!vault?.git.isRepo || vault.git.currentBranch !== 'inuse') return
@@ -1388,6 +1452,7 @@ function App(): JSX.Element {
         <TabStrip
           tabs={tabs}
           activeId={activeId}
+          isDirty={isTabDirty}
           onSelect={setActiveId}
           onClose={closeTab}
         />
@@ -2522,11 +2587,13 @@ function toggleMarkdownWrap(view: EditorView, marker: string): boolean {
 function TabStrip({
   tabs,
   activeId,
+  isDirty,
   onSelect,
   onClose
 }: {
   tabs: OpenTab[]
   activeId: string | null
+  isDirty: (tab: OpenTab) => boolean
   onSelect: (id: string) => void
   onClose: (id: string) => void
 }): JSX.Element | null {
@@ -2535,7 +2602,7 @@ function TabStrip({
     <nav className="tab-strip" aria-label="Open files">
       {tabs.map((tab) => {
         const active = tab.id === activeId
-        const dirty = tab.body !== tab.savedBody
+        const dirty = isDirty(tab)
         return (
           <button
             key={tab.id}
@@ -3039,6 +3106,45 @@ function uniquePaths(paths: string[]): string[] {
     seen.add(key)
     return true
   })
+}
+
+async function saveTabBodyWithConflictCheck(tab: OpenTab, body: string): Promise<SaveResult> {
+  let disk: NoteContent
+  try {
+    disk = await invoke<NoteContent>('read_note', { path: tab.path })
+  } catch (err) {
+    return {
+      saved: false,
+      message: `Could not verify disk state for ${tab.path}; save blocked to avoid overwriting a moved or deleted file. ${String(err)}`
+    }
+  }
+
+  if (disk.body !== tab.savedBody) {
+    if (disk.body === body) {
+      return { saved: true, note: disk }
+    }
+    if (isMarkdownPath(tab.path)) {
+      const candidate = await invoke<NoteContent>('write_track_merge_candidate', {
+        path: tab.path,
+        body
+      })
+      return {
+        saved: false,
+        conflictPath: candidate.path,
+        message: `Disk changed for ${tab.path}. Wrote your unsaved version to ${candidate.path} for diff/merge; original disk file was not overwritten.`
+      }
+    }
+    return {
+      saved: false,
+      message: `Disk changed for ${tab.path}. Save blocked to avoid overwriting external changes.`
+    }
+  }
+
+  const note = await invoke<NoteContent>('save_note', {
+    path: tab.path,
+    body
+  })
+  return { saved: true, note }
 }
 
 async function saveWindowPlacement(appWindow: ReturnType<typeof getCurrentWindow>): Promise<void> {
