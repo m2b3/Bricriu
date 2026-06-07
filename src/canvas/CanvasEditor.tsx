@@ -18,9 +18,16 @@ import {
   type ReactFlowInstance
 } from '@xyflow/react'
 import { CanvasNode, type CanvasNodeData } from './CanvasNode'
+import { CanvasInspector } from './CanvasInspector'
+import { CanvasToolbar } from './CanvasToolbar'
 import {
+  addCanvasNode,
+  deleteCanvasNode,
   insertExampleCanvasBlock,
   parseCanvasBlock,
+  type CanvasNodeSpec,
+  type CanvasShape,
+  updateCanvasNodeProperties,
   updateCanvasNodePosition,
   updateCanvasNodeSize,
   updateCanvasNodeText
@@ -54,6 +61,14 @@ export function CanvasEditor({
   const [edges, setEdges] = useState<Edge[]>([])
   const [flow, setFlow] = useState<ReactFlowInstance<Node<CanvasNodeData>, Edge> | null>(null)
   const [editingNode, setEditingNode] = useState<EditingNode | null>(null)
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
+  const [inspectorOpen, setInspectorOpen] = useState(false)
+
+  const selectedNode = useMemo(() => (
+    parsed.ok && selectedNodeId
+      ? parsed.document.nodes.find((node) => node.id === selectedNodeId) ?? null
+      : null
+  ), [parsed, selectedNodeId])
 
   const onResizeNode = useCallback((id: string, size: { width: number; height: number }) => {
     if (!tabId || disabled) return
@@ -89,6 +104,12 @@ export function CanvasEditor({
       animated: false
     })))
   }, [onResizeNode, parsed])
+
+  useEffect(() => {
+    if (parsed.ok && selectedNodeId && !parsed.document.nodes.some((node) => node.id === selectedNodeId)) {
+      setSelectedNodeId(null)
+    }
+  }, [parsed, selectedNodeId])
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     setNodes((current) => applyNodeChanges(changes, current) as Array<Node<CanvasNodeData>>)
@@ -128,6 +149,42 @@ export function CanvasEditor({
   const insertExample = useCallback(() => {
     if (!tabId || disabled) return
     onChange(tabId, insertExampleCanvasBlock(body))
+  }, [body, disabled, onChange, tabId])
+
+  const addNode = useCallback((shape: CanvasShape) => {
+    if (!tabId || disabled || !parsed.ok) return
+    const id = nextNodeId(parsed.document.nodes)
+    const pane = document.querySelector('.canvas-editor')?.getBoundingClientRect()
+    const center = flow?.screenToFlowPosition({
+      x: pane ? pane.left + pane.width / 2 : window.innerWidth / 2,
+      y: pane ? pane.top + pane.height / 2 : window.innerHeight / 2
+    }) ?? { x: 180, y: 140 }
+    const node: CanvasNodeSpec = {
+      id,
+      x: Math.round(center.x - 110),
+      y: Math.round(center.y - 60),
+      w: shape === 'bubble' ? 230 : 240,
+      h: 120,
+      shape,
+      color: shape === 'bubble' ? 'yellow' : 'blue',
+      text: shape === 'bubble' ? 'New bubble' : 'New box'
+    }
+    setSelectedNodeId(id)
+    onChange(tabId, addCanvasNode(body, node))
+  }, [body, disabled, flow, onChange, parsed, tabId])
+
+  const deleteSelectedNode = useCallback(() => {
+    if (!tabId || disabled || !selectedNodeId) return
+    onChange(tabId, deleteCanvasNode(body, selectedNodeId))
+    setSelectedNodeId(null)
+  }, [body, disabled, onChange, selectedNodeId, tabId])
+
+  const applyInspectorUpdates = useCallback((id: string, updates: Partial<CanvasNodeSpec>) => {
+    if (!tabId || disabled) return
+    const nextBody = updateCanvasNodeProperties(body, id, updates)
+    const nextId = updates.id?.trim()
+    if (nextId) setSelectedNodeId(nextId)
+    onChange(tabId, nextBody)
   }, [body, disabled, onChange, tabId])
 
   if (disabled) {
@@ -172,6 +229,9 @@ export function CanvasEditor({
         onEdgesChange={onEdgesChange}
         onNodeDragStop={onNodeDragStop}
         onNodeDoubleClick={onNodeDoubleClick}
+        onSelectionChange={({ nodes }) => {
+          setSelectedNodeId(nodes.length === 1 ? nodes[0].id : null)
+        }}
         onInit={setFlow}
       >
         <Background />
@@ -193,6 +253,20 @@ export function CanvasEditor({
         />
         <Controls />
       </ReactFlow>
+      <CanvasToolbar
+        canDelete={!!selectedNodeId}
+        inspectorOpen={inspectorOpen}
+        onAddNode={addNode}
+        onDeleteSelected={deleteSelectedNode}
+        onToggleInspector={() => setInspectorOpen((current) => !current)}
+      />
+      {inspectorOpen && (
+        <CanvasInspector
+          node={selectedNode}
+          existingIds={parsed.document.nodes.map((node) => node.id)}
+          onApply={applyInspectorUpdates}
+        />
+      )}
       {editingNode && (
         <div
           className="canvas-text-popover"
@@ -238,4 +312,11 @@ export function CanvasEditor({
       )}
     </div>
   )
+}
+
+function nextNodeId(nodes: CanvasNodeSpec[]): string {
+  let index = nodes.length + 1
+  const existing = new Set(nodes.map((node) => node.id))
+  while (existing.has(`node-${index}`)) index += 1
+  return `node-${index}`
 }

@@ -141,6 +141,57 @@ export function updateCanvasNodeSize(
   })
 }
 
+export function addCanvasNode(markdown: string, node: CanvasNodeSpec): string {
+  const block = parseCanvasBlock(markdown)
+  if (!block.ok) return markdown
+  return replaceCanvasDocument(markdown, {
+    ...block.document,
+    nodes: [...block.document.nodes, node]
+  })
+}
+
+export function deleteCanvasNode(markdown: string, id: string): string {
+  const block = parseCanvasBlock(markdown)
+  if (!block.ok) return markdown
+  return replaceCanvasDocument(markdown, {
+    nodes: block.document.nodes.filter((node) => node.id !== id),
+    edges: block.document.edges.filter((edge) => edge.from !== id && edge.to !== id)
+  })
+}
+
+export function updateCanvasNodeProperties(
+  markdown: string,
+  id: string,
+  updates: Partial<CanvasNodeSpec>
+): string {
+  const block = parseCanvasBlock(markdown)
+  if (!block.ok) return markdown
+  const nextId = typeof updates.id === 'string' && updates.id.trim() ? updates.id.trim() : id
+  const duplicateId = nextId !== id && block.document.nodes.some((node) => node.id === nextId)
+  if (duplicateId) return markdown
+
+  return replaceCanvasDocument(markdown, {
+    nodes: block.document.nodes.map((node) =>
+      node.id === id
+        ? {
+            ...node,
+            ...updates,
+            id: nextId,
+            x: typeof updates.x === 'number' ? Math.round(updates.x) : node.x,
+            y: typeof updates.y === 'number' ? Math.round(updates.y) : node.y,
+            w: typeof updates.w === 'number' ? Math.round(updates.w) : node.w,
+            h: typeof updates.h === 'number' ? Math.round(updates.h) : node.h
+          }
+        : node
+    ),
+    edges: block.document.edges.map((edge) => ({
+      ...edge,
+      from: edge.from === id ? nextId : edge.from,
+      to: edge.to === id ? nextId : edge.to
+    }))
+  })
+}
+
 function normalizeCanvasDocument(parsed: Partial<CanvasDocument> | null): CanvasDocument {
   if (!parsed || typeof parsed !== 'object') {
     throw new Error('Canvas block must be a YAML object.')

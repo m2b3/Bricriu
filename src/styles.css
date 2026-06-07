@@ -1318,6 +1318,132 @@ input:focus {
   box-shadow: 0 8px 18px rgba(42, 38, 31, 0.14);
 }
 
+.canvas-toolbar {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 12;
+  display: flex;
+  gap: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  box-shadow: 0 8px 18px rgba(42, 38, 31, 0.12);
+  padding: 6px;
+}
+
+.canvas-toolbar button {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fffdf8;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 9px;
+}
+
+.canvas-toolbar button:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
+}
+
+.canvas-toolbar button.danger-button {
+  color: var(--danger);
+}
+
+.canvas-toolbar-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-left: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 4px 0 8px;
+  white-space: nowrap;
+}
+
+.canvas-toolbar-toggle input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.canvas-inspector {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 12;
+  display: grid;
+  width: 230px;
+  gap: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow: 0 8px 18px rgba(42, 38, 31, 0.12);
+  color: var(--text);
+  padding: 10px;
+}
+
+.canvas-inspector-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.canvas-inspector strong {
+  font-size: 13px;
+}
+
+.canvas-inspector label {
+  display: grid;
+  gap: 4px;
+}
+
+.canvas-inspector span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.canvas-inspector input,
+.canvas-inspector select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fffdf8;
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.canvas-inspector button {
+  border: 1px solid #1f5d49;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 8px;
+}
+
+.canvas-inspector-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+
+.canvas-inspector-empty {
+  line-height: 1.35;
+}
+
+.canvas-inspector-error {
+  color: var(--danger) !important;
+}
+
 .canvas-empty {
   display: flex;
   min-height: 100%;
