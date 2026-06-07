@@ -3,5 +3,6 @@
   "checkpointIntervalMs": 180000,
   "gitStatusPollIntervalMs": 300000,
   "typstPreviewDebounceMs": 250,
-  "closeMarkdownBeforeTrack": true
+  "closeMarkdownBeforeTrack": true,
+  "persistRecentFiles": true
 }

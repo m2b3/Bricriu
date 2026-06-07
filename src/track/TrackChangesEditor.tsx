@@ -150,12 +150,14 @@ export function TrackChangesEditor({
   }
 
   const acceptChange = (blockId: string) => {
+    if (disabled) return
     const nextResolved = Array.from(new Set([...state.resolvedChanges, blockId]))
     onTrackStateChange(tabId, { ...state, resolvedChanges: nextResolved, updatedAt: Date.now() })
     setChanges((previous) => previous.filter((change) => change.blockId !== blockId))
   }
 
   const rejectChange = (change: ReviewChange) => {
+    if (disabled) return
     if (!editor || !selectedSnapshot) return
     const compareSnapshotId = bubbleCompareByBlockId[change.blockId] ?? selectedSnapshotId
     const compareSnapshot = snapshots.find((snapshot) => snapshot.id === compareSnapshotId) ?? selectedSnapshot
@@ -229,8 +231,8 @@ export function TrackChangesEditor({
                 <code>{change.blockId}</code>
                 <InlineDiff oldText={getNodeText(oldNode)} newText={getNodeText(currentNode)} />
                 <div className="track-change-actions">
-                  <button type="button" onClick={() => acceptChange(change.blockId)}>Accept</button>
-                  <button type="button" className="danger-button" onClick={() => rejectChange(change)}>Reject</button>
+                  <button type="button" onClick={() => acceptChange(change.blockId)} disabled={disabled}>Accept</button>
+                  <button type="button" className="danger-button" onClick={() => rejectChange(change)} disabled={disabled}>Reject</button>
                 </div>
               </article>
             )

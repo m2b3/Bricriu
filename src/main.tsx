@@ -130,6 +130,7 @@ type TypstPreviewState = {
 
 type EditorMode = 'markdown' | 'track'
 type SearchView = 'file' | 'content'
+type EditorPane = 'main' | 'split'
 
 type OpenTab = {
   id: string
@@ -199,6 +200,9 @@ type StoredSession = {
   openPaths?: string[]
   activeId?: string | null
   activePath?: string | null
+  splitOpen?: boolean
+  splitPath?: string | null
+  splitMode?: EditorMode | null
   expanded: string[]
   pinnedPaths?: string[]
   recentPaths?: string[]
@@ -209,6 +213,8 @@ type StoredSession = {
 type RestoredSession = {
   tabs: OpenTab[]
   activeId: string | null
+  splitOpen: boolean
+  splitId: string | null
   expanded: string[]
   pinnedPaths: string[]
   recentPaths: string[]
@@ -229,6 +235,9 @@ function App(): JSX.Element {
   const [tree, setTree] = useState<TreeEntry[]>([])
   const [tabs, setTabs] = useState<OpenTab[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [splitOpen, setSplitOpen] = useState(false)
+  const [splitId, setSplitId] = useState<string | null>(null)
+  const [focusedPane, setFocusedPane] = useState<EditorPane>('main')
   const [fileQuery, setFileQuery] = useState('')
   const [contentQuery, setContentQuery] = useState('')
   const [activeSearchView, setActiveSearchView] = useState<SearchView>('file')
@@ -257,6 +266,9 @@ function App(): JSX.Element {
   const latestBodiesRef = useRef<Map<string, string>>(new Map())
   const activeIdRef = useRef<string | null>(null)
   const activePathRef = useRef<string | null>(null)
+  const splitOpenRef = useRef(false)
+  const splitPathRef = useRef<string | null>(null)
+  const splitModeRef = useRef<EditorMode | null>(null)
   const expandedRef = useRef<Set<string>>(new Set())
   const pinnedPathsRef = useRef<Set<string>>(new Set())
   const recentPathsRef = useRef<string[]>([])
@@ -294,7 +306,7 @@ function App(): JSX.Element {
     })
   }, [profile.persistRecentFiles])
 
-  const activeTab = useMemo(
+  const mainTab = useMemo(
     () => {
       const byId = tabs.find((tab) => tab.id === activeId)
       if (byId) return byId
@@ -305,15 +317,72 @@ function App(): JSX.Element {
     },
     [activeId, tabs]
   )
+  const splitTab = useMemo(
+    () => tabs.find((tab) => tab.id === splitId) ?? null,
+    [splitId, tabs]
+  )
+  const splitCandidates = useMemo(
+    () => tabs.filter((tab) => tab.id !== activeId),
+    [activeId, tabs]
+  )
+  const activeTab = focusedPane === 'split' ? splitTab : mainTab
   const activePath = activeTab?.path ?? null
   const dirty = !!activeTab && isTabDirty(activeTab)
 
   useEffect(() => {
     if (activeTab) activeTabHintRef.current = { path: activeTab.path, mode: activeTab.mode }
-    if (activeTab && activeTab.id !== activeId) setActiveId(activeTab.id)
+    if (mainTab && mainTab.id !== activeId) setActiveId(mainTab.id)
     activeIdRef.current = activeTab?.id ?? activeId
     activePathRef.current = activeTab?.path ?? null
-  }, [activeId, activeTab])
+  }, [activeId, activeTab, mainTab])
+
+  useEffect(() => {
+    if (focusedPane === 'split' && !splitOpen) setFocusedPane('main')
+  }, [focusedPane, splitOpen])
+
+  useEffect(() => {
+    splitOpenRef.current = splitOpen
+    splitPathRef.current = splitOpen ? splitTab?.path ?? null : null
+    splitModeRef.current = splitOpen ? splitTab?.mode ?? null : null
+  }, [splitOpen, splitTab])
+
+  const selectMainTab = useCallback((id: string | null) => {
+    if (id === splitId) setSplitId(null)
+    setActiveId(id)
+    setFocusedPane('main')
+  }, [splitId])
+
+  useEffect(() => {
+    if (splitId && splitId === activeId) setSplitId(null)
+  }, [activeId, splitId])
+
+  const closeSplitPane = useCallback(() => {
+    setSplitOpen(false)
+    setSplitId(null)
+    setFocusedPane('main')
+  }, [])
+
+  const closeMainPane = useCallback(() => {
+    if (!splitOpen || !splitTab) return
+    setActiveId(splitTab.id)
+    setSplitId(null)
+    setSplitOpen(false)
+    setFocusedPane('main')
+  }, [splitOpen, splitTab])
+
+  const moveMainTabToSplit = useCallback(() => {
+    if (!mainTab) return
+    setSplitOpen(true)
+    if (splitTab) {
+      setActiveId(splitTab.id)
+      setSplitId(mainTab.id)
+    } else {
+      const replacement = tabs.find((tab) => tab.id !== mainTab.id) ?? null
+      setActiveId(replacement?.id ?? null)
+      setSplitId(mainTab.id)
+    }
+    setFocusedPane('split')
+  }, [mainTab, splitTab, tabs])
 
   useEffect(() => {
     void invoke<AppProfile>('load_profile')
@@ -388,6 +457,13 @@ function App(): JSX.Element {
     currentPathsCaseSensitive = vault?.pathsCaseSensitive ?? true
   }, [vault])
 
+  useEffect(() => {
+    if (vault) return
+    setSplitOpen(false)
+    setSplitId(null)
+    setFocusedPane('main')
+  }, [vault])
+
   const refreshTree = useCallback(async () => {
     const next = await invoke<TreeEntry[]>('list_tree')
     setTree(next)
@@ -432,9 +508,19 @@ function App(): JSX.Element {
       ?? restoredTabs.find((tab) => session.activePath != null && samePath(tab.path, session.activePath))
       ?? restoredTabs[0]
       ?? null
+    const split = session.splitOpen
+      ? restoredTabs.find((tab) =>
+          session.splitPath != null &&
+          tab.mode === (session.splitMode ?? 'markdown') &&
+          samePath(tab.path, session.splitPath)
+        ) ?? null
+      : null
+    const splitId = split && active && split.id !== active.id ? split.id : null
     return {
       tabs: restoredTabs,
       activeId: active?.id ?? null,
+      splitOpen: session.splitOpen === true,
+      splitId,
       expanded: session.expanded,
       pinnedPaths: session.pinnedPaths ?? [],
       recentPaths: profile.persistRecentFiles
@@ -460,6 +546,10 @@ function App(): JSX.Element {
         })
       )
       if (activeTabForPath) setActiveId(tabId(note.path, activeTabForPath.mode))
+      setSplitId((current) => {
+        const splitTabForPath = tabs.find((tab) => tab.id === current && samePath(tab.path, path))
+        return splitTabForPath ? tabId(note.path, splitTabForPath.mode) : current
+      })
     } catch {
       setTabs((prev) =>
         prev.map((tab) => (samePath(tab.path, path) ? { ...tab, externalStatus: 'deleted' } : tab))
@@ -494,6 +584,9 @@ function App(): JSX.Element {
       setVault(openedVault)
       setTabs(restoredSession?.tabs ?? [])
       setActiveId(restoredSession?.activeId ?? null)
+      setSplitOpen(restoredSession?.splitOpen ?? false)
+      setSplitId(restoredSession?.splitId ?? null)
+      setFocusedPane(restoredSession?.splitOpen ? 'split' : 'main')
       setExpanded(new Set(restoredSession?.expanded ?? []))
       setPinnedPaths(new Set(restoredSession?.pinnedPaths ?? []))
       recentPathsRef.current = profile.persistRecentFiles ? restoredSession?.recentPaths ?? [] : []
@@ -565,18 +658,21 @@ function App(): JSX.Element {
       openTabs: tabs.map((tab) => ({ path: tab.path, mode: tab.mode })),
       activeId,
       activePath,
+      splitOpen,
+      splitPath: splitOpen ? splitTab?.path ?? null : null,
+      splitMode: splitOpen ? splitTab?.mode ?? null : null,
       expanded: [...expanded],
       pinnedPaths: [...pinnedPaths],
       recentPaths: profile.persistRecentFiles ? recentPaths : [],
       fileQuery,
       contentUsesFileFilter
     })
-  }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, pinnedPaths, profile.persistRecentFiles, recentPaths, tabs, vault])
+  }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, pinnedPaths, profile.persistRecentFiles, recentPaths, splitOpen, splitTab, tabs, vault])
 
   const openNote = useCallback(async (path: string, offset: number | null = null) => {
     const existing = tabs.find((tab) => tab.mode === 'markdown' && samePath(tab.path, path))
     if (existing) {
-      setActiveId(existing.id)
+      selectMainTab(existing.id)
       setJumpOffset(offset)
       rememberRecentPath(existing.path)
       return
@@ -604,7 +700,7 @@ function App(): JSX.Element {
           size: note.size
         }
       ])
-      setActiveId(id)
+      selectMainTab(id)
       setJumpOffset(offset)
       rememberRecentPath(note.path)
     } catch (err) {
@@ -612,12 +708,12 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [isTabDirty, rememberRecentPath, tabs])
+  }, [isTabDirty, rememberRecentPath, selectMainTab, tabs])
 
   const openTrackNote = useCallback(async (path: string) => {
     const existing = tabs.find((tab) => tab.mode === 'track' && samePath(tab.path, path))
     if (existing) {
-      setActiveId(existing.id)
+      selectMainTab(existing.id)
       rememberRecentPath(existing.path)
       return
     }
@@ -635,6 +731,7 @@ function App(): JSX.Element {
               const replacement = next[Math.min(index, next.length - 1)] ?? null
               setActiveId(replacement?.id ?? null)
             }
+            if (splitId === markdownTab.id) setSplitId(null)
             return next
           })
         }
@@ -660,14 +757,14 @@ function App(): JSX.Element {
           trackState
         }
       ])
-      setActiveId(id)
+      selectMainTab(id)
       rememberRecentPath(note.path)
     } catch (err) {
       setError(String(err))
     } finally {
       setBusy(false)
     }
-  }, [activeId, isTabDirty, profile.closeMarkdownBeforeTrack, rememberRecentPath, tabs])
+  }, [activeId, isTabDirty, profile.closeMarkdownBeforeTrack, rememberRecentPath, selectMainTab, splitId, tabs])
 
   const openSearchMatch = useCallback((match: ContentMatch) => {
     const query = contentQuery.trim()
@@ -721,6 +818,7 @@ function App(): JSX.Element {
         )
       )
       setActiveId((current) => (current === activeTab.id ? savedId : current))
+      setSplitId((current) => (current === activeTab.id ? savedId : current))
       setTouchedPaths((prev) => new Set([...prev, saved.path]))
       rememberRecentPath(saved.path)
       await refreshTree()
@@ -774,6 +872,7 @@ function App(): JSX.Element {
       )
     )
     setActiveId((current) => (current === tab.id ? savedId : current))
+    setSplitId((current) => (current === tab.id ? savedId : current))
     setTouchedPaths((prev) => new Set([...prev, saved.path]))
     rememberRecentPath(saved.path)
     await refreshTree()
@@ -809,6 +908,9 @@ function App(): JSX.Element {
         openTabs: tabsRef.current.map((tab) => ({ path: tab.path, mode: tab.mode })),
         activeId: activeIdRef.current,
         activePath: activePathRef.current,
+        splitOpen: splitOpenRef.current,
+        splitPath: splitPathRef.current,
+        splitMode: splitModeRef.current,
         expanded: [...expandedRef.current],
         pinnedPaths: [...pinnedPathsRef.current],
         recentPaths: profile.persistRecentFiles ? recentPathsRef.current : [],
@@ -862,7 +964,7 @@ function App(): JSX.Element {
           size: note.size
         }
       ])
-      setActiveId(tabId(note.path, 'markdown'))
+      selectMainTab(tabId(note.path, 'markdown'))
       setJumpOffset(0)
       rememberRecentPath(note.path)
       await refreshTree()
@@ -871,7 +973,7 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [fileQuery, refreshTree, rememberRecentPath])
+  }, [fileQuery, refreshTree, rememberRecentPath, selectMainTab])
 
   const createFolderAction = useCallback(async () => {
     const path = window.prompt('New folder path', '')
@@ -932,6 +1034,10 @@ function App(): JSX.Element {
         const activeTab = tabs.find((tab) => tab.id === current)
         return activeTab && samePath(activeTab.path, oldPath) ? tabId(note.path, activeTab.mode) : current
       })
+      setSplitId((current) => {
+        const activeTab = tabs.find((tab) => tab.id === current)
+        return activeTab && samePath(activeTab.path, oldPath) ? tabId(note.path, activeTab.mode) : current
+      })
       forgetRecentPath(oldPath)
       rememberRecentPath(note.path)
       await refreshTree()
@@ -958,10 +1064,15 @@ function App(): JSX.Element {
       setTabs((prev) => {
         const index = prev.findIndex((tab) => samePath(tab.path, path))
         const next = prev.filter((tab) => !samePath(tab.path, path))
-        if (activePath != null && samePath(activePath, path)) {
+        if (mainTab != null && samePath(mainTab.path, path)) {
           const replacement = next[Math.min(index, next.length - 1)] ?? null
           setActiveId(replacement?.id ?? null)
         }
+        setSplitId((current) => {
+          if (!current) return current
+          const splitTab = prev.find((item) => item.id === current)
+          return splitTab && samePath(splitTab.path, path) ? null : current
+        })
         return next
       })
       await refreshTree()
@@ -970,7 +1081,7 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [activePath, forgetRecentPath, isTabDirty, refreshTree, tabs])
+  }, [forgetRecentPath, isTabDirty, mainTab, refreshTree, tabs])
 
   const renameFolderAction = useCallback(async (oldPath: string) => {
     const nextPath = window.prompt('Rename folder path', oldPath)
@@ -1018,10 +1129,14 @@ function App(): JSX.Element {
             : tab
         )
       )
-      if (activePath != null && isPathInsideFolder(activePath, oldPath)) {
-        const currentMode = activeTab?.mode ?? 'markdown'
-        setActiveId(tabId(`${normalizedNextPath}/${activePath.slice(oldPath.length + 1)}`, currentMode))
+      if (mainTab != null && isPathInsideFolder(mainTab.path, oldPath)) {
+        setActiveId(tabId(`${normalizedNextPath}/${mainTab.path.slice(oldPath.length + 1)}`, mainTab.mode))
       }
+      setSplitId((current) => {
+        const splitTab = tabs.find((tab) => tab.id === current)
+        if (!splitTab || !isPathInsideFolder(splitTab.path, oldPath)) return current
+        return tabId(`${normalizedNextPath}/${splitTab.path.slice(oldPath.length + 1)}`, splitTab.mode)
+      })
       setRecentPaths((prev) =>
         prev.map((path) =>
           isPathInsideFolder(path, oldPath)
@@ -1035,7 +1150,7 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [activePath, activeTab?.mode, isTabDirty, latestTabBody, refreshTree, tabs])
+  }, [isTabDirty, latestTabBody, mainTab, refreshTree, tabs])
 
   const deleteFolderAction = useCallback(async (path: string) => {
     const affectedDirty = tabs.some((tab) => isPathInsideFolder(tab.path, path) && isTabDirty(tab))
@@ -1051,14 +1166,18 @@ function App(): JSX.Element {
       await invoke('delete_folder', { path })
       setRecentPaths((prev) => prev.filter((recentPath) => !isPathInsideFolder(recentPath, path)))
       setTabs((prev) => prev.filter((tab) => !isPathInsideFolder(tab.path, path)))
-      if (activePath != null && isPathInsideFolder(activePath, path)) setActiveId(null)
+      if (mainTab != null && isPathInsideFolder(mainTab.path, path)) setActiveId(null)
+      setSplitId((current) => {
+        const splitTab = tabs.find((tab) => tab.id === current)
+        return splitTab && isPathInsideFolder(splitTab.path, path) ? null : current
+      })
       await refreshTree()
     } catch (err) {
       setError(String(err))
     } finally {
       setBusy(false)
     }
-  }, [activePath, isTabDirty, refreshTree, tabs])
+  }, [isTabDirty, mainTab, refreshTree, tabs])
 
   const closeTab = useCallback((id: string) => {
     const closing = tabs.find((tab) => tab.id === id)
@@ -1073,9 +1192,10 @@ function App(): JSX.Element {
         const replacement = next[Math.min(index, next.length - 1)] ?? null
         setActiveId(replacement?.id ?? null)
       }
+      if (splitId === id) setSplitId(null)
       return next
     })
-  }, [activeId, isTabDirty, tabs])
+  }, [activeId, isTabDirty, splitId, tabs])
 
   const updateTabBody = useCallback((id: string, body: string) => {
     latestBodiesRef.current.set(id, body)
@@ -1203,28 +1323,35 @@ function App(): JSX.Element {
       }
 
       if (key === 'w') {
-        if (!activeId) return
+        if (focusedPane === 'split' && splitOpen) {
+          event.preventDefault()
+          closeSplitPane()
+          return
+        }
+        if (!activeTab) return
         event.preventDefault()
-        closeTab(activeId)
+        closeTab(activeTab.id)
         return
       }
 
       if (key === 'tab' || key === 'pagedown' || key === ']') {
-        if (tabs.length <= 1 || !activeId) return
+        const tabForNavigation = mainTab ?? activeTab
+        if (tabs.length <= 1 || !tabForNavigation) return
         event.preventDefault()
-        selectAdjacentTab(tabs, activeId, event.shiftKey ? -1 : 1, setActiveId)
+        selectAdjacentTab(tabs, tabForNavigation.id, event.shiftKey ? -1 : 1, selectMainTab)
         return
       }
 
       if (key === 'pageup' || key === '[') {
-        if (tabs.length <= 1 || !activeId) return
+        const tabForNavigation = mainTab ?? activeTab
+        if (tabs.length <= 1 || !tabForNavigation) return
         event.preventDefault()
-        selectAdjacentTab(tabs, activeId, -1, setActiveId)
+        selectAdjacentTab(tabs, tabForNavigation.id, -1, selectMainTab)
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeId, activeTab?.mode, closeTab, saveActive, tabs])
+  }, [activeTab, closeSplitPane, closeTab, focusedPane, mainTab, saveActive, selectMainTab, splitOpen, tabs])
 
   useEffect(() => {
     setSearchRevealedFolders(new Set())
@@ -1592,6 +1719,32 @@ function App(): JSX.Element {
             >
               Backlinks
             </button>
+            {splitOpen && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={moveMainTabToSplit}
+                disabled={!mainTab}
+              >
+                Move right
+              </button>
+            )}
+            <button
+              type="button"
+              className={splitOpen ? 'secondary-button active' : 'secondary-button'}
+              onClick={() => {
+                if (splitOpen) {
+                  closeSplitPane()
+                  return
+                }
+                setSplitOpen(true)
+                setSplitId(null)
+                setFocusedPane('split')
+              }}
+              disabled={!vault}
+            >
+              {splitOpen ? 'Close split' : 'Split'}
+            </button>
             <button
               type="button"
               onMouseDown={(event) => event.preventDefault()}
@@ -1614,37 +1767,104 @@ function App(): JSX.Element {
           tabs={tabs}
           activeId={activeId}
           isDirty={isTabDirty}
-          onSelect={setActiveId}
+          onSelect={(id) => {
+            setFocusedPane('main')
+            if (id === splitId) setSplitId(null)
+            setActiveId(id)
+          }}
           onClose={closeTab}
         />
 
         {error && <div className="error-banner">{error}</div>}
 
-        <div className={(showPreview || showBacklinks) && activeTab ? 'workspace split' : 'workspace'}>
-          {activeTab?.mode === 'track' && activeTab.trackState ? (
-            <TrackChangesEditor
-              tabId={activeTab.id}
-              path={activeTab.path}
-              state={activeTab.trackState}
-              onMarkdownChange={updateTabBody}
-              onTrackStateChange={updateTrackState}
-            />
-            ) : (
-              <MarkdownEditor
-                activePath={activeTab?.path ?? null}
-                changeId={activeTab?.id ?? null}
-                filePath={activeTab?.path ?? null}
-              body={activeTab?.body ?? ''}
-              disabled={!activeTab}
-              notePaths={allFilePaths}
-              searchHighlight={searchHighlight && activePath != null && samePath(searchHighlight.path, activePath) ? searchHighlight : null}
-              jumpOffset={jumpOffset}
-              focusRequest={editorFocusRequest}
-              selectAllRequest={editorSelectAllRequest}
-              onJumpHandled={() => setJumpOffset(null)}
-              onChange={updateTabBody}
-              onOpenWikiLink={(path) => void openNote(path)}
-            />
+        <div className={`${splitOpen || ((showPreview || showBacklinks) && activeTab) ? 'workspace split' : 'workspace'}${splitOpen ? ' editor-split' : ''}`}>
+          <div
+            className={focusedPane === 'main' ? 'editor-pane-slot active' : 'editor-pane-slot'}
+            onMouseDown={() => setFocusedPane('main')}
+          >
+            {splitOpen && (
+              <div className="pane-toolbar">
+                <span>{mainTab?.path ?? 'Left pane'}</span>
+                <button type="button" onClick={closeMainPane} disabled={!splitTab}>Close left</button>
+              </div>
+            )}
+            {mainTab?.mode === 'track' && mainTab.trackState ? (
+              <TrackChangesEditor
+                tabId={mainTab.id}
+                path={mainTab.path}
+                state={mainTab.trackState}
+                onMarkdownChange={updateTabBody}
+                onTrackStateChange={updateTrackState}
+              />
+              ) : (
+                <MarkdownEditor
+                  activePath={mainTab?.path ?? null}
+                  changeId={mainTab?.id ?? null}
+                  filePath={mainTab?.path ?? null}
+                  body={mainTab?.body ?? ''}
+                  disabled={!mainTab}
+                  notePaths={allFilePaths}
+                  searchHighlight={searchHighlight && mainTab?.path != null && samePath(searchHighlight.path, mainTab.path) ? searchHighlight : null}
+                  jumpOffset={focusedPane === 'main' ? jumpOffset : null}
+                  focusRequest={focusedPane === 'main' ? editorFocusRequest : 0}
+                  selectAllRequest={focusedPane === 'main' ? editorSelectAllRequest : 0}
+                  onJumpHandled={() => setJumpOffset(null)}
+                  onChange={updateTabBody}
+                  onOpenWikiLink={(path) => void openNote(path)}
+                />
+            )}
+          </div>
+          {splitOpen && (
+            <div
+              className={focusedPane === 'split' ? 'editor-pane-slot active' : 'editor-pane-slot'}
+              onMouseDown={() => setFocusedPane('split')}
+            >
+              <div className="pane-toolbar">
+                <select
+                  className="split-file-select"
+                  value={splitTab?.id ?? ''}
+                  onChange={(event) => {
+                    setSplitId(event.target.value || null)
+                    setFocusedPane('split')
+                  }}
+                  disabled={splitCandidates.length === 0}
+                  title="Split pane file"
+                >
+                  <option value="">Choose file</option>
+                  {splitCandidates.map((tab) => (
+                    <option key={tab.id} value={tab.id}>
+                      {tab.mode === 'track' ? `${tab.path} - Track` : tab.path}
+                    </option>
+                  ))}
+                </select>
+                <button type="button" onClick={closeSplitPane}>Close right</button>
+              </div>
+              {splitTab?.mode === 'track' && splitTab.trackState ? (
+                <TrackChangesEditor
+                  tabId={splitTab.id}
+                  path={splitTab.path}
+                  state={splitTab.trackState}
+                  onMarkdownChange={updateTabBody}
+                  onTrackStateChange={updateTrackState}
+                />
+                ) : (
+                  <MarkdownEditor
+                    activePath={splitTab?.path ?? null}
+                    changeId={splitTab?.id ?? null}
+                    filePath={splitTab?.path ?? null}
+                    body={splitTab?.body ?? ''}
+                    disabled={!splitTab}
+                    notePaths={allFilePaths}
+                    searchHighlight={searchHighlight && splitTab?.path != null && samePath(searchHighlight.path, splitTab.path) ? searchHighlight : null}
+                    jumpOffset={focusedPane === 'split' ? jumpOffset : null}
+                    focusRequest={focusedPane === 'split' ? editorFocusRequest : 0}
+                    selectAllRequest={focusedPane === 'split' ? editorSelectAllRequest : 0}
+                    onJumpHandled={() => setJumpOffset(null)}
+                    onChange={updateTabBody}
+                    onOpenWikiLink={(path) => void openNote(path)}
+                  />
+              )}
+            </div>
           )}
           {showPreview && activeTab && (
             activeIsTypst ? (
@@ -2120,7 +2340,7 @@ function MarkdownEditor({
     const cached = statesRef.current.get(activePath)
     if (cached) {
       view.setState(cached)
-      applyEditable(view, editableRef.current, true)
+      applyEditable(view, editableRef.current, !disabled)
       if (cached.doc.toString() !== body) {
         const scrollTop = view.scrollDOM.scrollTop
         view.dispatch({
@@ -2134,9 +2354,9 @@ function MarkdownEditor({
     }
 
     view.setState(createEditorState(body, baseExtensionsRef.current ?? [], filePath))
-    applyEditable(view, editableRef.current, true)
+    applyEditable(view, editableRef.current, !disabled)
     view.scrollDOM.scrollTop = 0
-  }, [activePath, body, filePath])
+  }, [activePath, body, disabled, filePath])
 
   useEffect(() => {
     const view = viewRef.current
@@ -2296,8 +2516,12 @@ function buildNoteDecorations(
         const label = match[1].trim()
         const start = line.from + (match.index ?? 0)
         const end = start + match[0].length
+        const linkStart = start + 2
+        const linkEnd = end - 2
         const target = resolveWikiPath(label, notePaths)
-        ranges.push({ from: start, to: end, decoration: Decoration.mark({
+        ranges.push({ from: start, to: linkStart, decoration: Decoration.replace({}) })
+        ranges.push({ from: linkEnd, to: end, decoration: Decoration.replace({}) })
+        ranges.push({ from: linkStart, to: linkEnd, decoration: Decoration.mark({
           class: target ? 'cm-wiki-link' : 'cm-wiki-link cm-wiki-missing',
           attributes: {
             title: target
@@ -3434,6 +3658,9 @@ function readStoredSession(root: string): StoredSession | null {
         : [],
       activeId: typeof parsed.activeId === 'string' ? parsed.activeId : null,
       activePath: typeof parsed.activePath === 'string' ? parsed.activePath : null,
+      splitOpen: parsed.splitOpen === true,
+      splitPath: typeof parsed.splitPath === 'string' ? parsed.splitPath : null,
+      splitMode: parsed.splitMode === 'markdown' || parsed.splitMode === 'track' ? parsed.splitMode : null,
       expanded: Array.isArray(parsed.expanded)
         ? parsed.expanded.filter((path): path is string => typeof path === 'string')
         : [],
