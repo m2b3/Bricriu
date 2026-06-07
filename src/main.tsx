@@ -38,14 +38,19 @@ import {
   syntaxHighlighting
 } from '@codemirror/language'
 import { searchKeymap } from '@codemirror/search'
-import { typst } from 'codemirror-lang-typst'
-import katex from 'katex'
-import 'katex/dist/katex.min.css'
-import MarkdownIt from 'markdown-it'
-import { TrackChangesEditor, createInitialTrackState } from './track/TrackChangesEditor'
 import { markdownToTiptap } from './track/markdown'
 import type { TrackState } from './track/types'
 import './styles.css'
+
+const CanvasEditor = React.lazy(() =>
+  import('./canvas/CanvasEditor').then((module) => ({ default: module.CanvasEditor }))
+)
+const TrackChangesEditor = React.lazy(() =>
+  import('./track/TrackChangesEditor').then((module) => ({ default: module.TrackChangesEditor }))
+)
+const MarkdownPreview = React.lazy(() =>
+  import('./preview/MarkdownPreview').then((module) => ({ default: module.MarkdownPreview }))
+)
 
 type EntryKind = 'file' | 'dir'
 
@@ -128,7 +133,7 @@ type TypstPreviewState = {
   error: string | null
 }
 
-type EditorMode = 'markdown' | 'track'
+type EditorMode = 'markdown' | 'track' | 'canvas'
 type SearchView = 'file' | 'content'
 type EditorPane = 'main' | 'split'
 
@@ -312,7 +317,13 @@ function App(): JSX.Element {
       if (byId) return byId
       const hint = activeTabHintRef.current
       if (!hint) return null
-      const activeMode = activeId?.startsWith('track:') ? 'track' : activeId?.startsWith('markdown:') ? 'markdown' : hint.mode
+      const activeMode = activeId?.startsWith('track:')
+        ? 'track'
+        : activeId?.startsWith('canvas:')
+          ? 'canvas'
+          : activeId?.startsWith('markdown:')
+            ? 'markdown'
+            : hint.mode
       return tabs.find((tab) => tab.mode === activeMode && samePath(tab.path, hint.path)) ?? null
     },
     [activeId, tabs]
@@ -677,9 +688,33 @@ function App(): JSX.Element {
       rememberRecentPath(existing.path)
       return
     }
-    const conflicting = tabs.find((tab) => samePath(tab.path, path) && tab.mode !== 'markdown' && isTabDirty(tab))
+    const rawSource = tabs.find((tab) => tab.mode === 'canvas' && samePath(tab.path, path))
+    if (rawSource) {
+      const id = tabId(rawSource.path, 'markdown')
+      const body = latestTabBody(rawSource)
+      latestBodiesRef.current.set(id, body)
+      setTabs((prev) => [
+        ...prev.filter((tab) => tab.id !== id),
+        {
+          id,
+          path: rawSource.path,
+          mode: 'markdown',
+          body,
+          savedBody: rawSource.savedBody,
+          bodyVersion: rawSource.bodyVersion,
+          updatedAt: rawSource.updatedAt,
+          size: rawSource.size,
+          externalStatus: rawSource.externalStatus
+        }
+      ])
+      selectMainTab(id)
+      setJumpOffset(offset)
+      rememberRecentPath(rawSource.path)
+      return
+    }
+    const conflicting = tabs.find((tab) => samePath(tab.path, path) && tab.mode !== 'markdown' && !isRawSourceMode(tab.mode) && isTabDirty(tab))
     if (conflicting) {
-      const proceed = window.confirm(`${path} is modified in Track mode. Save or close it before opening Markdown mode?`)
+      const proceed = window.confirm(`${path} is modified in another mode. Save or close it before opening Markdown mode?`)
       if (!proceed) return
     }
     setBusy(true)
@@ -766,6 +801,63 @@ function App(): JSX.Element {
     }
   }, [activeId, isTabDirty, profile.closeMarkdownBeforeTrack, rememberRecentPath, selectMainTab, splitId, tabs])
 
+  const openCanvasNote = useCallback(async (path: string) => {
+    const existing = tabs.find((tab) => tab.mode === 'canvas' && samePath(tab.path, path))
+    if (existing) {
+      selectMainTab(existing.id)
+      rememberRecentPath(existing.path)
+      return
+    }
+    const rawSource = tabs.find((tab) => tab.mode === 'markdown' && samePath(tab.path, path))
+    if (rawSource) {
+      const id = tabId(rawSource.path, 'canvas')
+      const body = latestTabBody(rawSource)
+      latestBodiesRef.current.set(id, body)
+      setTabs((prev) => [
+        ...prev.filter((tab) => tab.id !== id),
+        {
+          id,
+          path: rawSource.path,
+          mode: 'canvas',
+          body,
+          savedBody: rawSource.savedBody,
+          bodyVersion: rawSource.bodyVersion,
+          updatedAt: rawSource.updatedAt,
+          size: rawSource.size,
+          externalStatus: rawSource.externalStatus
+        }
+      ])
+      selectMainTab(id)
+      rememberRecentPath(rawSource.path)
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      const note = await invoke<NoteContent>('read_note', { path })
+      const id = tabId(note.path, 'canvas')
+      setTabs((prev) => [
+        ...prev.filter((tab) => tab.id !== id),
+        {
+          id,
+          path: note.path,
+          mode: 'canvas',
+          body: note.body,
+          savedBody: note.body,
+          bodyVersion: 0,
+          updatedAt: note.updatedAt,
+          size: note.size
+        }
+      ])
+      selectMainTab(id)
+      rememberRecentPath(note.path)
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }, [rememberRecentPath, selectMainTab, tabs])
+
   const openSearchMatch = useCallback((match: ContentMatch) => {
     const query = contentQuery.trim()
     setSearchHighlight(query ? { path: match.path, query, offset: match.offset } : null)
@@ -797,15 +889,16 @@ function App(): JSX.Element {
       }
       setTabs((prev) =>
         prev.map((tab) =>
-          tab.id === activeTab.id
+          samePath(tab.path, activeTab.path) && (activeTab.mode === 'markdown' || activeTab.mode === 'canvas') && (tab.mode === 'markdown' || tab.mode === 'canvas')
             ? (() => {
-                const latestBody = latestBodiesRef.current.get(activeTab.id) ?? tab.body
+                const nextId = tabId(saved.path, tab.mode)
+                const latestBody = latestBodiesRef.current.get(tab.id) ?? tab.body
                 const nextBody = latestBody === requestedBody ? saved.body : latestBody
-                latestBodiesRef.current.delete(activeTab.id)
-                latestBodiesRef.current.set(savedId, nextBody)
+                latestBodiesRef.current.delete(tab.id)
+                latestBodiesRef.current.set(nextId, nextBody)
                 return {
                   ...tab,
-                  id: savedId,
+                  id: nextId,
                   path: saved.path,
                   body: nextBody,
                   savedBody: saved.body,
@@ -814,6 +907,23 @@ function App(): JSX.Element {
                   externalStatus: undefined
                 }
               })()
+            : tab.id === activeTab.id
+              ? (() => {
+                  const latestBody = latestBodiesRef.current.get(activeTab.id) ?? tab.body
+                  const nextBody = latestBody === requestedBody ? saved.body : latestBody
+                  latestBodiesRef.current.delete(activeTab.id)
+                  latestBodiesRef.current.set(savedId, nextBody)
+                  return {
+                    ...tab,
+                    id: savedId,
+                    path: saved.path,
+                    body: nextBody,
+                    savedBody: saved.body,
+                    updatedAt: saved.updatedAt,
+                    size: saved.size,
+                    externalStatus: undefined
+                  }
+                })()
             : tab
         )
       )
@@ -851,15 +961,16 @@ function App(): JSX.Element {
     }
     setTabs((prev) =>
       prev.map((item) =>
-        item.id === tab.id
+        samePath(item.path, tab.path) && (tab.mode === 'markdown' || tab.mode === 'canvas') && (item.mode === 'markdown' || item.mode === 'canvas')
           ? (() => {
-              const latestBody = latestBodiesRef.current.get(tab.id) ?? item.body
+              const nextId = tabId(saved.path, item.mode)
+              const latestBody = latestBodiesRef.current.get(item.id) ?? item.body
               const nextBody = latestBody === requestedBody ? saved.body : latestBody
-              latestBodiesRef.current.delete(tab.id)
-              latestBodiesRef.current.set(savedId, nextBody)
+              latestBodiesRef.current.delete(item.id)
+              latestBodiesRef.current.set(nextId, nextBody)
               return {
                 ...item,
-                id: savedId,
+                id: nextId,
                 path: saved.path,
                 body: nextBody,
                 savedBody: saved.body,
@@ -868,6 +979,23 @@ function App(): JSX.Element {
                 externalStatus: undefined
               }
             })()
+          : item.id === tab.id
+            ? (() => {
+                const latestBody = latestBodiesRef.current.get(tab.id) ?? item.body
+                const nextBody = latestBody === requestedBody ? saved.body : latestBody
+                latestBodiesRef.current.delete(tab.id)
+                latestBodiesRef.current.set(savedId, nextBody)
+                return {
+                  ...item,
+                  id: savedId,
+                  path: saved.path,
+                  body: nextBody,
+                  savedBody: saved.body,
+                  updatedAt: saved.updatedAt,
+                  size: saved.size,
+                  externalStatus: undefined
+                }
+              })()
           : item
       )
     )
@@ -1198,10 +1326,17 @@ function App(): JSX.Element {
   }, [activeId, isTabDirty, splitId, tabs])
 
   const updateTabBody = useCallback((id: string, body: string) => {
-    latestBodiesRef.current.set(id, body)
+    const sourceTab = tabsRef.current.find((tab) => tab.id === id)
+    const syncSourceModes = sourceTab?.mode === 'markdown' || sourceTab?.mode === 'canvas'
+    const syncedIds = syncSourceModes
+      ? tabsRef.current
+        .filter((tab) => samePath(tab.path, sourceTab.path) && (tab.mode === 'markdown' || tab.mode === 'canvas'))
+        .map((tab) => tab.id)
+      : [id]
+    for (const syncedId of syncedIds) latestBodiesRef.current.set(syncedId, body)
     setTabs((prev) =>
       prev.map((tab) =>
-        tab.id === id
+        syncedIds.includes(tab.id)
           ? {
               ...tab,
               body,
@@ -1235,7 +1370,7 @@ function App(): JSX.Element {
   }, [])
 
   useEffect(() => {
-    const dirtyTabs = tabs.filter(isTabDirty)
+    const dirtyTabs = uniqueSaveTargets(tabs.filter(isTabDirty))
     if (dirtyTabs.length === 0) return
     const timer = window.setTimeout(() => {
       for (const tab of dirtyTabs) {
@@ -1439,13 +1574,6 @@ function App(): JSX.Element {
   const recentClosedPaths = useMemo(
     () => recentPaths.filter((path) => !tabs.some((tab) => samePath(tab.path, path))),
     [recentPaths, tabs]
-  )
-  const previewHtml = useMemo(
-    () => ({
-      html: renderMarkdownPreview(activeTab?.body ?? '', allFilePaths),
-      version: activeTab?.bodyVersion ?? 0
-    }),
-    [activeTab?.body, activeTab?.bodyVersion, allFilePaths]
   )
   const activeIsTypst = !!activeTab && isTypstPath(activeTab.path)
 
@@ -1702,6 +1830,26 @@ function App(): JSX.Element {
             >
               Preview
             </button>
+            <button
+              type="button"
+              className={activeTab?.mode === 'canvas' ? 'secondary-button active' : 'secondary-button'}
+              onClick={() => {
+                if (activeTab) void openCanvasNote(activeTab.path)
+              }}
+              disabled={!activeTab || !isMarkdownPath(activeTab.path)}
+            >
+              Canvas
+            </button>
+            <button
+              type="button"
+              className={activeTab?.mode === 'markdown' ? 'secondary-button active' : 'secondary-button'}
+              onClick={() => {
+                if (activeTab) void openNote(activeTab.path)
+              }}
+              disabled={!activeTab || !isMarkdownPath(activeTab.path)}
+            >
+              Text
+            </button>
             {activeIsTypst && showPreview && (
               <button
                 type="button"
@@ -1789,13 +1937,24 @@ function App(): JSX.Element {
               </div>
             )}
             {mainTab?.mode === 'track' && mainTab.trackState ? (
-              <TrackChangesEditor
-                tabId={mainTab.id}
-                path={mainTab.path}
-                state={mainTab.trackState}
-                onMarkdownChange={updateTabBody}
-                onTrackStateChange={updateTrackState}
-              />
+              <React.Suspense fallback={<EditorLoading label="Loading Track editor..." />}>
+                <TrackChangesEditor
+                  tabId={mainTab.id}
+                  path={mainTab.path}
+                  state={mainTab.trackState}
+                  onMarkdownChange={updateTabBody}
+                  onTrackStateChange={updateTrackState}
+                />
+              </React.Suspense>
+              ) : mainTab?.mode === 'canvas' ? (
+                <React.Suspense fallback={<EditorLoading label="Loading Canvas..." />}>
+                  <CanvasEditor
+                    tabId={mainTab.id}
+                    body={mainTab.body}
+                    disabled={!mainTab}
+                    onChange={updateTabBody}
+                  />
+                </React.Suspense>
               ) : (
                 <MarkdownEditor
                   activePath={mainTab?.path ?? null}
@@ -1833,20 +1992,31 @@ function App(): JSX.Element {
                   <option value="">Choose file</option>
                   {splitCandidates.map((tab) => (
                     <option key={tab.id} value={tab.id}>
-                      {tab.mode === 'track' ? `${tab.path} - Track` : tab.path}
+                      {tabLabel(tab)}
                     </option>
                   ))}
                 </select>
                 <button type="button" onClick={closeSplitPane}>Close right</button>
               </div>
               {splitTab?.mode === 'track' && splitTab.trackState ? (
-                <TrackChangesEditor
-                  tabId={splitTab.id}
-                  path={splitTab.path}
-                  state={splitTab.trackState}
-                  onMarkdownChange={updateTabBody}
-                  onTrackStateChange={updateTrackState}
-                />
+                <React.Suspense fallback={<EditorLoading label="Loading Track editor..." />}>
+                  <TrackChangesEditor
+                    tabId={splitTab.id}
+                    path={splitTab.path}
+                    state={splitTab.trackState}
+                    onMarkdownChange={updateTabBody}
+                    onTrackStateChange={updateTrackState}
+                  />
+                </React.Suspense>
+                ) : splitTab?.mode === 'canvas' ? (
+                  <React.Suspense fallback={<EditorLoading label="Loading Canvas..." />}>
+                    <CanvasEditor
+                      tabId={splitTab.id}
+                      body={splitTab.body}
+                      disabled={!splitTab}
+                      onChange={updateTabBody}
+                    />
+                  </React.Suspense>
                 ) : (
                   <MarkdownEditor
                     activePath={splitTab?.path ?? null}
@@ -1870,12 +2040,14 @@ function App(): JSX.Element {
             activeIsTypst ? (
               <TypstPreviewPane preview={typstPreview?.tabId === activeTab.id ? typstPreview : null} />
             ) : (
-              <MarkdownPreview
-                html={previewHtml.html}
-                version={previewHtml.version}
-                notePaths={allFilePaths}
-                onOpenWikiLink={(path) => void openNote(path)}
-              />
+              <React.Suspense fallback={<EditorLoading label="Loading Preview..." />}>
+                <MarkdownPreview
+                  body={activeTab.body}
+                  version={activeTab.bodyVersion}
+                  notePaths={allFilePaths}
+                  onOpenWikiLink={(path) => void openNote(path)}
+                />
+              </React.Suspense>
             )
           )}
           {showBacklinks && activeTab && (
@@ -1934,180 +2106,6 @@ function BacklinksPanel({
   )
 }
 
-const markdownRenderer = MarkdownIt({
-  html: false,
-  linkify: true,
-  typographer: true,
-  breaks: false
-})
-
-function renderMarkdownPreview(markdown: string, notePaths: string[]): string {
-  const snippets: string[] = []
-  const prepared = preprocessPreviewMarkdown(markdown, notePaths, snippets)
-  return markdownRenderer.render(prepared)
-    .replace(/<p>@@NZHTML(\d+)@@<\/p>/g, (_match, index: string) => snippets[Number(index)] ?? '')
-    .replace(/@@NZHTML(\d+)@@/g, (_match, index: string) => snippets[Number(index)] ?? '')
-}
-
-function htmlPlaceholder(html: string, snippets: string[]): string {
-  const index = snippets.push(html) - 1
-  return `@@NZHTML${index}@@`
-}
-
-function pushPreviewBlockHtml(out: string[], html: string, snippets: string[]): void {
-  if (out.length > 0 && out[out.length - 1].trim() !== '') out.push('')
-  out.push(htmlPlaceholder(html, snippets))
-  out.push('')
-}
-
-function preprocessPreviewMarkdown(markdown: string, notePaths: string[], snippets: string[]): string {
-  const lines = markdown.replace(/\r\n/g, '\n').split('\n')
-  const out: string[] = []
-  let inDisplayMath = false
-  let displayMath: string[] = []
-
-  for (const line of lines) {
-    if (line.trim() === '$$') {
-      if (inDisplayMath) {
-        pushPreviewBlockHtml(out, renderDisplayMath(displayMath.join('\n')), snippets)
-        displayMath = []
-        inDisplayMath = false
-      } else {
-        inDisplayMath = true
-      }
-      continue
-    }
-
-    if (inDisplayMath) {
-      displayMath.push(line)
-      continue
-    }
-
-    const callout = line.match(/^\s*>\s*\[!([A-Za-z][A-Za-z0-9_-]*)\]\s*(.*)$/)
-    if (callout) {
-      const kind = escapeHtml(callout[1].toLowerCase())
-      const title = escapeHtml(callout[1].toUpperCase())
-      const rest = callout[2].trim()
-      out.push(htmlPlaceholder(`<div class="preview-callout preview-callout-${kind}"><div class="preview-callout-title">${title}</div>`, snippets))
-      if (rest) out.push(renderInlinePreviewSyntax(rest, notePaths, snippets))
-      continue
-    }
-
-    if (/^\s*>\s*$/.test(line) && isCalloutOpenPlaceholder(out[out.length - 1], snippets)) {
-      out.push(htmlPlaceholder('</div>', snippets))
-      continue
-    }
-
-    out.push(renderInlinePreviewSyntax(line, notePaths, snippets))
-  }
-
-  if (inDisplayMath) {
-    out.push('$$')
-    out.push(...displayMath)
-  }
-
-  const closed: string[] = []
-  let calloutOpen = false
-  for (const line of out) {
-    if (isCalloutOpenPlaceholder(line, snippets)) {
-      if (calloutOpen) closed.push(htmlPlaceholder('</div>', snippets))
-      calloutOpen = true
-      closed.push(line)
-      continue
-    }
-    if (calloutOpen && line.trim() === '') {
-      closed.push(htmlPlaceholder('</div>', snippets))
-      calloutOpen = false
-      closed.push(line)
-      continue
-    }
-    closed.push(line)
-  }
-  if (calloutOpen) closed.push(htmlPlaceholder('</div>', snippets))
-
-  return closed.join('\n')
-}
-
-function isCalloutOpenPlaceholder(line: string | undefined, snippets: string[]): boolean {
-  const match = line?.match(/^@@NZHTML(\d+)@@$/)
-  if (!match) return false
-  return (snippets[Number(match[1])] ?? '').startsWith('<div class="preview-callout')
-}
-
-function renderInlinePreviewSyntax(line: string, notePaths: string[], snippets: string[]): string {
-  const withWiki = line.replace(
-    /\[\[([^\]\n|#]+)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g,
-    (_match, rawLabel: string, rawAnchor: string | undefined, rawAlias: string | undefined) => {
-      const label = rawLabel.trim()
-      const target = resolveWikiPath(label, notePaths)
-      const text = escapeHtml(rawAlias?.trim() || label)
-      const anchor = rawAnchor ? escapeHtml(rawAnchor) : ''
-      if (!target) return htmlPlaceholder(`<span class="preview-wiki missing">${text}${anchor}</span>`, snippets)
-      return htmlPlaceholder(`<a class="preview-wiki" href="notesproject-wiki:${encodeURIComponent(target)}">${text}${anchor}</a>`, snippets)
-    }
-  )
-
-  return withWiki.replace(/(^|[^\\$])\$([^\n$]+?)\$/g, (_match, before: string, source: string) => {
-    return `${before}${htmlPlaceholder(renderInlineMath(source.trim()), snippets)}`
-  })
-}
-
-function renderInlineMath(source: string): string {
-  return katex.renderToString(source, {
-    displayMode: false,
-    throwOnError: false,
-    strict: false,
-    trust: false
-  })
-}
-
-function renderDisplayMath(source: string): string {
-  return `<div class="preview-math-block">${katex.renderToString(source.trim(), {
-    displayMode: true,
-    throwOnError: false,
-    strict: false,
-    trust: false
-  })}</div>`
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
-function MarkdownPreview({
-  html,
-  version,
-  notePaths,
-  onOpenWikiLink
-}: {
-  html: string
-  version: number
-  notePaths: string[]
-  onOpenWikiLink: (path: string) => void
-}): JSX.Element {
-  return (
-    <article
-      className="preview-pane"
-      data-body-version={version}
-      onClick={(event) => {
-        const target = event.target as HTMLElement | null
-        const link = target?.closest('a.preview-wiki') as HTMLAnchorElement | null
-        if (!link) return
-        const href = link.getAttribute('href') ?? ''
-        if (!href.startsWith('notesproject-wiki:')) return
-        event.preventDefault()
-        const path = decodeURIComponent(href.slice('notesproject-wiki:'.length))
-        if (notePaths.includes(path)) onOpenWikiLink(path)
-      }}
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
-  )
-}
-
 function TypstPreviewPane({ preview }: { preview: TypstPreviewState | null }): JSX.Element {
   const hasContent = !!preview?.content
   return (
@@ -2135,6 +2133,16 @@ function TypstPreviewPane({ preview }: { preview: TypstPreviewState | null }): J
         <div className="preview-status">No Typst preview yet.</div>
       )}
     </article>
+  )
+}
+
+function EditorLoading({ label }: { label: string }): JSX.Element {
+  return (
+    <div className="editor-host">
+      <div className="empty-editor">
+        <strong>{label}</strong>
+      </div>
+    </div>
   )
 }
 
@@ -2170,6 +2178,7 @@ function MarkdownEditor({
   const hostRef = useRef<HTMLDivElement | null>(null)
   const viewRef = useRef<EditorView | null>(null)
   const editableRef = useRef<Compartment | null>(null)
+  const languageRef = useRef<Compartment | null>(null)
   const pathRef = useRef<string | null>(null)
   const changeIdRef = useRef<string | null>(changeId)
   const statesRef = useRef<Map<string, EditorState>>(new Map())
@@ -2207,9 +2216,12 @@ function MarkdownEditor({
     if (!host || viewRef.current) return
 
     const editable = new Compartment()
+    const language = new Compartment()
     editableRef.current = editable
+    languageRef.current = language
 
     const extensions: Extension[] = [
+      language.of(markdown()),
       history({ minDepth: 10000, newGroupDelay: 500 }),
       editorDocumentVersion,
       drawSelection(),
@@ -2286,7 +2298,7 @@ function MarkdownEditor({
 
     const view = new EditorView({
       parent: host,
-      state: createEditorState(body, extensions, filePath)
+      state: createEditorState(body, extensions)
     })
     viewRef.current = view
     pathRef.current = activePath
@@ -2294,6 +2306,7 @@ function MarkdownEditor({
       view.destroy()
       viewRef.current = null
       editableRef.current = null
+      languageRef.current = null
       baseExtensionsRef.current = null
     }
   }, [])
@@ -2306,6 +2319,27 @@ function MarkdownEditor({
       effects: editable.reconfigure(EditorView.editable.of(!disabled))
     })
   }, [disabled])
+
+  useEffect(() => {
+    const view = viewRef.current
+    const language = languageRef.current
+    if (!view || !language) return
+    let cancelled = false
+    if (!isTypstPath(filePath)) {
+      view.dispatch({ effects: language.reconfigure(markdown()) })
+      return
+    }
+    void import('codemirror-lang-typst')
+      .then(({ typst }) => {
+        if (!cancelled) view.dispatch({ effects: language.reconfigure(typst()) })
+      })
+      .catch(() => {
+        if (!cancelled) view.dispatch({ effects: language.reconfigure(markdown()) })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [filePath])
 
   useEffect(() => {
     const view = viewRef.current
@@ -2332,7 +2366,7 @@ function MarkdownEditor({
 
     pathRef.current = activePath
     if (!activePath) {
-      view.setState(createEditorState('', baseExtensionsRef.current ?? [], filePath))
+      view.setState(createEditorState('', baseExtensionsRef.current ?? []))
       applyEditable(view, editableRef.current, false)
       return
     }
@@ -2353,7 +2387,7 @@ function MarkdownEditor({
       return
     }
 
-    view.setState(createEditorState(body, baseExtensionsRef.current ?? [], filePath))
+    view.setState(createEditorState(body, baseExtensionsRef.current ?? []))
     applyEditable(view, editableRef.current, !disabled)
     view.scrollDOM.scrollTop = 0
   }, [activePath, body, disabled, filePath])
@@ -2595,17 +2629,7 @@ class MathPreviewWidget extends WidgetType {
     const element = document.createElement(this.displayMode ? 'div' : 'span')
     element.className = this.displayMode ? 'cm-math-preview block' : 'cm-math-preview inline'
     element.dataset.editorVersion = String(this.version)
-    try {
-      element.innerHTML = katex.renderToString(this.source, {
-        displayMode: this.displayMode,
-        throwOnError: false,
-        strict: false,
-        trust: false
-      })
-    } catch {
-      element.textContent = this.source
-      element.classList.add('error')
-    }
+    element.textContent = this.source
     return element
   }
 
@@ -2718,15 +2742,11 @@ function GitBadge({ git }: { git: GitInfo }): JSX.Element {
   )
 }
 
-function createEditorState(doc: string, extensions: Extension[], path: string | null): EditorState {
+function createEditorState(doc: string, extensions: Extension[]): EditorState {
   return EditorState.create({
     doc,
-    extensions: [editorLanguage(path), ...extensions]
+    extensions
   })
-}
-
-function editorLanguage(path: string | null): Extension {
-  return isTypstPath(path) ? typst() : markdown()
 }
 
 function isTypstPath(path: string | null): boolean {
@@ -3006,9 +3026,9 @@ function TabStrip({
             type="button"
             className={active ? 'tab active' : 'tab'}
             onClick={() => onSelect(tab.id)}
-            title={tab.mode === 'track' ? `${tab.path} - Track` : tab.path}
+            title={tabLabel(tab)}
           >
-            <span className="tab-title">{basename(tab.path)}{tab.mode === 'track' ? ' - Track' : ''}</span>
+            <span className="tab-title">{basename(tab.path)}{tab.mode === 'markdown' ? '' : ` - ${modeLabel(tab.mode)}`}</span>
             {dirty && <span className="tab-dirty" aria-label="Modified" />}
             {tab.externalStatus && <span className="tab-external" aria-label={tab.externalStatus} />}
             <span
@@ -3476,6 +3496,16 @@ function tabId(path: string, mode: EditorMode): string {
   return `${mode}:${pathKey(path)}`
 }
 
+function modeLabel(mode: EditorMode): string {
+  if (mode === 'track') return 'Track'
+  if (mode === 'canvas') return 'Canvas'
+  return 'Markdown'
+}
+
+function tabLabel(tab: OpenTab): string {
+  return tab.mode === 'markdown' ? tab.path : `${tab.path} - ${modeLabel(tab.mode)}`
+}
+
 function pathKey(path: string): string {
   const normalized = path.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
   return currentPathsCaseSensitive ? normalized : normalized.toLowerCase()
@@ -3501,6 +3531,21 @@ function uniquePaths(paths: string[]): string[] {
     const key = pathKey(path)
     if (seen.has(key)) return false
     seen.add(key)
+    return true
+  })
+}
+
+function isRawSourceMode(mode: EditorMode): boolean {
+  return mode === 'markdown' || mode === 'canvas'
+}
+
+function uniqueSaveTargets(tabs: OpenTab[]): OpenTab[] {
+  const seenRawPaths = new Set<string>()
+  return tabs.filter((tab) => {
+    if (!isRawSourceMode(tab.mode)) return true
+    const key = pathKey(tab.path)
+    if (seenRawPaths.has(key)) return false
+    seenRawPaths.add(key)
     return true
   })
 }
@@ -3634,6 +3679,7 @@ function isAppChromeTarget(target: EventTarget | null): boolean {
 async function loadOrCreateTrackState(path: string, body: string): Promise<TrackState> {
   const saved = await invoke<TrackState | null>('read_track_state', { path })
   if (saved) return saved
+  const { createInitialTrackState } = await import('./track/TrackChangesEditor')
   return createInitialTrackState(path, markdownToTiptap(body))
 }
 
@@ -3647,8 +3693,8 @@ function readStoredSession(root: string): StoredSession | null {
     if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<StoredSession>
     const openTabs = Array.isArray(parsed.openTabs)
-      ? parsed.openTabs.filter((tab): tab is { path: string; mode: EditorMode } =>
-          typeof tab?.path === 'string' && (tab.mode === 'markdown' || tab.mode === 'track')
+        ? parsed.openTabs.filter((tab): tab is { path: string; mode: EditorMode } =>
+          typeof tab?.path === 'string' && (tab.mode === 'markdown' || tab.mode === 'track' || tab.mode === 'canvas')
         )
       : []
     return {
@@ -3660,7 +3706,7 @@ function readStoredSession(root: string): StoredSession | null {
       activePath: typeof parsed.activePath === 'string' ? parsed.activePath : null,
       splitOpen: parsed.splitOpen === true,
       splitPath: typeof parsed.splitPath === 'string' ? parsed.splitPath : null,
-      splitMode: parsed.splitMode === 'markdown' || parsed.splitMode === 'track' ? parsed.splitMode : null,
+      splitMode: parsed.splitMode === 'markdown' || parsed.splitMode === 'track' || parsed.splitMode === 'canvas' ? parsed.splitMode : null,
       expanded: Array.isArray(parsed.expanded)
         ? parsed.expanded.filter((path): path is string => typeof path === 'string')
         : [],
