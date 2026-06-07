@@ -495,17 +495,121 @@ input:focus {
 
 .editor-header {
   display: flex;
-  min-height: 50px;
+  min-height: 56px;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 10px 16px;
+  flex-wrap: wrap;
   border-bottom: 1px solid var(--line);
-  padding: 0 16px 0 18px;
+  padding: 8px 16px 8px 18px;
+}
+
+.app-menu-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.app-menu {
+  position: relative;
+}
+
+.app-menu summary {
+  list-style: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
+  padding: 5px 9px;
+}
+
+.app-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.app-menu[open] summary,
+.app-menu summary:hover {
+  border-color: var(--line);
+  background: var(--panel-2);
+}
+
+.app-menu-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  display: grid;
+  width: max-content;
+  min-width: 210px;
+  gap: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 12px 26px rgba(42, 38, 31, 0.16);
+  padding: 8px;
+}
+
+.app-menu-popover button {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fffdf8;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.app-menu-popover button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
+}
+
+.app-menu-field {
+  display: grid;
+  gap: 4px;
+}
+
+.app-menu-field span,
+.app-menu-check span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.app-menu-field select {
+  min-width: 190px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fffdf8;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 6px 28px 6px 8px;
+}
+
+.app-menu-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 2px;
+}
+
+.app-menu-check input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
 }
 
 .note-heading {
   display: flex;
-  min-width: 0;
+  min-width: 160px;
+  flex: 1 1 260px;
   align-items: center;
   gap: 8px;
 }
@@ -896,7 +1000,6 @@ input:focus {
 }
 
 .cm-wiki-link {
-  border-bottom: 1px solid color-mix(in srgb, var(--accent-2) 55%, transparent);
   color: #23528c;
   font-weight: 650;
   text-decoration: none;
@@ -907,7 +1010,6 @@ input:focus {
 }
 
 .cm-wiki-missing {
-  border-bottom-style: dashed;
   color: var(--danger);
 }
 

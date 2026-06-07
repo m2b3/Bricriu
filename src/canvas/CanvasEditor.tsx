@@ -45,7 +45,6 @@ const nodeTypes: NodeTypes = {
 export type DocumentDisplayMode = 'node' | 'panel'
 
 const documentNodeId = '__document'
-const documentDisplayStorageKey = 'notesproject:canvas-document-display'
 
 type EditingNode = {
   id: string
@@ -58,6 +57,7 @@ export function CanvasEditor({
   tabId,
   body,
   disabled,
+  documentDisplayMode,
   notePaths,
   onChange,
   onOpenWikiLink
@@ -65,6 +65,7 @@ export function CanvasEditor({
   tabId: string | null
   body: string
   disabled: boolean
+  documentDisplayMode: DocumentDisplayMode
   notePaths: string[]
   onChange: (id: string, body: string) => void
   onOpenWikiLink: (path: string) => void
@@ -80,7 +81,6 @@ export function CanvasEditor({
   const [editingNode, setEditingNode] = useState<EditingNode | null>(null)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [inspectorOpen, setInspectorOpen] = useState(false)
-  const [documentDisplayMode, setDocumentDisplayMode] = useState<DocumentDisplayMode>(() => readDocumentDisplayMode())
   const applyingStoredViewport = useRef(false)
   const appliedViewportKey = useRef<string | null>(null)
 
@@ -164,15 +164,6 @@ export function CanvasEditor({
       setSelectedNodeId(null)
     }
   }, [canvasDocument, selectedNodeId, showDocumentNode])
-
-  const setAndStoreDocumentDisplayMode = useCallback((mode: DocumentDisplayMode) => {
-    setDocumentDisplayMode(mode)
-    try {
-      localStorage.setItem(documentDisplayStorageKey, mode)
-    } catch {
-      // Ignore storage failures; the in-memory setting still applies.
-    }
-  }, [])
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     setNodes((current) => applyNodeChanges(changes, current) as Array<Node<CanvasNodeData>>)
@@ -351,12 +342,9 @@ export function CanvasEditor({
         canAddNodes={parsed.ok}
         canCreateCanvas={!parsed.ok && !parsed.hasBlock}
         canDelete={!!selectedNodeId && selectedNodeId !== documentNodeId}
-        documentDisplayMode={documentDisplayMode}
-        hasDocumentMarkdown={documentMarkdown !== ''}
         inspectorOpen={inspectorOpen}
         onAddNode={addNode}
         onCreateCanvas={createCanvasBlock}
-        onDocumentDisplayModeChange={setAndStoreDocumentDisplayMode}
         onDeleteSelected={deleteSelectedNode}
         onToggleInspector={() => setInspectorOpen((current) => !current)}
       />
@@ -438,12 +426,4 @@ function viewportKey(viewport: Viewport): string {
     Math.round(viewport.y * 1000) / 1000,
     Math.round(viewport.zoom * 1000) / 1000
   ].join(':')
-}
-
-function readDocumentDisplayMode(): DocumentDisplayMode {
-  try {
-    return localStorage.getItem(documentDisplayStorageKey) === 'panel' ? 'panel' : 'node'
-  } catch {
-    return 'node'
-  }
 }

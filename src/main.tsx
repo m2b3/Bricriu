@@ -34,9 +34,10 @@ import {
 } from '@codemirror/commands'
 import { markdown } from '@codemirror/lang-markdown'
 import {
-  defaultHighlightStyle,
+  HighlightStyle,
   syntaxHighlighting
 } from '@codemirror/language'
+import { tags } from '@lezer/highlight'
 import { searchKeymap } from '@codemirror/search'
 import { renderCanvasMarkdown } from './canvas/canvasMarkdown'
 import { markdownToTiptap } from './track/markdown'
@@ -138,6 +139,7 @@ type EditorMode = 'markdown' | 'track' | 'canvas'
 type SearchView = 'file' | 'content'
 type EditorPane = 'main' | 'split'
 type CanvasMarkdownDisplayMode = 'summary' | 'raw'
+type CanvasDocumentDisplayMode = 'node' | 'panel'
 
 type OpenTab = {
   id: string
@@ -176,10 +178,31 @@ const editorDocumentVersion = StateField.define<number>({
     return transaction.docChanged ? value + 1 : value
   }
 })
+const notesHighlightStyle = HighlightStyle.define([
+  { tag: tags.meta, color: '#404740' },
+  { tag: tags.heading, fontWeight: 'bold' },
+  { tag: tags.emphasis, fontStyle: 'italic' },
+  { tag: tags.strong, fontWeight: 'bold' },
+  { tag: tags.strikethrough, textDecoration: 'line-through' },
+  { tag: tags.keyword, color: '#708' },
+  { tag: [tags.atom, tags.bool, tags.url, tags.contentSeparator, tags.labelName], color: '#219' },
+  { tag: [tags.literal, tags.inserted], color: '#164' },
+  { tag: [tags.string, tags.deleted], color: '#a11' },
+  { tag: [tags.regexp, tags.escape, tags.special(tags.string)], color: '#e40' },
+  { tag: tags.definition(tags.variableName), color: '#00f' },
+  { tag: tags.local(tags.variableName), color: '#30a' },
+  { tag: [tags.typeName, tags.namespace], color: '#085' },
+  { tag: tags.className, color: '#167' },
+  { tag: [tags.special(tags.variableName), tags.macroName], color: '#256' },
+  { tag: tags.definition(tags.propertyName), color: '#00c' },
+  { tag: tags.comment, color: '#940' },
+  { tag: tags.invalid, color: '#f00' }
+])
 const LAST_VAULT_KEY = 'notesproject:last-vault'
 const SESSION_KEY_PREFIX = 'notesproject:session:'
 const WINDOW_PLACEMENT_KEY = 'notesproject:window-placement'
 const CANVAS_MARKDOWN_DISPLAY_KEY = 'notesproject:canvas-markdown-display'
+const CANVAS_DOCUMENT_DISPLAY_KEY = 'notesproject:canvas-document-display'
 
 type AppProfile = {
   autosaveDelayMs: number
@@ -265,6 +288,7 @@ function App(): JSX.Element {
   const [profile, setProfile] = useState<AppProfile>(DEFAULT_PROFILE)
   const [showPreview, setShowPreview] = useState(false)
   const [canvasMarkdownDisplayMode, setCanvasMarkdownDisplayMode] = useState<CanvasMarkdownDisplayMode>(() => readCanvasMarkdownDisplayMode())
+  const [canvasDocumentDisplayMode, setCanvasDocumentDisplayMode] = useState<CanvasDocumentDisplayMode>(() => readCanvasDocumentDisplayMode())
   const [typstPreviewFormat, setTypstPreviewFormat] = useState<TypstPreviewFormat>('svg')
   const [showBacklinks, setShowBacklinks] = useState(false)
   const [loadingBacklinks, setLoadingBacklinks] = useState(false)
@@ -296,6 +320,15 @@ function App(): JSX.Element {
     setCanvasMarkdownDisplayMode(mode)
     try {
       localStorage.setItem(CANVAS_MARKDOWN_DISPLAY_KEY, mode)
+    } catch {
+      // Ignore storage failures; the in-memory setting still applies.
+    }
+  }, [])
+
+  const updateCanvasDocumentDisplayMode = useCallback((mode: CanvasDocumentDisplayMode) => {
+    setCanvasDocumentDisplayMode(mode)
+    try {
+      localStorage.setItem(CANVAS_DOCUMENT_DISPLAY_KEY, mode)
     } catch {
       // Ignore storage failures; the in-memory setting still applies.
     }
@@ -407,6 +440,16 @@ function App(): JSX.Element {
     }
     setFocusedPane('split')
   }, [mainTab, splitTab, tabs])
+
+  const toggleSplitPane = useCallback(() => {
+    if (splitOpen) {
+      closeSplitPane()
+      return
+    }
+    setSplitOpen(true)
+    setSplitId(null)
+    setFocusedPane('split')
+  }, [closeSplitPane, splitOpen])
 
   useEffect(() => {
     void invoke<AppProfile>('load_profile')
@@ -1790,6 +1833,32 @@ function App(): JSX.Element {
             setEditorFocusRequest((request) => request + 1)
           }}
         >
+          <AppMenuBar
+            activeTab={activeTab}
+            activeIsTypst={activeIsTypst}
+            busy={busy}
+            canvasDocumentDisplayMode={canvasDocumentDisplayMode}
+            canvasMarkdownDisplayMode={canvasMarkdownDisplayMode}
+            checkpointDisabled={!vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
+            profile={profile}
+            recentClosedPaths={recentClosedPaths}
+            showBacklinks={showBacklinks}
+            showPreview={showPreview}
+            typstPreviewFormat={typstPreviewFormat}
+            vaultOpen={!!vault}
+            onCheckpoint={() => void checkpointNow()}
+            onDeleteCurrent={() => {
+              if (activeTab) void deleteNoteAction(activeTab.path)
+            }}
+            onOpenRecent={(path) => void openNote(path)}
+            onSetCanvasDocumentDisplay={updateCanvasDocumentDisplayMode}
+            onSetCanvasMarkdownDisplay={updateCanvasMarkdownDisplayMode}
+            onSetTypstPreviewFormat={setTypstPreviewFormat}
+            onToggleBacklinks={() => setShowBacklinks((current) => !current)}
+            onToggleHistory={(persistRecentFiles) => updateProfile({ ...profile, persistRecentFiles })}
+            onTogglePreview={() => setShowPreview((current) => !current)}
+            pathKey={pathKey}
+          />
           <div className="note-heading">
             <span className="note-path">{activeTab?.path ?? 'Open a Markdown file'}</span>
             {dirty && <span className="dirty-pill">Modified</span>}
@@ -1797,52 +1866,6 @@ function App(): JSX.Element {
             {activeTab?.externalStatus === 'deleted' && <span className="external-pill danger">Deleted on disk</span>}
           </div>
           <div className="editor-actions">
-            <select
-              className="recent-files-select"
-              value=""
-              onChange={(event) => {
-                const path = event.target.value
-                if (!path) return
-                void openNote(path)
-              }}
-              disabled={!vault || recentClosedPaths.length === 0}
-              title="Recent files"
-            >
-              <option value="">Recent</option>
-              {recentClosedPaths.map((path) => (
-                <option key={pathKey(path)} value={path}>{path}</option>
-              ))}
-            </select>
-            <label className="recent-history-toggle" title="Persist recent files">
-              <input
-                type="checkbox"
-                checked={profile.persistRecentFiles}
-                onChange={(event) => updateProfile({ ...profile, persistRecentFiles: event.target.checked })}
-              />
-              <span>History</span>
-            </label>
-            <select
-              className="actions-select"
-              value=""
-              onChange={(event) => {
-                const action = event.target.value
-                event.currentTarget.value = ''
-                if (action === 'delete' && activeTab) void deleteNoteAction(activeTab.path)
-              }}
-              disabled={!activeTab || busy}
-              title="Actions"
-            >
-              <option value="">Actions</option>
-              <option value="delete">Delete current file</option>
-            </select>
-            <button
-              type="button"
-              className={showPreview ? 'secondary-button active' : 'secondary-button'}
-              onClick={() => setShowPreview((current) => !current)}
-              disabled={!activeTab}
-            >
-              Preview
-            </button>
             <button
               type="button"
               className={activeTab?.mode === 'canvas' ? 'secondary-button active' : 'secondary-button'}
@@ -1863,36 +1886,6 @@ function App(): JSX.Element {
             >
               Text
             </button>
-            {activeTab?.mode === 'markdown' && (
-              <label className="recent-history-toggle" title="Canvas blocks in Markdown mode">
-                <span>Canvas</span>
-                <select
-                  className="inline-mode-select"
-                  value={canvasMarkdownDisplayMode}
-                  onChange={(event) => updateCanvasMarkdownDisplayMode(event.target.value as CanvasMarkdownDisplayMode)}
-                >
-                  <option value="summary">Summary</option>
-                  <option value="raw">Raw</option>
-                </select>
-              </label>
-            )}
-            {activeIsTypst && showPreview && (
-              <button
-                type="button"
-                className={typstPreviewFormat === 'html' ? 'secondary-button active' : 'secondary-button'}
-                onClick={() => setTypstPreviewFormat((current) => current === 'html' ? 'svg' : 'html')}
-              >
-                HTML
-              </button>
-            )}
-            <button
-              type="button"
-              className={showBacklinks ? 'secondary-button active' : 'secondary-button'}
-              onClick={() => setShowBacklinks((current) => !current)}
-              disabled={!activeTab || !isMarkdownPath(activeTab.path)}
-            >
-              Backlinks
-            </button>
             {splitOpen && (
               <button
                 type="button"
@@ -1906,15 +1899,7 @@ function App(): JSX.Element {
             <button
               type="button"
               className={splitOpen ? 'secondary-button active' : 'secondary-button'}
-              onClick={() => {
-                if (splitOpen) {
-                  closeSplitPane()
-                  return
-                }
-                setSplitOpen(true)
-                setSplitId(null)
-                setFocusedPane('split')
-              }}
+              onClick={toggleSplitPane}
               disabled={!vault}
             >
               {splitOpen ? 'Close split' : 'Split'}
@@ -1978,6 +1963,7 @@ function App(): JSX.Element {
                     tabId={mainTab.id}
                     body={mainTab.body}
                     disabled={!mainTab}
+                    documentDisplayMode={canvasDocumentDisplayMode}
                     notePaths={allFilePaths}
                     onChange={updateTabBody}
                     onOpenWikiLink={(path) => void openNote(path)}
@@ -2043,6 +2029,7 @@ function App(): JSX.Element {
                       tabId={splitTab.id}
                       body={splitTab.body}
                       disabled={!splitTab}
+                      documentDisplayMode={canvasDocumentDisplayMode}
                       notePaths={allFilePaths}
                       onChange={updateTabBody}
                       onOpenWikiLink={(path) => void openNote(path)}
@@ -2178,6 +2165,150 @@ function EditorLoading({ label }: { label: string }): JSX.Element {
   )
 }
 
+function AppMenuBar({
+  activeTab,
+  activeIsTypst,
+  busy,
+  canvasDocumentDisplayMode,
+  canvasMarkdownDisplayMode,
+  checkpointDisabled,
+  profile,
+  recentClosedPaths,
+  showBacklinks,
+  showPreview,
+  typstPreviewFormat,
+  vaultOpen,
+  onCheckpoint,
+  onDeleteCurrent,
+  onOpenRecent,
+  onSetCanvasDocumentDisplay,
+  onSetCanvasMarkdownDisplay,
+  onSetTypstPreviewFormat,
+  onToggleBacklinks,
+  onToggleHistory,
+  onTogglePreview,
+  pathKey
+}: {
+  activeTab: OpenTab | null
+  activeIsTypst: boolean
+  busy: boolean
+  canvasDocumentDisplayMode: CanvasDocumentDisplayMode
+  canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode
+  checkpointDisabled: boolean
+  profile: AppProfile
+  recentClosedPaths: string[]
+  showBacklinks: boolean
+  showPreview: boolean
+  typstPreviewFormat: TypstPreviewFormat
+  vaultOpen: boolean
+  onCheckpoint: () => void
+  onDeleteCurrent: () => void
+  onOpenRecent: (path: string) => void
+  onSetCanvasDocumentDisplay: (mode: CanvasDocumentDisplayMode) => void
+  onSetCanvasMarkdownDisplay: (mode: CanvasMarkdownDisplayMode) => void
+  onSetTypstPreviewFormat: React.Dispatch<React.SetStateAction<TypstPreviewFormat>>
+  onToggleBacklinks: () => void
+  onToggleHistory: (persistRecentFiles: boolean) => void
+  onTogglePreview: () => void
+  pathKey: (path: string) => string
+}): JSX.Element {
+  const activeIsMarkdown = !!activeTab && isMarkdownPath(activeTab.path)
+  return (
+    <nav className="app-menu-bar" aria-label="Application menu">
+      <details className="app-menu">
+        <summary>File</summary>
+        <div className="app-menu-popover">
+          <label className="app-menu-field">
+            <span>Recent</span>
+            <select
+              value=""
+              onChange={(event) => {
+                const path = event.target.value
+                event.currentTarget.value = ''
+                if (path) onOpenRecent(path)
+              }}
+              disabled={!vaultOpen || recentClosedPaths.length === 0}
+            >
+              <option value="">Open recent...</option>
+              {recentClosedPaths.map((path) => (
+                <option key={pathKey(path)} value={path}>{path}</option>
+              ))}
+            </select>
+          </label>
+          <label className="app-menu-check">
+            <input
+              type="checkbox"
+              checked={profile.persistRecentFiles}
+              onChange={(event) => onToggleHistory(event.target.checked)}
+            />
+            <span>Persist recent files</span>
+          </label>
+          <button type="button" onClick={onDeleteCurrent} disabled={!activeTab || busy}>
+            Delete current file
+          </button>
+        </div>
+      </details>
+
+      <details className="app-menu">
+        <summary>View</summary>
+        <div className="app-menu-popover">
+          <label className="app-menu-check">
+            <input type="checkbox" checked={showPreview} onChange={onTogglePreview} disabled={!activeTab} />
+            <span>Preview</span>
+          </label>
+          <label className="app-menu-check">
+            <input type="checkbox" checked={showBacklinks} onChange={onToggleBacklinks} disabled={!activeIsMarkdown} />
+            <span>Backlinks</span>
+          </label>
+          {activeIsTypst && showPreview && (
+            <label className="app-menu-field">
+              <span>Typst preview</span>
+              <select
+                value={typstPreviewFormat}
+                onChange={(event) => onSetTypstPreviewFormat(event.target.value as TypstPreviewFormat)}
+              >
+                <option value="svg">SVG</option>
+                <option value="html">HTML</option>
+              </select>
+            </label>
+          )}
+        </div>
+      </details>
+
+      <details className="app-menu">
+        <summary>Options</summary>
+        <div className="app-menu-popover">
+          <label className="app-menu-field">
+            <span>Markdown canvas</span>
+            <select
+              value={canvasMarkdownDisplayMode}
+              onChange={(event) => onSetCanvasMarkdownDisplay(event.target.value as CanvasMarkdownDisplayMode)}
+              disabled={activeTab?.mode !== 'markdown'}
+            >
+              <option value="summary">Summary</option>
+              <option value="raw">Raw</option>
+            </select>
+          </label>
+          <label className="app-menu-field">
+            <span>Canvas document</span>
+            <select
+              value={canvasDocumentDisplayMode}
+              onChange={(event) => onSetCanvasDocumentDisplay(event.target.value as CanvasDocumentDisplayMode)}
+              disabled={activeTab?.mode !== 'canvas'}
+            >
+              <option value="node">Node</option>
+              <option value="panel">Panel</option>
+            </select>
+          </label>
+          <button type="button" onClick={onCheckpoint} disabled={checkpointDisabled}>
+            Checkpoint
+          </button>
+        </div>
+      </details>
+    </nav>
+  )
+}
+
 function MarkdownEditor({
   activePath,
   changeId,
@@ -2267,7 +2398,7 @@ function MarkdownEditor({
       drawSelection(),
       lineNumbers(),
       highlightActiveLine(),
-      syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+      syntaxHighlighting(notesHighlightStyle, { fallback: true }),
       noteMarkdownTools(notePathsRef, canvasMarkdownDisplayModeRef, searchHighlightRef, onOpenWikiLinkRef),
       EditorView.lineWrapping,
       EditorView.theme({
@@ -2477,6 +2608,16 @@ function noteMarkdownTools(
   searchHighlightRef: React.MutableRefObject<SearchHighlight | null>,
   onOpenWikiLinkRef: React.MutableRefObject<(path: string) => void>
 ): Extension {
+  const canvasSummaryField = StateField.define<DecorationSet>({
+    create(state) {
+      return buildCanvasSummaryDecorations(state, notePathsRef.current, canvasMarkdownDisplayModeRef.current, onOpenWikiLinkRef)
+    },
+    update(_decorations, transaction) {
+      return buildCanvasSummaryDecorations(transaction.state, notePathsRef.current, canvasMarkdownDisplayModeRef.current, onOpenWikiLinkRef)
+    },
+    provide: (field) => EditorView.decorations.from(field)
+  })
+
   const wikiLinkPlugin = ViewPlugin.fromClass(
     class {
       decorations: DecorationSet
@@ -2497,6 +2638,7 @@ function noteMarkdownTools(
   )
 
   return [
+    canvasSummaryField,
     wikiLinkPlugin,
     autocompletion({
       override: [wikiCompletionSource(notePathsRef)],
@@ -2556,33 +2698,14 @@ function buildNoteDecorations(
   canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode,
   searchHighlight: SearchHighlight | null,
   version: number,
-  onOpenWikiLink: (path: string) => void
+  _onOpenWikiLink: (path: string) => void
 ): DecorationSet {
   const ranges: Array<{ from: number; to: number; decoration: Decoration }> = []
   const doc = view.state.doc
   const blockMathRanges: Array<{ from: number; to: number }> = []
-  const canvasBlockRanges: Array<{ from: number; to: number }> = []
-
-  if (canvasMarkdownDisplayMode === 'summary') {
-    const fullText = doc.toString()
-    const canvasBlockRegex = /(^|\n)```canvas[ \t]*\n([\s\S]*?)(?:\n```)(?=\n|$)/g
-    let canvasMatch: RegExpExecArray | null
-    while ((canvasMatch = canvasBlockRegex.exec(fullText))) {
-      const blockFrom = canvasMatch.index + canvasMatch[1].length
-      const blockTo = canvasMatch.index + canvasMatch[0].length
-      const visible = view.visibleRanges.some((range) => blockFrom <= range.to && blockTo >= range.from)
-      if (!visible) continue
-      canvasBlockRanges.push({ from: blockFrom, to: blockTo })
-      ranges.push({
-        from: blockFrom,
-        to: blockTo,
-        decoration: Decoration.replace({
-          widget: new CanvasMarkdownSummaryWidget(extractCanvasNodeTexts(canvasMatch[2]), notePaths, onOpenWikiLink, version),
-          block: true
-        })
-      })
-    }
-  }
+  const canvasBlockRanges = canvasMarkdownDisplayMode === 'summary'
+    ? findCanvasBlockRanges(doc.toString(), view.visibleRanges)
+    : []
 
   for (const { from, to } of view.visibleRanges) {
     const text = doc.sliceString(from, to)
@@ -2688,6 +2811,47 @@ function buildNoteDecorations(
   return builder.finish()
 }
 
+function buildCanvasSummaryDecorations(
+  state: EditorState,
+  notePaths: string[],
+  canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode,
+  onOpenWikiLinkRef: React.MutableRefObject<(path: string) => void>
+): DecorationSet {
+  if (canvasMarkdownDisplayMode !== 'summary') return Decoration.none
+
+  const version = state.field(editorDocumentVersion)
+  const builder = new RangeSetBuilder<Decoration>()
+  const text = state.doc.toString()
+  const canvasBlockRegex = /(^|\n)```canvas[ \t]*\n([\s\S]*?)(?:\n```)(?=\n|$)/g
+  let match: RegExpExecArray | null
+  while ((match = canvasBlockRegex.exec(text))) {
+    const from = match.index + match[1].length
+    const to = match.index + match[0].length
+    builder.add(from, to, Decoration.replace({
+      widget: new CanvasMarkdownSummaryWidget(extractCanvasNodeTexts(match[2]), notePaths, onOpenWikiLinkRef, version),
+      block: true
+    }))
+  }
+  return builder.finish()
+}
+
+function findCanvasBlockRanges(
+  text: string,
+  visibleRanges: readonly { from: number; to: number }[]
+): Array<{ from: number; to: number }> {
+  const ranges: Array<{ from: number; to: number }> = []
+  const canvasBlockRegex = /(^|\n)```canvas[ \t]*\n([\s\S]*?)(?:\n```)(?=\n|$)/g
+  let match: RegExpExecArray | null
+  while ((match = canvasBlockRegex.exec(text))) {
+    const from = match.index + match[1].length
+    const to = match.index + match[0].length
+    if (visibleRanges.some((range) => from <= range.to && to >= range.from)) {
+      ranges.push({ from, to })
+    }
+  }
+  return ranges
+}
+
 class MathPreviewWidget extends WidgetType {
   constructor(
     private readonly source: string,
@@ -2718,7 +2882,7 @@ class CanvasMarkdownSummaryWidget extends WidgetType {
   constructor(
     private readonly nodeTexts: string[],
     private readonly notePaths: string[],
-    private readonly onOpenWikiLink: (path: string) => void,
+    private readonly onOpenWikiLinkRef: React.MutableRefObject<(path: string) => void>,
     private readonly version: number
   ) {
     super()
@@ -2766,7 +2930,7 @@ class CanvasMarkdownSummaryWidget extends WidgetType {
 
       event.preventDefault()
       event.stopPropagation()
-      this.onOpenWikiLink(decodeURIComponent(href.slice('notesproject-wiki:'.length)))
+      this.onOpenWikiLinkRef.current(decodeURIComponent(href.slice('notesproject-wiki:'.length)))
     })
     wrapper.appendChild(content)
 
@@ -3843,6 +4007,14 @@ function readCanvasMarkdownDisplayMode(): CanvasMarkdownDisplayMode {
     return localStorage.getItem(CANVAS_MARKDOWN_DISPLAY_KEY) === 'raw' ? 'raw' : 'summary'
   } catch {
     return 'summary'
+  }
+}
+
+function readCanvasDocumentDisplayMode(): CanvasDocumentDisplayMode {
+  try {
+    return localStorage.getItem(CANVAS_DOCUMENT_DISPLAY_KEY) === 'panel' ? 'panel' : 'node'
+  } catch {
+    return 'node'
   }
 }
 
