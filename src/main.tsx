@@ -38,6 +38,7 @@ import {
   syntaxHighlighting
 } from '@codemirror/language'
 import { searchKeymap } from '@codemirror/search'
+import { renderCanvasMarkdown } from './canvas/canvasMarkdown'
 import { markdownToTiptap } from './track/markdown'
 import type { TrackState } from './track/types'
 import './styles.css'
@@ -136,6 +137,7 @@ type TypstPreviewState = {
 type EditorMode = 'markdown' | 'track' | 'canvas'
 type SearchView = 'file' | 'content'
 type EditorPane = 'main' | 'split'
+type CanvasMarkdownDisplayMode = 'summary' | 'raw'
 
 type OpenTab = {
   id: string
@@ -177,6 +179,7 @@ const editorDocumentVersion = StateField.define<number>({
 const LAST_VAULT_KEY = 'notesproject:last-vault'
 const SESSION_KEY_PREFIX = 'notesproject:session:'
 const WINDOW_PLACEMENT_KEY = 'notesproject:window-placement'
+const CANVAS_MARKDOWN_DISPLAY_KEY = 'notesproject:canvas-markdown-display'
 
 type AppProfile = {
   autosaveDelayMs: number
@@ -261,6 +264,7 @@ function App(): JSX.Element {
   const [touchedPaths, setTouchedPaths] = useState<Set<string>>(() => new Set())
   const [profile, setProfile] = useState<AppProfile>(DEFAULT_PROFILE)
   const [showPreview, setShowPreview] = useState(false)
+  const [canvasMarkdownDisplayMode, setCanvasMarkdownDisplayMode] = useState<CanvasMarkdownDisplayMode>(() => readCanvasMarkdownDisplayMode())
   const [typstPreviewFormat, setTypstPreviewFormat] = useState<TypstPreviewFormat>('svg')
   const [showBacklinks, setShowBacklinks] = useState(false)
   const [loadingBacklinks, setLoadingBacklinks] = useState(false)
@@ -287,6 +291,15 @@ function App(): JSX.Element {
   const latestTabBody = useCallback((tab: OpenTab) => (
     latestBodiesRef.current.get(tab.id) ?? tab.body
   ), [])
+
+  const updateCanvasMarkdownDisplayMode = useCallback((mode: CanvasMarkdownDisplayMode) => {
+    setCanvasMarkdownDisplayMode(mode)
+    try {
+      localStorage.setItem(CANVAS_MARKDOWN_DISPLAY_KEY, mode)
+    } catch {
+      // Ignore storage failures; the in-memory setting still applies.
+    }
+  }, [])
 
   const isTabDirty = useCallback((tab: OpenTab) => (
     latestTabBody(tab) !== tab.savedBody
@@ -1850,6 +1863,19 @@ function App(): JSX.Element {
             >
               Text
             </button>
+            {activeTab?.mode === 'markdown' && (
+              <label className="recent-history-toggle" title="Canvas blocks in Markdown mode">
+                <span>Canvas</span>
+                <select
+                  className="inline-mode-select"
+                  value={canvasMarkdownDisplayMode}
+                  onChange={(event) => updateCanvasMarkdownDisplayMode(event.target.value as CanvasMarkdownDisplayMode)}
+                >
+                  <option value="summary">Summary</option>
+                  <option value="raw">Raw</option>
+                </select>
+              </label>
+            )}
             {activeIsTypst && showPreview && (
               <button
                 type="button"
@@ -1952,7 +1978,9 @@ function App(): JSX.Element {
                     tabId={mainTab.id}
                     body={mainTab.body}
                     disabled={!mainTab}
+                    notePaths={allFilePaths}
                     onChange={updateTabBody}
+                    onOpenWikiLink={(path) => void openNote(path)}
                   />
                 </React.Suspense>
               ) : (
@@ -1963,6 +1991,7 @@ function App(): JSX.Element {
                   body={mainTab?.body ?? ''}
                   disabled={!mainTab}
                   notePaths={allFilePaths}
+                  canvasMarkdownDisplayMode={canvasMarkdownDisplayMode}
                   searchHighlight={searchHighlight && mainTab?.path != null && samePath(searchHighlight.path, mainTab.path) ? searchHighlight : null}
                   jumpOffset={focusedPane === 'main' ? jumpOffset : null}
                   focusRequest={focusedPane === 'main' ? editorFocusRequest : 0}
@@ -2014,7 +2043,9 @@ function App(): JSX.Element {
                       tabId={splitTab.id}
                       body={splitTab.body}
                       disabled={!splitTab}
+                      notePaths={allFilePaths}
                       onChange={updateTabBody}
+                      onOpenWikiLink={(path) => void openNote(path)}
                     />
                   </React.Suspense>
                 ) : (
@@ -2025,6 +2056,7 @@ function App(): JSX.Element {
                     body={splitTab?.body ?? ''}
                     disabled={!splitTab}
                     notePaths={allFilePaths}
+                    canvasMarkdownDisplayMode={canvasMarkdownDisplayMode}
                     searchHighlight={searchHighlight && splitTab?.path != null && samePath(searchHighlight.path, splitTab.path) ? searchHighlight : null}
                     jumpOffset={focusedPane === 'split' ? jumpOffset : null}
                     focusRequest={focusedPane === 'split' ? editorFocusRequest : 0}
@@ -2153,6 +2185,7 @@ function MarkdownEditor({
   body,
   disabled,
   notePaths,
+  canvasMarkdownDisplayMode,
   searchHighlight,
   jumpOffset,
   focusRequest,
@@ -2167,6 +2200,7 @@ function MarkdownEditor({
   body: string
   disabled: boolean
   notePaths: string[]
+  canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode
   searchHighlight: SearchHighlight | null
   jumpOffset: number | null
   focusRequest: number
@@ -2186,6 +2220,7 @@ function MarkdownEditor({
   const baseExtensionsRef = useRef<Extension[] | null>(null)
   const onChangeRef = useRef(onChange)
   const notePathsRef = useRef(notePaths)
+  const canvasMarkdownDisplayModeRef = useRef(canvasMarkdownDisplayMode)
   const searchHighlightRef = useRef<SearchHighlight | null>(searchHighlight)
   const onOpenWikiLinkRef = useRef(onOpenWikiLink)
 
@@ -2201,6 +2236,11 @@ function MarkdownEditor({
     notePathsRef.current = notePaths
     viewRef.current?.dispatch({})
   }, [notePaths])
+
+  useEffect(() => {
+    canvasMarkdownDisplayModeRef.current = canvasMarkdownDisplayMode
+    viewRef.current?.dispatch({})
+  }, [canvasMarkdownDisplayMode])
 
   useEffect(() => {
     searchHighlightRef.current = searchHighlight
@@ -2228,7 +2268,7 @@ function MarkdownEditor({
       lineNumbers(),
       highlightActiveLine(),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-      noteMarkdownTools(notePathsRef, searchHighlightRef, onOpenWikiLinkRef),
+      noteMarkdownTools(notePathsRef, canvasMarkdownDisplayModeRef, searchHighlightRef, onOpenWikiLinkRef),
       EditorView.lineWrapping,
       EditorView.theme({
         '&': {
@@ -2433,6 +2473,7 @@ function MarkdownEditor({
 
 function noteMarkdownTools(
   notePathsRef: React.MutableRefObject<string[]>,
+  canvasMarkdownDisplayModeRef: React.MutableRefObject<CanvasMarkdownDisplayMode>,
   searchHighlightRef: React.MutableRefObject<SearchHighlight | null>,
   onOpenWikiLinkRef: React.MutableRefObject<(path: string) => void>
 ): Extension {
@@ -2441,12 +2482,12 @@ function noteMarkdownTools(
       decorations: DecorationSet
 
       constructor(view: EditorView) {
-        this.decorations = buildVersionedNoteDecorations(view, notePathsRef.current, searchHighlightRef.current)
+        this.decorations = buildVersionedNoteDecorations(view, notePathsRef.current, canvasMarkdownDisplayModeRef.current, searchHighlightRef.current, onOpenWikiLinkRef.current)
       }
 
       update(update: ViewUpdate) {
         if (update.docChanged || update.viewportChanged || update.transactions.length > 0) {
-          this.decorations = buildVersionedNoteDecorations(update.view, notePathsRef.current, searchHighlightRef.current)
+          this.decorations = buildVersionedNoteDecorations(update.view, notePathsRef.current, canvasMarkdownDisplayModeRef.current, searchHighlightRef.current, onOpenWikiLinkRef.current)
         }
       }
     },
@@ -2500,22 +2541,48 @@ function noteMarkdownTools(
 function buildVersionedNoteDecorations(
   view: EditorView,
   notePaths: string[],
-  searchHighlight: SearchHighlight | null
+  canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode,
+  searchHighlight: SearchHighlight | null,
+  onOpenWikiLink: (path: string) => void
 ): DecorationSet {
   const version = view.state.field(editorDocumentVersion)
-  const decorations = buildNoteDecorations(view, notePaths, searchHighlight, version)
+  const decorations = buildNoteDecorations(view, notePaths, canvasMarkdownDisplayMode, searchHighlight, version, onOpenWikiLink)
   return version === view.state.field(editorDocumentVersion) ? decorations : Decoration.none
 }
 
 function buildNoteDecorations(
   view: EditorView,
   notePaths: string[],
+  canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode,
   searchHighlight: SearchHighlight | null,
-  version: number
+  version: number,
+  onOpenWikiLink: (path: string) => void
 ): DecorationSet {
   const ranges: Array<{ from: number; to: number; decoration: Decoration }> = []
   const doc = view.state.doc
   const blockMathRanges: Array<{ from: number; to: number }> = []
+  const canvasBlockRanges: Array<{ from: number; to: number }> = []
+
+  if (canvasMarkdownDisplayMode === 'summary') {
+    const fullText = doc.toString()
+    const canvasBlockRegex = /(^|\n)```canvas[ \t]*\n([\s\S]*?)(?:\n```)(?=\n|$)/g
+    let canvasMatch: RegExpExecArray | null
+    while ((canvasMatch = canvasBlockRegex.exec(fullText))) {
+      const blockFrom = canvasMatch.index + canvasMatch[1].length
+      const blockTo = canvasMatch.index + canvasMatch[0].length
+      const visible = view.visibleRanges.some((range) => blockFrom <= range.to && blockTo >= range.from)
+      if (!visible) continue
+      canvasBlockRanges.push({ from: blockFrom, to: blockTo })
+      ranges.push({
+        from: blockFrom,
+        to: blockTo,
+        decoration: Decoration.replace({
+          widget: new CanvasMarkdownSummaryWidget(extractCanvasNodeTexts(canvasMatch[2]), notePaths, onOpenWikiLink, version),
+          block: true
+        })
+      })
+    }
+  }
 
   for (const { from, to } of view.visibleRanges) {
     const text = doc.sliceString(from, to)
@@ -2524,6 +2591,7 @@ function buildNoteDecorations(
     while ((blockMatch = blockRegex.exec(text))) {
       const blockFrom = from + blockMatch.index
       const blockTo = blockFrom + blockMatch[0].length
+      if (rangesOverlapAny(blockFrom, blockTo, canvasBlockRanges)) continue
       blockMathRanges.push({ from: blockFrom, to: blockTo })
       ranges.push({ from: blockTo, to: blockTo, decoration: Decoration.widget({
         widget: new MathPreviewWidget(blockMatch[1].trim(), true, version),
@@ -2538,6 +2606,10 @@ function buildNoteDecorations(
     while (pos <= to) {
       const line = doc.lineAt(pos)
       if (line.from >= to) break
+      if (rangesOverlapAny(line.from, line.to, canvasBlockRanges)) {
+        pos = line.to + 1
+        continue
+      }
       const text = line.text
       const callout = text.match(/^\s*>\s*\[!([A-Za-z][A-Za-z0-9_-]*)\]/)
       if (callout) {
@@ -2589,6 +2661,10 @@ function buildNoteDecorations(
       while (index >= 0) {
         const start = from + index
         const end = start + query.length
+        if (rangesOverlapAny(start, end, canvasBlockRanges)) {
+          index = haystack.indexOf(needle, index + Math.max(needle.length, 1))
+          continue
+        }
         const active =
           searchHighlight.offset >= start &&
           searchHighlight.offset <= end
@@ -2636,6 +2712,116 @@ class MathPreviewWidget extends WidgetType {
   ignoreEvent(): boolean {
     return true
   }
+}
+
+class CanvasMarkdownSummaryWidget extends WidgetType {
+  constructor(
+    private readonly nodeTexts: string[],
+    private readonly notePaths: string[],
+    private readonly onOpenWikiLink: (path: string) => void,
+    private readonly version: number
+  ) {
+    super()
+  }
+
+  eq(other: CanvasMarkdownSummaryWidget): boolean {
+    return (
+      this.version === other.version &&
+      this.nodeTexts.join('\n---\n') === other.nodeTexts.join('\n---\n') &&
+      this.notePaths.join('\n') === other.notePaths.join('\n')
+    )
+  }
+
+  toDOM(): HTMLElement {
+    const wrapper = document.createElement('section')
+    wrapper.className = 'cm-canvas-summary'
+    wrapper.dataset.editorVersion = String(this.version)
+
+    const header = document.createElement('div')
+    header.className = 'cm-canvas-summary-header'
+    header.textContent = 'Canvas'
+    wrapper.appendChild(header)
+
+    const content = document.createElement('div')
+    content.className = 'cm-canvas-summary-content'
+    if (this.nodeTexts.length === 0) {
+      const empty = document.createElement('div')
+      empty.className = 'cm-canvas-summary-empty'
+      empty.textContent = 'Empty canvas'
+      content.appendChild(empty)
+    } else {
+      for (const text of this.nodeTexts) {
+        const node = document.createElement('div')
+        node.className = 'cm-canvas-summary-node'
+        node.innerHTML = renderCanvasMarkdown(text || 'Empty block', this.notePaths)
+        content.appendChild(node)
+      }
+    }
+    content.addEventListener('click', (event) => {
+      const target = event.target instanceof HTMLElement
+        ? event.target.closest('a.canvas-wiki') as HTMLAnchorElement | null
+        : null
+      const href = target?.getAttribute('href')
+      if (!href?.startsWith('notesproject-wiki:')) return
+
+      event.preventDefault()
+      event.stopPropagation()
+      this.onOpenWikiLink(decodeURIComponent(href.slice('notesproject-wiki:'.length)))
+    })
+    wrapper.appendChild(content)
+
+    return wrapper
+  }
+
+  ignoreEvent(): boolean {
+    return false
+  }
+}
+
+function extractCanvasNodeTexts(source: string): string[] {
+  const lines = source.replace(/\r\n/g, '\n').split('\n')
+  const texts: string[] = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const blockStart = lines[index].match(/^(\s*)text:\s*\|[+-]?\s*$/)
+    if (blockStart) {
+      const keyIndent = blockStart[1].length
+      const collected: string[] = []
+      index += 1
+      while (index < lines.length) {
+        const line = lines[index]
+        const indent = leadingWhitespaceLength(line)
+        if (line.trim() && indent <= keyIndent) {
+          index -= 1
+          break
+        }
+        collected.push(line)
+        index += 1
+      }
+      texts.push(stripCommonIndent(collected).trim())
+      continue
+    }
+
+    const inlineText = lines[index].match(/^\s*text:\s+(.+?)\s*$/)
+    if (inlineText) texts.push(inlineText[1].replace(/^['"]|['"]$/g, '').trim())
+  }
+  return texts.filter((text) => text.length > 0)
+}
+
+function stripCommonIndent(lines: string[]): string {
+  const nonBlankIndents = lines
+    .filter((line) => line.trim())
+    .map(leadingWhitespaceLength)
+  const commonIndent = nonBlankIndents.length > 0 ? Math.min(...nonBlankIndents) : 0
+  return lines.map((line) => line.slice(Math.min(commonIndent, leadingWhitespaceLength(line)))).join('\n')
+}
+
+function leadingWhitespaceLength(value: string): number {
+  const match = value.match(/^\s*/)
+  return match?.[0].length ?? 0
+}
+
+function rangesOverlapAny(from: number, to: number, ranges: Array<{ from: number; to: number }>): boolean {
+  return ranges.some((range) => from < range.to && to > range.from)
 }
 
 function wikiCompletionSource(notePathsRef: React.MutableRefObject<string[]>) {
@@ -3649,6 +3835,14 @@ function writeStoredWindowPlacement(placement: StoredWindowPlacement): void {
     localStorage.setItem(WINDOW_PLACEMENT_KEY, JSON.stringify(placement))
   } catch {
     // Ignore quota/storage failures; placement restore is best effort.
+  }
+}
+
+function readCanvasMarkdownDisplayMode(): CanvasMarkdownDisplayMode {
+  try {
+    return localStorage.getItem(CANVAS_MARKDOWN_DISPLAY_KEY) === 'raw' ? 'raw' : 'summary'
+  } catch {
+    return 'summary'
   }
 }
 

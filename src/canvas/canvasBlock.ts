@@ -10,6 +10,7 @@ export type CanvasNodeSpec = {
   h?: number
   shape?: CanvasShape
   color?: string
+  readonly?: boolean
   text: string
 }
 
@@ -19,9 +20,16 @@ export type CanvasEdgeSpec = {
   label?: string
 }
 
+export type CanvasViewportSpec = {
+  x: number
+  y: number
+  zoom: number
+}
+
 export type CanvasDocument = {
   nodes: CanvasNodeSpec[]
   edges: CanvasEdgeSpec[]
+  viewport?: CanvasViewportSpec
 }
 
 export type CanvasBlockResult =
@@ -81,9 +89,23 @@ export function hasCanvasBlock(markdown: string): boolean {
   return canvasFencePattern.test(markdown)
 }
 
+export function markdownOutsideCanvasBlock(markdown: string): string {
+  const match = canvasFencePattern.exec(markdown)
+  if (!match) return markdown.trim()
+  const prefixLength = match[1].length
+  const start = match.index + prefixLength
+  const end = match.index + match[0].length
+  return `${markdown.slice(0, start)}${markdown.slice(end)}`.trim()
+}
+
 export function insertExampleCanvasBlock(markdown: string): string {
   const trimmed = markdown.trimEnd()
   return `${trimmed}${trimmed ? '\n\n' : ''}# Canvas note\n\n${exampleCanvasBlock}\n`
+}
+
+export function insertEmptyCanvasBlock(markdown: string): string {
+  const trimmed = markdown.trimEnd()
+  return `${trimmed}${trimmed ? '\n\n' : ''}\`\`\`canvas\nnodes: []\nedges: []\n\`\`\`\n`
 }
 
 export function replaceCanvasDocument(markdown: string, document: CanvasDocument): string {
@@ -141,6 +163,15 @@ export function updateCanvasNodeSize(
   })
 }
 
+export function updateCanvasViewport(markdown: string, viewport: CanvasViewportSpec): string {
+  const block = parseCanvasBlock(markdown)
+  if (!block.ok) return markdown
+  return replaceCanvasDocument(markdown, {
+    ...block.document,
+    viewport: normalizeViewportForWrite(viewport)
+  })
+}
+
 export function addCanvasNode(markdown: string, node: CanvasNodeSpec): string {
   const block = parseCanvasBlock(markdown)
   if (!block.ok) return markdown
@@ -154,6 +185,7 @@ export function deleteCanvasNode(markdown: string, id: string): string {
   const block = parseCanvasBlock(markdown)
   if (!block.ok) return markdown
   return replaceCanvasDocument(markdown, {
+    ...block.document,
     nodes: block.document.nodes.filter((node) => node.id !== id),
     edges: block.document.edges.filter((edge) => edge.from !== id && edge.to !== id)
   })
@@ -171,6 +203,7 @@ export function updateCanvasNodeProperties(
   if (duplicateId) return markdown
 
   return replaceCanvasDocument(markdown, {
+    ...block.document,
     nodes: block.document.nodes.map((node) =>
       node.id === id
         ? {
@@ -202,7 +235,8 @@ function normalizeCanvasDocument(parsed: Partial<CanvasDocument> | null): Canvas
 
   return {
     nodes: parsed.nodes.map(normalizeCanvasNode),
-    edges: Array.isArray(parsed.edges) ? parsed.edges.map(normalizeCanvasEdge) : []
+    edges: Array.isArray(parsed.edges) ? parsed.edges.map(normalizeCanvasEdge) : [],
+    viewport: normalizeCanvasViewport(parsed.viewport)
   }
 }
 
@@ -223,6 +257,31 @@ function normalizeCanvasNode(raw: unknown): CanvasNodeSpec {
     color: typeof node.color === 'string' ? node.color : undefined,
     text: typeof node.text === 'string' ? node.text : ''
   }
+}
+
+function normalizeCanvasViewport(raw: unknown): CanvasViewportSpec | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const viewport = raw as Partial<CanvasViewportSpec>
+  if (
+    typeof viewport.x !== 'number' ||
+    typeof viewport.y !== 'number' ||
+    typeof viewport.zoom !== 'number'
+  ) {
+    return undefined
+  }
+  return normalizeViewportForWrite(viewport as CanvasViewportSpec)
+}
+
+function normalizeViewportForWrite(viewport: CanvasViewportSpec): CanvasViewportSpec {
+  return {
+    x: roundViewportNumber(viewport.x),
+    y: roundViewportNumber(viewport.y),
+    zoom: Math.max(0.1, Math.min(4, roundViewportNumber(viewport.zoom)))
+  }
+}
+
+function roundViewportNumber(value: number): number {
+  return Math.round(value * 1000) / 1000
 }
 
 function normalizeCanvasEdge(raw: unknown): CanvasEdgeSpec {

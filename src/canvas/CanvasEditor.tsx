@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import '@xyflow/react/dist/style.css'
 import {
   Background,
@@ -14,8 +14,10 @@ import {
   type NodeChange,
   type NodeMouseHandler,
   type OnNodeDrag,
+  type OnMoveEnd,
   type NodeTypes,
-  type ReactFlowInstance
+  type ReactFlowInstance,
+  type Viewport
 } from '@xyflow/react'
 import { CanvasNode, type CanvasNodeData } from './CanvasNode'
 import { CanvasInspector } from './CanvasInspector'
@@ -23,20 +25,27 @@ import { CanvasToolbar } from './CanvasToolbar'
 import {
   addCanvasNode,
   deleteCanvasNode,
-  insertExampleCanvasBlock,
+  insertEmptyCanvasBlock,
+  markdownOutsideCanvasBlock,
   parseCanvasBlock,
   type CanvasNodeSpec,
   type CanvasShape,
   updateCanvasNodeProperties,
   updateCanvasNodePosition,
   updateCanvasNodeSize,
-  updateCanvasNodeText
+  updateCanvasNodeText,
+  updateCanvasViewport
 } from './canvasBlock'
 import { renderCanvasMarkdown } from './canvasMarkdown'
 
 const nodeTypes: NodeTypes = {
   canvasNode: CanvasNode
 }
+
+export type DocumentDisplayMode = 'node' | 'panel'
+
+const documentNodeId = '__document'
+const documentDisplayStorageKey = 'notesproject:canvas-document-display'
 
 type EditingNode = {
   id: string
@@ -49,26 +58,41 @@ export function CanvasEditor({
   tabId,
   body,
   disabled,
-  onChange
+  notePaths,
+  onChange,
+  onOpenWikiLink
 }: {
   tabId: string | null
   body: string
   disabled: boolean
+  notePaths: string[]
   onChange: (id: string, body: string) => void
+  onOpenWikiLink: (path: string) => void
 }): JSX.Element {
   const parsed = useMemo(() => parseCanvasBlock(body), [body])
+  const canvasDocument = useMemo(() => (
+    parsed.ok ? parsed.document : parsed.hasBlock ? null : { nodes: [], edges: [] }
+  ), [parsed])
+  const documentMarkdown = useMemo(() => markdownOutsideCanvasBlock(body), [body])
   const [nodes, setNodes] = useState<Array<Node<CanvasNodeData>>>([])
   const [edges, setEdges] = useState<Edge[]>([])
   const [flow, setFlow] = useState<ReactFlowInstance<Node<CanvasNodeData>, Edge> | null>(null)
   const [editingNode, setEditingNode] = useState<EditingNode | null>(null)
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [inspectorOpen, setInspectorOpen] = useState(false)
+  const [documentDisplayMode, setDocumentDisplayMode] = useState<DocumentDisplayMode>(() => readDocumentDisplayMode())
+  const applyingStoredViewport = useRef(false)
+  const appliedViewportKey = useRef<string | null>(null)
 
   const selectedNode = useMemo(() => (
-    parsed.ok && selectedNodeId
-      ? parsed.document.nodes.find((node) => node.id === selectedNodeId) ?? null
+    canvasDocument && selectedNodeId && selectedNodeId !== documentNodeId
+      ? canvasDocument.nodes.find((node) => node.id === selectedNodeId) ?? null
       : null
-  ), [parsed, selectedNodeId])
+    ), [canvasDocument, selectedNodeId])
+  const showDocumentNode = documentMarkdown !== '' && documentDisplayMode === 'node'
+  const showDocumentPanel = documentMarkdown !== '' && documentDisplayMode === 'panel'
+  const storedViewport = canvasDocument?.viewport
+  const storedViewportKey = storedViewport ? viewportKey(storedViewport) : null
 
   const onResizeNode = useCallback((id: string, size: { width: number; height: number }) => {
     if (!tabId || disabled) return
@@ -76,12 +100,35 @@ export function CanvasEditor({
   }, [body, disabled, onChange, tabId])
 
   useEffect(() => {
-    if (!parsed.ok) {
+    if (!canvasDocument) {
       setNodes([])
       setEdges([])
       return
     }
-    setNodes(parsed.document.nodes.map((node) => ({
+    const documentNode: Node<CanvasNodeData>[] = showDocumentNode
+      ? [{
+          id: documentNodeId,
+          type: 'canvasNode',
+          position: { x: 40, y: 40 },
+          draggable: false,
+          selectable: true,
+          style: {
+            width: 360,
+            minHeight: 160
+          },
+          data: {
+            text: documentMarkdown,
+            shape: 'box',
+            color: 'neutral',
+            readonly: true,
+            notePaths,
+            onOpenWikiLink
+          }
+        }]
+      : []
+    setNodes([
+      ...documentNode,
+      ...canvasDocument.nodes.map((node) => ({
       id: node.id,
       type: 'canvasNode',
       position: { x: node.x, y: node.y },
@@ -93,23 +140,39 @@ export function CanvasEditor({
         text: node.text,
         shape: node.shape ?? 'box',
         color: node.color ?? 'neutral',
-        onResize: onResizeNode
+        notePaths,
+        onResize: onResizeNode,
+        onOpenWikiLink
       }
-    })))
-    setEdges(parsed.document.edges.map((edge, index) => ({
+      }))
+    ])
+    setEdges(canvasDocument.edges.map((edge, index) => ({
       id: `${edge.from}:${edge.to}:${index}`,
       source: edge.from,
       target: edge.to,
       label: edge.label,
       animated: false
     })))
-  }, [onResizeNode, parsed])
+  }, [canvasDocument, documentMarkdown, notePaths, onOpenWikiLink, onResizeNode, showDocumentNode])
 
   useEffect(() => {
-    if (parsed.ok && selectedNodeId && !parsed.document.nodes.some((node) => node.id === selectedNodeId)) {
+    if (selectedNodeId === documentNodeId && !showDocumentNode) {
+      setSelectedNodeId(null)
+      return
+    }
+    if (canvasDocument && selectedNodeId && selectedNodeId !== documentNodeId && !canvasDocument.nodes.some((node) => node.id === selectedNodeId)) {
       setSelectedNodeId(null)
     }
-  }, [parsed, selectedNodeId])
+  }, [canvasDocument, selectedNodeId, showDocumentNode])
+
+  const setAndStoreDocumentDisplayMode = useCallback((mode: DocumentDisplayMode) => {
+    setDocumentDisplayMode(mode)
+    try {
+      localStorage.setItem(documentDisplayStorageKey, mode)
+    } catch {
+      // Ignore storage failures; the in-memory setting still applies.
+    }
+  }, [])
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     setNodes((current) => applyNodeChanges(changes, current) as Array<Node<CanvasNodeData>>)
@@ -120,12 +183,35 @@ export function CanvasEditor({
   }, [])
 
   const onNodeDragStop: OnNodeDrag<Node<CanvasNodeData>> = useCallback((_event, node) => {
-    if (!tabId || disabled) return
+    if (!tabId || disabled || node.id === documentNodeId) return
     onChange(tabId, updateCanvasNodePosition(body, node.id, node.position))
   }, [body, disabled, onChange, tabId])
 
+  useEffect(() => {
+    if (!flow || !storedViewport || !storedViewportKey) return
+    const scopedKey = `${tabId ?? ''}:${storedViewportKey}`
+    if (appliedViewportKey.current === scopedKey) return
+
+    applyingStoredViewport.current = true
+    appliedViewportKey.current = scopedKey
+    void flow.setViewport(storedViewport, { duration: 0 })
+    window.setTimeout(() => {
+      applyingStoredViewport.current = false
+    }, 0)
+  }, [flow, storedViewport, storedViewportKey, tabId])
+
+  const onMoveEnd: OnMoveEnd = useCallback((_event, viewport) => {
+    if (!tabId || disabled || !parsed.ok || applyingStoredViewport.current) return
+
+    const nextKey = viewportKey(viewport)
+    if (storedViewportKey === nextKey) return
+
+    appliedViewportKey.current = `${tabId}:${nextKey}`
+    onChange(tabId, updateCanvasViewport(body, viewport))
+  }, [body, disabled, onChange, parsed.ok, storedViewportKey, tabId])
+
   const onNodeDoubleClick: NodeMouseHandler = useCallback((event, node) => {
-    if (!tabId || disabled) return
+    if (!tabId || disabled || node.id === documentNodeId) return
     event.preventDefault()
     const screenPosition = flow?.flowToScreenPosition(node.position)
     setEditingNode({
@@ -146,14 +232,14 @@ export function CanvasEditor({
     setEditingNode(null)
   }, [body, editingNode, nodes, onChange, tabId])
 
-  const insertExample = useCallback(() => {
-    if (!tabId || disabled) return
-    onChange(tabId, insertExampleCanvasBlock(body))
-  }, [body, disabled, onChange, tabId])
+  const createCanvasBlock = useCallback(() => {
+    if (!tabId || disabled || parsed.ok || parsed.hasBlock) return
+    onChange(tabId, insertEmptyCanvasBlock(body))
+  }, [body, disabled, onChange, parsed, tabId])
 
   const addNode = useCallback((shape: CanvasShape) => {
-    if (!tabId || disabled || !parsed.ok) return
-    const id = nextNodeId(parsed.document.nodes)
+    if (!tabId || disabled || !canvasDocument || !parsed.ok) return
+    const id = nextNodeId(canvasDocument.nodes)
     const pane = document.querySelector('.canvas-editor')?.getBoundingClientRect()
     const center = flow?.screenToFlowPosition({
       x: pane ? pane.left + pane.width / 2 : window.innerWidth / 2,
@@ -171,7 +257,7 @@ export function CanvasEditor({
     }
     setSelectedNodeId(id)
     onChange(tabId, addCanvasNode(body, node))
-  }, [body, disabled, flow, onChange, parsed, tabId])
+  }, [body, canvasDocument, disabled, flow, onChange, parsed, tabId])
 
   const deleteSelectedNode = useCallback(() => {
     if (!tabId || disabled || !selectedNodeId) return
@@ -187,6 +273,18 @@ export function CanvasEditor({
     onChange(tabId, nextBody)
   }, [body, disabled, onChange, tabId])
 
+  const openRenderedWikiLink = useCallback((event: MouseEvent<HTMLElement>) => {
+    const target = event.target instanceof HTMLElement
+      ? event.target.closest('a.canvas-wiki') as HTMLAnchorElement | null
+      : null
+    const href = target?.getAttribute('href')
+    if (!href?.startsWith('notesproject-wiki:')) return
+
+    event.preventDefault()
+    event.stopPropagation()
+    onOpenWikiLink(decodeURIComponent(href.slice('notesproject-wiki:'.length)))
+  }, [onOpenWikiLink])
+
   if (disabled) {
     return (
       <div className="canvas-empty">
@@ -196,16 +294,11 @@ export function CanvasEditor({
     )
   }
 
-  if (!parsed.ok) {
+  if (!parsed.ok && parsed.hasBlock) {
     return (
       <div className="canvas-empty">
         <strong>{parsed.hasBlock ? 'Canvas block has an error' : 'No canvas block'}</strong>
         <span>{parsed.error}</span>
-        {!parsed.hasBlock && (
-          <button type="button" onClick={insertExample}>
-            Insert example canvas
-          </button>
-        )}
       </div>
     )
   }
@@ -224,11 +317,12 @@ export function CanvasEditor({
         panOnScrollSpeed={0.8}
         zoomOnScroll={false}
         zoomOnPinch
-        fitView
+        fitView={!storedViewport}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeDragStop={onNodeDragStop}
         onNodeDoubleClick={onNodeDoubleClick}
+        onMoveEnd={onMoveEnd}
         onSelectionChange={({ nodes }) => {
           setSelectedNodeId(nodes.length === 1 ? nodes[0].id : null)
         }}
@@ -254,18 +348,34 @@ export function CanvasEditor({
         <Controls />
       </ReactFlow>
       <CanvasToolbar
-        canDelete={!!selectedNodeId}
+        canAddNodes={parsed.ok}
+        canCreateCanvas={!parsed.ok && !parsed.hasBlock}
+        canDelete={!!selectedNodeId && selectedNodeId !== documentNodeId}
+        documentDisplayMode={documentDisplayMode}
+        hasDocumentMarkdown={documentMarkdown !== ''}
         inspectorOpen={inspectorOpen}
         onAddNode={addNode}
+        onCreateCanvas={createCanvasBlock}
+        onDocumentDisplayModeChange={setAndStoreDocumentDisplayMode}
         onDeleteSelected={deleteSelectedNode}
         onToggleInspector={() => setInspectorOpen((current) => !current)}
       />
-      {inspectorOpen && (
+      {inspectorOpen && canvasDocument && (
         <CanvasInspector
           node={selectedNode}
-          existingIds={parsed.document.nodes.map((node) => node.id)}
+          existingIds={canvasDocument.nodes.map((node) => node.id)}
           onApply={applyInspectorUpdates}
         />
+      )}
+      {showDocumentPanel && (
+        <aside className="canvas-document-panel" aria-label="Document Markdown">
+          <div className="canvas-document-panel-header">Document</div>
+          <div
+            className="canvas-document-panel-content"
+            onClick={openRenderedWikiLink}
+            dangerouslySetInnerHTML={{ __html: renderCanvasMarkdown(documentMarkdown, notePaths) }}
+          />
+        </aside>
       )}
       {editingNode && (
         <div
@@ -297,7 +407,8 @@ export function CanvasEditor({
             />
             <div
               className="canvas-text-popover-preview"
-              dangerouslySetInnerHTML={{ __html: renderCanvasMarkdown(editingNode.text || 'Empty block') }}
+              onClick={openRenderedWikiLink}
+              dangerouslySetInnerHTML={{ __html: renderCanvasMarkdown(editingNode.text || 'Empty block', notePaths) }}
             />
           </div>
           <div className="canvas-text-popover-actions">
@@ -319,4 +430,20 @@ function nextNodeId(nodes: CanvasNodeSpec[]): string {
   const existing = new Set(nodes.map((node) => node.id))
   while (existing.has(`node-${index}`)) index += 1
   return `node-${index}`
+}
+
+function viewportKey(viewport: Viewport): string {
+  return [
+    Math.round(viewport.x * 1000) / 1000,
+    Math.round(viewport.y * 1000) / 1000,
+    Math.round(viewport.zoom * 1000) / 1000
+  ].join(':')
+}
+
+function readDocumentDisplayMode(): DocumentDisplayMode {
+  try {
+    return localStorage.getItem(documentDisplayStorageKey) === 'panel' ? 'panel' : 'node'
+  } catch {
+    return 'node'
+  }
 }
