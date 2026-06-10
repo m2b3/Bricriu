@@ -35,6 +35,7 @@ import {
 import { markdown } from '@codemirror/lang-markdown'
 import {
   HighlightStyle,
+  syntaxTree,
   syntaxHighlighting
 } from '@codemirror/language'
 import { tags } from '@lezer/highlight'
@@ -2213,10 +2214,40 @@ function AppMenuBar({
   pathKey: (path: string) => string
 }): JSX.Element {
   const activeIsMarkdown = !!activeTab && isMarkdownPath(activeTab.path)
+  const [openMenu, setOpenMenu] = useState<'file' | 'view' | 'options' | null>(null)
+  const menuRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    if (!openMenu) return
+
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target instanceof Node ? event.target : null
+      if (target && menuRef.current?.contains(target)) return
+      setOpenMenu(null)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpenMenu(null)
+    }
+
+    document.addEventListener('pointerdown', closeOnOutsidePointer, true)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer, true)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [openMenu])
+
+  const toggleMenu = (menu: 'file' | 'view' | 'options') => {
+    setOpenMenu((current) => (current === menu ? null : menu))
+  }
+
   return (
-    <nav className="app-menu-bar" aria-label="Application menu">
-      <details className="app-menu">
-        <summary>File</summary>
+    <nav ref={menuRef} className="app-menu-bar" aria-label="Application menu">
+      <details className="app-menu" open={openMenu === 'file'}>
+        <summary onClick={(event) => {
+          event.preventDefault()
+          toggleMenu('file')
+        }}>File</summary>
         <div className="app-menu-popover">
           <label className="app-menu-field">
             <span>Recent</span>
@@ -2249,8 +2280,11 @@ function AppMenuBar({
         </div>
       </details>
 
-      <details className="app-menu">
-        <summary>View</summary>
+      <details className="app-menu" open={openMenu === 'view'}>
+        <summary onClick={(event) => {
+          event.preventDefault()
+          toggleMenu('view')
+        }}>View</summary>
         <div className="app-menu-popover">
           <label className="app-menu-check">
             <input type="checkbox" checked={showPreview} onChange={onTogglePreview} disabled={!activeTab} />
@@ -2275,8 +2309,11 @@ function AppMenuBar({
         </div>
       </details>
 
-      <details className="app-menu">
-        <summary>Options</summary>
+      <details className="app-menu" open={openMenu === 'options'}>
+        <summary onClick={(event) => {
+          event.preventDefault()
+          toggleMenu('options')
+        }}>Options</summary>
         <div className="app-menu-popover">
           <label className="app-menu-field">
             <span>Markdown canvas</span>
@@ -2702,10 +2739,47 @@ function buildNoteDecorations(
 ): DecorationSet {
   const ranges: Array<{ from: number; to: number; decoration: Decoration }> = []
   const doc = view.state.doc
+  const fullText = doc.toString()
   const blockMathRanges: Array<{ from: number; to: number }> = []
   const canvasBlockRanges = canvasMarkdownDisplayMode === 'summary'
     ? findCanvasBlockRanges(doc.toString(), view.visibleRanges)
     : []
+
+  for (const colorSpan of findColorSpans(fullText)) {
+    if (rangesOverlapAny(colorSpan.from, colorSpan.to, canvasBlockRanges)) continue
+    if (!view.visibleRanges.some((range) => colorSpan.from <= range.to && colorSpan.to >= range.from)) continue
+    ranges.push({ from: colorSpan.from, to: colorSpan.textFrom, decoration: Decoration.replace({}) })
+    ranges.push({
+      from: colorSpan.textFrom,
+      to: colorSpan.textTo,
+      decoration: Decoration.mark({
+        class: 'cm-color-span',
+        attributes: {
+          style: `color: ${colorSpan.color}`
+        }
+      })
+    })
+    ranges.push({ from: colorSpan.textTo, to: colorSpan.to, decoration: Decoration.replace({}) })
+  }
+
+  for (const emphasisSpan of findMarkdownEmphasisSpans(view)) {
+    if (rangesOverlapAny(emphasisSpan.from, emphasisSpan.to, canvasBlockRanges)) continue
+    if (!view.visibleRanges.some((range) => emphasisSpan.from <= range.to && emphasisSpan.to >= range.from)) continue
+    ranges.push({ from: emphasisSpan.from, to: emphasisSpan.textFrom, decoration: Decoration.replace({}) })
+    ranges.push({
+      from: emphasisSpan.textFrom,
+      to: emphasisSpan.textTo,
+      decoration: Decoration.mark({
+        class: emphasisSpan.kind === 'strong' ? 'cm-markdown-strong' : 'cm-markdown-emphasis'
+      })
+    })
+    ranges.push({ from: emphasisSpan.textTo, to: emphasisSpan.to, decoration: Decoration.replace({}) })
+  }
+
+  for (const escape of findMarkdownEscapes(view)) {
+    if (rangesOverlapAny(escape.from, escape.to, canvasBlockRanges)) continue
+    ranges.push({ from: escape.from, to: escape.from + 1, decoration: Decoration.replace({}) })
+  }
 
   for (const { from, to } of view.visibleRanges) {
     const text = doc.sliceString(from, to)
@@ -3069,6 +3143,127 @@ function findInlineMath(text: string): Array<{ from: number; to: number; source:
     start = -1
   }
   return results
+}
+
+function findColorSpans(text: string): Array<{ from: number; to: number; textFrom: number; textTo: number; color: string }> {
+  const spans: Array<{ from: number; to: number; textFrom: number; textTo: number; color: string }> = []
+  const trigger = '{color:'
+  let index = 0
+
+  while (index < text.length) {
+    const start = text.indexOf(trigger, index)
+    if (start < 0) break
+    if (isEscaped(text, start)) {
+      index = start + trigger.length
+      continue
+    }
+
+    const colorStart = start + trigger.length
+    const separator = findNextUnescaped(text, '|', colorStart)
+    if (separator < 0) break
+
+    const rawColor = text.slice(colorStart, separator).trim()
+    if (!isSafeEditorColor(rawColor)) {
+      index = start + trigger.length
+      continue
+    }
+
+    const end = findNextUnescaped(text, '}', separator + 1)
+    if (end < 0) break
+    spans.push({
+      from: start,
+      to: end + 1,
+      textFrom: separator + 1,
+      textTo: end,
+      color: rawColor
+    })
+    index = end + 1
+  }
+
+  return spans
+}
+
+function findMarkdownEmphasisSpans(view: EditorView): Array<{ from: number; to: number; textFrom: number; textTo: number; kind: 'strong' | 'emphasis' }> {
+  const spans: Array<{ from: number; to: number; textFrom: number; textTo: number; kind: 'strong' | 'emphasis' }> = []
+  const tree = syntaxTree(view.state)
+
+  for (const range of view.visibleRanges) {
+    tree.iterate({
+      from: range.from,
+      to: range.to,
+      enter(ref) {
+        if (ref.name !== 'Emphasis' && ref.name !== 'StrongEmphasis') return
+
+        const marks: Array<{ from: number; to: number }> = []
+        const cursor = ref.node.cursor()
+        if (cursor.firstChild()) {
+          do {
+            if (cursor.name === 'EmphasisMark') marks.push({ from: cursor.from, to: cursor.to })
+          } while (cursor.nextSibling())
+        }
+        if (marks.length < 2) return
+
+        const firstMark = marks[0]
+        const lastMark = marks[marks.length - 1]
+        if (firstMark.to >= lastMark.from) return
+        spans.push({
+          from: firstMark.from,
+          to: lastMark.to,
+          textFrom: firstMark.to,
+          textTo: lastMark.from,
+          kind: ref.name === 'StrongEmphasis' ? 'strong' : 'emphasis'
+        })
+      }
+    })
+  }
+
+  return spans
+}
+
+function findMarkdownEscapes(view: EditorView): Array<{ from: number; to: number }> {
+  const escapes: Array<{ from: number; to: number }> = []
+  const tree = syntaxTree(view.state)
+
+  for (const range of view.visibleRanges) {
+    tree.iterate({
+      from: range.from,
+      to: range.to,
+      enter(ref) {
+        if (ref.name === 'Escape' && ref.to > ref.from + 1) {
+          escapes.push({ from: ref.from, to: ref.to })
+        }
+      }
+    })
+  }
+
+  return escapes
+}
+
+function findNextUnescaped(text: string, needle: string, from: number): number {
+  for (let index = from; index < text.length; index += 1) {
+    if (text[index] === '\\') {
+      index += 1
+      continue
+    }
+    if (text[index] === needle) return index
+  }
+  return -1
+}
+
+function isEscaped(text: string, index: number): boolean {
+  let slashCount = 0
+  for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor -= 1) {
+    slashCount += 1
+  }
+  return slashCount % 2 === 1
+}
+
+function isSafeEditorColor(color: string): boolean {
+  if (!color || color.length > 80 || /[;"'{}<>]/.test(color)) return false
+  if (typeof CSS !== 'undefined' && typeof CSS.supports === 'function') {
+    return CSS.supports('color', color)
+  }
+  return /^(#[0-9a-f]{3,8}|[a-z]+|rgba?\([^)]+\)|hsla?\([^)]+\))$/i.test(color)
 }
 
 function GitBadge({ git }: { git: GitInfo }): JSX.Element {
