@@ -51,7 +51,7 @@ button:disabled {
 
 .app-shell {
   display: grid;
-  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  grid-template-columns: 340px 6px minmax(0, 1fr);
   height: 100%;
   min-width: 0;
   background: var(--bg);
@@ -62,8 +62,49 @@ button:disabled {
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-  border-right: 1px solid var(--line-strong);
   background: var(--panel-2);
+}
+
+.pane-resizer {
+  position: relative;
+  z-index: 5;
+  width: 6px;
+  min-width: 6px;
+  border-inline: 1px solid var(--line-strong);
+  background: var(--panel-2);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.pane-resizer::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 34px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  content: '';
+  opacity: 0;
+  transform: translate(-50%, -50%);
+}
+
+.pane-resizer:hover::after,
+.pane-resizer:focus-visible::after {
+  opacity: 1;
+}
+
+.pane-resizer:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: -2px;
+}
+
+body.is-resizing-sidebar,
+body.is-resizing-sidebar *,
+body.is-resizing-editor-split,
+body.is-resizing-editor-split * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .vault-header {
@@ -770,14 +811,60 @@ input:focus {
   min-width: 0;
 }
 
+.workspace.editor-split .editor-pane-slot {
+  flex-basis: 0;
+}
+
 .workspace.split .editor-pane-slot .editor-host,
 .workspace.split .editor-pane-slot .track-workspace {
   height: 100%;
 }
 
-.workspace.split .editor-pane-slot:not(:last-child),
 .workspace.split .editor-host {
   border-right: 1px solid var(--line);
+}
+
+.workspace.split .editor-pane-slot:not(:last-child) {
+  border-right: 1px solid var(--line);
+}
+
+.workspace.editor-split .editor-pane-slot:not(:last-child) {
+  border-right: 0;
+}
+
+.editor-split-resizer {
+  position: relative;
+  z-index: 6;
+  width: 7px;
+  min-width: 7px;
+  flex: 0 0 7px;
+  border-inline: 1px solid var(--line);
+  background: var(--panel-2);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.editor-split-resizer::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 30px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  content: '';
+  opacity: 0;
+  transform: translate(-50%, -50%);
+}
+
+.editor-split-resizer:hover::after,
+.editor-split-resizer:focus-visible::after {
+  opacity: 1;
+}
+
+.editor-split-resizer:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: -2px;
 }
 
 .editor-pane-slot {
@@ -2134,7 +2221,7 @@ input:focus {
 
 @media (max-width: 820px) {
   .app-shell {
-    grid-template-columns: minmax(220px, 42vw) minmax(0, 1fr);
+    grid-template-columns: minmax(220px, 42vw) 6px minmax(0, 1fr);
   }
 
   .editor-header {
@@ -2148,6 +2235,10 @@ input:focus {
 
   .workspace.split {
     flex-direction: column;
+  }
+
+  .workspace.split .editor-split-resizer {
+    display: none;
   }
 
   .workspace.split .editor-host {

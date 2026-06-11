@@ -1,5 +1,6 @@
 {
   "autosaveDelayMs": 5000,
   "checkpointIntervalMs": 180000,
-  "closeMarkdownBeforeTrack": true
+    "gitStatusPollIntervalMs": 30000,
+    "closeMarkdownBeforeTrack": true
 }

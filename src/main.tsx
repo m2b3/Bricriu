@@ -204,6 +204,13 @@ const SESSION_KEY_PREFIX = 'notesproject:session:'
 const WINDOW_PLACEMENT_KEY = 'notesproject:window-placement'
 const CANVAS_MARKDOWN_DISPLAY_KEY = 'notesproject:canvas-markdown-display'
 const CANVAS_DOCUMENT_DISPLAY_KEY = 'notesproject:canvas-document-display'
+const SIDEBAR_WIDTH_KEY = 'notesproject:sidebar-width'
+const EDITOR_SPLIT_RATIO_KEY = 'notesproject:editor-split-ratio'
+const SIDEBAR_MIN_WIDTH = 220
+const SIDEBAR_MAX_WIDTH = 560
+const EDITOR_MIN_WIDTH = 360
+const EDITOR_SPLIT_MIN_RATIO = 0.2
+const EDITOR_SPLIT_MAX_RATIO = 0.8
 
 type AppProfile = {
   autosaveDelayMs: number
@@ -296,6 +303,11 @@ function App(): JSX.Element {
   const [typstPreview, setTypstPreview] = useState<TypstPreviewState | null>(null)
   const [editorFocusRequest, setEditorFocusRequest] = useState(0)
   const [editorSelectAllRequest, setEditorSelectAllRequest] = useState(0)
+  const [sidebarWidth, setSidebarWidth] = useState(readStoredSidebarWidth)
+  const [editorSplitRatio, setEditorSplitRatio] = useState(readStoredEditorSplitRatio)
+  const appShellRef = useRef<HTMLElement | null>(null)
+  const mainPaneSlotRef = useRef<HTMLDivElement | null>(null)
+  const splitPaneSlotRef = useRef<HTMLDivElement | null>(null)
   const tabsRef = useRef<OpenTab[]>([])
   const latestBodiesRef = useRef<Map<string, string>>(new Map())
   const activeIdRef = useRef<string | null>(null)
@@ -1684,8 +1696,97 @@ function App(): JSX.Element {
     typstPreviewFormat
   ])
 
+  const resizeSidebarTo = useCallback((clientX: number) => {
+    const shell = appShellRef.current
+    const shellRect = shell?.getBoundingClientRect()
+    const shellWidth = shellRect?.width ?? window.innerWidth
+    const shellLeft = shellRect?.left ?? 0
+    const maxWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, shellWidth - EDITOR_MIN_WIDTH))
+    const nextWidth = clamp(Math.round(clientX - shellLeft), SIDEBAR_MIN_WIDTH, maxWidth)
+    setSidebarWidth(nextWidth)
+    writeStoredSidebarWidth(nextWidth)
+  }, [])
+
+  useEffect(() => {
+    const clampSidebarWidthToWindow = () => {
+      const shellWidth = appShellRef.current?.getBoundingClientRect().width ?? window.innerWidth
+      const maxWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, shellWidth - EDITOR_MIN_WIDTH))
+      setSidebarWidth((current) => {
+        const next = clamp(current, SIDEBAR_MIN_WIDTH, maxWidth)
+        if (next !== current) writeStoredSidebarWidth(next)
+        return next
+      })
+    }
+    clampSidebarWidthToWindow()
+    window.addEventListener('resize', clampSidebarWidthToWindow)
+    return () => window.removeEventListener('resize', clampSidebarWidthToWindow)
+  }, [])
+
+  const startSidebarResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    document.body.classList.add('is-resizing-sidebar')
+    resizeSidebarTo(event.clientX)
+  }, [resizeSidebarTo])
+
+  const handleSidebarResizeKey = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 48 : 16
+    let nextWidth: number | null = null
+    if (event.key === 'ArrowLeft') nextWidth = sidebarWidth - step
+    if (event.key === 'ArrowRight') nextWidth = sidebarWidth + step
+    if (event.key === 'Home') nextWidth = SIDEBAR_MIN_WIDTH
+    if (event.key === 'End') nextWidth = SIDEBAR_MAX_WIDTH
+    if (nextWidth == null) return
+    event.preventDefault()
+    const shellWidth = appShellRef.current?.getBoundingClientRect().width ?? window.innerWidth
+    const maxWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, shellWidth - EDITOR_MIN_WIDTH))
+    const clampedWidth = clamp(nextWidth, SIDEBAR_MIN_WIDTH, maxWidth)
+    setSidebarWidth(clampedWidth)
+    writeStoredSidebarWidth(clampedWidth)
+  }, [sidebarWidth])
+
+  const resizeEditorSplitTo = useCallback((clientX: number) => {
+    const mainRect = mainPaneSlotRef.current?.getBoundingClientRect()
+    const splitRect = splitPaneSlotRef.current?.getBoundingClientRect()
+    if (!mainRect || !splitRect) return
+    const totalWidth = splitRect.right - mainRect.left
+    if (totalWidth <= 0) return
+    const nextRatio = clamp(
+      (clientX - mainRect.left) / totalWidth,
+      EDITOR_SPLIT_MIN_RATIO,
+      EDITOR_SPLIT_MAX_RATIO
+    )
+    setEditorSplitRatio(nextRatio)
+    writeStoredEditorSplitRatio(nextRatio)
+  }, [])
+
+  const startEditorSplitResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    document.body.classList.add('is-resizing-editor-split')
+    resizeEditorSplitTo(event.clientX)
+  }, [resizeEditorSplitTo])
+
+  const handleEditorSplitResizeKey = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 0.1 : 0.04
+    let nextRatio: number | null = null
+    if (event.key === 'ArrowLeft') nextRatio = editorSplitRatio - step
+    if (event.key === 'ArrowRight') nextRatio = editorSplitRatio + step
+    if (event.key === 'Home') nextRatio = EDITOR_SPLIT_MIN_RATIO
+    if (event.key === 'End') nextRatio = EDITOR_SPLIT_MAX_RATIO
+    if (nextRatio == null) return
+    event.preventDefault()
+    const clampedRatio = clamp(nextRatio, EDITOR_SPLIT_MIN_RATIO, EDITOR_SPLIT_MAX_RATIO)
+    setEditorSplitRatio(clampedRatio)
+    writeStoredEditorSplitRatio(clampedRatio)
+  }, [editorSplitRatio])
+
   return (
-    <main className="app-shell">
+    <main
+      ref={appShellRef}
+      className="app-shell"
+      style={{ gridTemplateColumns: `${sidebarWidth}px 6px minmax(0, 1fr)` }}
+    >
       <aside className="sidebar">
         <header className="vault-header">
           <div className="vault-title">
@@ -1824,6 +1925,35 @@ function App(): JSX.Element {
         </footer>
       </aside>
 
+      <div
+        className="pane-resizer"
+        role="separator"
+        aria-label="Resize sidebar"
+        aria-orientation="vertical"
+        aria-valuemin={SIDEBAR_MIN_WIDTH}
+        aria-valuemax={SIDEBAR_MAX_WIDTH}
+        aria-valuenow={sidebarWidth}
+        tabIndex={0}
+        onPointerDown={startSidebarResize}
+        onPointerMove={(event) => {
+          if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+          resizeSidebarTo(event.clientX)
+        }}
+        onPointerUp={(event) => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId)
+          }
+          document.body.classList.remove('is-resizing-sidebar')
+        }}
+        onPointerCancel={(event) => {
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId)
+          }
+          document.body.classList.remove('is-resizing-sidebar')
+        }}
+        onKeyDown={handleSidebarResizeKey}
+      />
+
       <section className="editor-pane">
         <header
           className="editor-header"
@@ -1939,7 +2069,9 @@ function App(): JSX.Element {
 
         <div className={`${splitOpen || ((showPreview || showBacklinks) && activeTab) ? 'workspace split' : 'workspace'}${splitOpen ? ' editor-split' : ''}`}>
           <div
+            ref={mainPaneSlotRef}
             className={focusedPane === 'main' ? 'editor-pane-slot active' : 'editor-pane-slot'}
+            style={splitOpen ? { flex: `${editorSplitRatio} 1 0` } : undefined}
             onMouseDown={() => setFocusedPane('main')}
           >
             {splitOpen && (
@@ -1991,7 +2123,39 @@ function App(): JSX.Element {
           </div>
           {splitOpen && (
             <div
+              className="editor-split-resizer"
+              role="separator"
+              aria-label="Resize editor panes"
+              aria-orientation="vertical"
+              aria-valuemin={Math.round(EDITOR_SPLIT_MIN_RATIO * 100)}
+              aria-valuemax={Math.round(EDITOR_SPLIT_MAX_RATIO * 100)}
+              aria-valuenow={Math.round(editorSplitRatio * 100)}
+              tabIndex={0}
+              onPointerDown={startEditorSplitResize}
+              onPointerMove={(event) => {
+                if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+                resizeEditorSplitTo(event.clientX)
+              }}
+              onPointerUp={(event) => {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId)
+                }
+                document.body.classList.remove('is-resizing-editor-split')
+              }}
+              onPointerCancel={(event) => {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId)
+                }
+                document.body.classList.remove('is-resizing-editor-split')
+              }}
+              onKeyDown={handleEditorSplitResizeKey}
+            />
+          )}
+          {splitOpen && (
+            <div
+              ref={splitPaneSlotRef}
               className={focusedPane === 'split' ? 'editor-pane-slot active' : 'editor-pane-slot'}
+              style={{ flex: `${1 - editorSplitRatio} 1 0` }}
               onMouseDown={() => setFocusedPane('split')}
             >
               <div className="pane-toolbar">
@@ -4195,6 +4359,47 @@ function writeStoredWindowPlacement(placement: StoredWindowPlacement): void {
   } catch {
     // Ignore quota/storage failures; placement restore is best effort.
   }
+}
+
+function readStoredSidebarWidth(): number {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_WIDTH_KEY)
+    if (!raw) return 340
+    return clamp(Number(raw), SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
+  } catch {
+    return 340
+  }
+}
+
+function writeStoredSidebarWidth(width: number): void {
+  try {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(width)))
+  } catch {
+    // Ignore storage failures; the in-memory width still applies.
+  }
+}
+
+function readStoredEditorSplitRatio(): number {
+  try {
+    const raw = localStorage.getItem(EDITOR_SPLIT_RATIO_KEY)
+    if (!raw) return 0.5
+    return clamp(Number(raw), EDITOR_SPLIT_MIN_RATIO, EDITOR_SPLIT_MAX_RATIO)
+  } catch {
+    return 0.5
+  }
+}
+
+function writeStoredEditorSplitRatio(ratio: number): void {
+  try {
+    localStorage.setItem(EDITOR_SPLIT_RATIO_KEY, String(clamp(ratio, EDITOR_SPLIT_MIN_RATIO, EDITOR_SPLIT_MAX_RATIO)))
+  } catch {
+    // Ignore storage failures; the in-memory ratio still applies.
+  }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min
+  return Math.min(Math.max(value, min), max)
 }
 
 function readCanvasMarkdownDisplayMode(): CanvasMarkdownDisplayMode {
