@@ -42,6 +42,7 @@ import { tags } from '@lezer/highlight'
 import { searchKeymap } from '@codemirror/search'
 import { renderCanvasMarkdown } from './canvas/canvasMarkdown'
 import { markdownToTiptap } from './track/markdown'
+import type { CalendarEvent } from './calendar/CalendarView'
 import type { TrackState } from './track/types'
 import './styles.css'
 
@@ -53,6 +54,9 @@ const TrackChangesEditor = React.lazy(() =>
 )
 const MarkdownPreview = React.lazy(() =>
   import('./preview/MarkdownPreview').then((module) => ({ default: module.MarkdownPreview }))
+)
+const CalendarView = React.lazy(() =>
+  import('./calendar/CalendarView').then((module) => ({ default: module.CalendarView }))
 )
 
 type EntryKind = 'file' | 'dir'
@@ -106,6 +110,10 @@ type TypstPreview = {
   updatedAt: number
 }
 
+type PdfExportResult = {
+  path: string
+}
+
 type TypstPreviewFormat = 'svg' | 'html'
 
 type ContentMatch = {
@@ -137,6 +145,7 @@ type TypstPreviewState = {
 }
 
 type EditorMode = 'markdown' | 'track' | 'canvas'
+type WorkspaceMode = 'notes' | 'calendar'
 type SearchView = 'file' | 'content'
 type EditorPane = 'main' | 'split'
 type CanvasMarkdownDisplayMode = 'summary' | 'raw'
@@ -273,6 +282,9 @@ function App(): JSX.Element {
   const [vault, setVault] = useState<VaultInfo | null>(null)
   const [tree, setTree] = useState<TreeEntry[]>([])
   const [tabs, setTabs] = useState<OpenTab[]>([])
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>('notes')
+  const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>([])
+  const [calendarSaving, setCalendarSaving] = useState(false)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [splitOpen, setSplitOpen] = useState(false)
   const [splitId, setSplitId] = useState<string | null>(null)
@@ -292,6 +304,7 @@ function App(): JSX.Element {
   const [busy, setBusy] = useState(false)
   const [searching, setSearching] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [touchedPaths, setTouchedPaths] = useState<Set<string>>(() => new Set())
   const [profile, setProfile] = useState<AppProfile>(DEFAULT_PROFILE)
   const [showPreview, setShowPreview] = useState(false)
@@ -398,6 +411,7 @@ function App(): JSX.Element {
   const activeTab = focusedPane === 'split' ? splitTab : mainTab
   const activePath = activeTab?.path ?? null
   const dirty = !!activeTab && isTabDirty(activeTab)
+  const activePrintBody = activeTab ? latestTabBody(activeTab) : ''
 
   useEffect(() => {
     if (activeTab) activeTabHintRef.current = { path: activeTab.path, mode: activeTab.mode }
@@ -463,6 +477,54 @@ function App(): JSX.Element {
     setSplitId(null)
     setFocusedPane('split')
   }, [closeSplitPane, splitOpen])
+
+  const printActiveDocument = useCallback(async (mode: 'raw' | 'preview') => {
+    if (!activeTab || workspaceMode !== 'notes') return
+    if (mode === 'preview' && !isTypstPath(activeTab.path)) {
+      await import('./preview/MarkdownPreview')
+    }
+    const body = document.body
+    const cleanup = () => {
+      if (body.dataset.printMode === mode) delete body.dataset.printMode
+      window.removeEventListener('afterprint', cleanup)
+    }
+    body.dataset.printMode = mode
+    window.addEventListener('afterprint', cleanup)
+    window.setTimeout(cleanup, 30000)
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => window.print())
+    })
+  }, [activeTab, workspaceMode])
+
+  const clearExportStatusLater = useCallback((kind: 'error' | 'notice', message: string) => {
+    window.setTimeout(() => {
+      if (kind === 'error') {
+        setError((current) => (current === message ? null : current))
+      } else {
+        setNotice((current) => (current === message ? null : current))
+      }
+    }, 7000)
+  }, [])
+
+  const exportPreviewPdf = useCallback(async () => {
+    if (!activeTab || workspaceMode !== 'notes') return
+    setError(null)
+    setNotice(null)
+    try {
+      const result = await invoke<PdfExportResult>('export_pdf', {
+        path: activeTab.path,
+        body: latestTabBody(activeTab)
+      })
+      const message = `Exported PDF: ${result.path}`
+      setNotice(message)
+      clearExportStatusLater('notice', message)
+    } catch (err) {
+      const message = String(err)
+      setNotice(null)
+      setError(message)
+      clearExportStatusLater('error', message)
+    }
+  }, [activeTab, clearExportStatusLater, latestTabBody, workspaceMode])
 
   useEffect(() => {
     void invoke<AppProfile>('load_profile')
@@ -542,6 +604,8 @@ function App(): JSX.Element {
     setSplitOpen(false)
     setSplitId(null)
     setFocusedPane('main')
+    setWorkspaceMode('notes')
+    setCalendarEvents([])
   }, [vault])
 
   const refreshTree = useCallback(async () => {
@@ -551,6 +615,37 @@ function App(): JSX.Element {
       if (prev.size > 0) return prev
       return new Set(next.filter((entry) => entry.kind === 'dir').map((entry) => entry.path))
     })
+  }, [])
+
+  const loadCalendarEvents = useCallback(async () => {
+    const events = await invoke<CalendarEvent[]>('read_calendar_events')
+    setCalendarEvents(normalizeCalendarEvents(events))
+  }, [])
+
+  const saveCalendarEvents = useCallback(async (events: CalendarEvent[]) => {
+    const normalized = normalizeCalendarEvents(events)
+    setCalendarEvents(normalized)
+    setCalendarSaving(true)
+    setError(null)
+    try {
+      await invoke('save_calendar_events', { events: normalized })
+      setTouchedPaths((prev) => new Set([...prev, '.vault-calendar/events.json']))
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setCalendarSaving(false)
+    }
+  }, [])
+
+  const loadWikiCompletionBody = useCallback(async (path: string): Promise<string | null> => {
+    const openTab = tabsRef.current.find((tab) => samePath(tab.path, path) && (tab.mode === 'markdown' || tab.mode === 'canvas'))
+    if (openTab) return latestBodiesRef.current.get(openTab.id) ?? openTab.body
+    try {
+      const note = await invoke<NoteContent>('read_note', { path })
+      return note.body
+    } catch {
+      return null
+    }
   }, [])
 
   const loadStoredSession = useCallback(async (root: string): Promise<RestoredSession | null> => {
@@ -675,13 +770,14 @@ function App(): JSX.Element {
       setContentUsesFileFilter(restoredSession?.contentUsesFileFilter ?? false)
       setContentMatches([])
       await refreshTree()
+      await loadCalendarEvents()
       await invoke('watch_vault')
     } catch (err) {
       setError(String(err))
     } finally {
       setBusy(false)
     }
-  }, [loadStoredSession, profile.persistRecentFiles, refreshTree, vaultPath])
+  }, [loadCalendarEvents, loadStoredSession, profile.persistRecentFiles, refreshTree, vaultPath])
 
   useEffect(() => {
     if (!vault) return
@@ -699,13 +795,16 @@ function App(): JSX.Element {
           void reconcileExternalTab(tab.path)
         }
       }
+      if (changedPaths.has(pathKey('.vault-calendar/events.json'))) {
+        void loadCalendarEvents()
+      }
     })
 
     return () => {
       if (refreshTimer != null) window.clearTimeout(refreshTimer)
       void unlistenPromise.then((unlisten) => unlisten())
     }
-  }, [reconcileExternalTab, refreshTree, tabs, vault])
+  }, [loadCalendarEvents, reconcileExternalTab, refreshTree, tabs, vault])
 
   useEffect(() => {
     if (!vault?.git.isRepo) return
@@ -749,11 +848,13 @@ function App(): JSX.Element {
     })
   }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, pinnedPaths, profile.persistRecentFiles, recentPaths, splitOpen, splitTab, tabs, vault])
 
-  const openNote = useCallback(async (path: string, offset: number | null = null) => {
+  const openNote = useCallback(async (destination: string, offset: number | null = null) => {
+    const { path, heading } = splitWikiDestination(destination)
+    setWorkspaceMode('notes')
     const existing = tabs.find((tab) => tab.mode === 'markdown' && samePath(tab.path, path))
     if (existing) {
       selectMainTab(existing.id)
-      setJumpOffset(offset)
+      setJumpOffset(resolveNoteJumpOffset(latestTabBody(existing), heading, offset))
       rememberRecentPath(existing.path)
       return
     }
@@ -777,7 +878,7 @@ function App(): JSX.Element {
         }
       ])
       selectMainTab(id)
-      setJumpOffset(offset)
+      setJumpOffset(resolveNoteJumpOffset(body, heading, offset))
       rememberRecentPath(rawSource.path)
       return
     }
@@ -805,16 +906,17 @@ function App(): JSX.Element {
         }
       ])
       selectMainTab(id)
-      setJumpOffset(offset)
+      setJumpOffset(resolveNoteJumpOffset(note.body, heading, offset))
       rememberRecentPath(note.path)
     } catch (err) {
       setError(String(err))
     } finally {
       setBusy(false)
     }
-  }, [isTabDirty, rememberRecentPath, selectMainTab, tabs])
+  }, [isTabDirty, latestTabBody, rememberRecentPath, selectMainTab, tabs])
 
   const openTrackNote = useCallback(async (path: string) => {
+    setWorkspaceMode('notes')
     const existing = tabs.find((tab) => tab.mode === 'track' && samePath(tab.path, path))
     if (existing) {
       selectMainTab(existing.id)
@@ -871,6 +973,7 @@ function App(): JSX.Element {
   }, [activeId, isTabDirty, profile.closeMarkdownBeforeTrack, rememberRecentPath, selectMainTab, splitId, tabs])
 
   const openCanvasNote = useCallback(async (path: string) => {
+    setWorkspaceMode('notes')
     const existing = tabs.find((tab) => tab.mode === 'canvas' && samePath(tab.path, path))
     if (existing) {
       selectMainTab(existing.id)
@@ -1115,26 +1218,7 @@ function App(): JSX.Element {
         contentUsesFileFilter: contentUsesFileFilterRef.current
       })
     }
-    const dirtyTabs = tabsRef.current.filter((tab) => {
-      const body = latestBodiesRef.current.get(tab.id) ?? tab.body
-      return body !== tab.savedBody
-    })
     const paths = new Set(touchedPathsRef.current)
-
-    for (const tab of dirtyTabs) {
-      const result = await saveTabBodyWithConflictCheck(tab, latestBodiesRef.current.get(tab.id) ?? tab.body)
-      if (tab.mode === 'track' && tab.trackState) {
-        await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
-      }
-      if (!result.saved) {
-        if (result.conflictPath) {
-          paths.add(result.conflictPath)
-          continue
-        }
-        throw new Error(result.message)
-      }
-      paths.add(result.note.path)
-    }
 
     if (vault?.git.isRepo && vault.git.currentBranch === 'inuse' && paths.size > 0) {
       await invoke<GitInfo>('checkpoint_inuse', { paths: uniquePaths([...paths]) })
@@ -1489,6 +1573,16 @@ function App(): JSX.Element {
     const unlistenPromise = appWindow.onCloseRequested(async (event) => {
       if (closingRef.current) return
       event.preventDefault()
+
+      const dirtyTabs = uniqueSaveTargets(tabsRef.current.filter((tab) => {
+        const body = latestBodiesRef.current.get(tab.id) ?? tab.body
+        return body !== tab.savedBody
+      }))
+      for (const tab of dirtyTabs) {
+        const proceed = window.confirm(`Close ${tab.path} with unsaved changes?`)
+        if (!proceed) return
+      }
+
       closingRef.current = true
       setBusy(true)
       setError(null)
@@ -1516,6 +1610,21 @@ function App(): JSX.Element {
       if (key === 's') {
         event.preventDefault()
         void saveActive()
+        return
+      }
+
+      if (key === 'n') {
+        event.preventDefault()
+        if (vault) {
+          setWorkspaceMode('notes')
+          void createNoteAction()
+        }
+        return
+      }
+
+      if (key === 'p') {
+        event.preventDefault()
+        void printActiveDocument(event.shiftKey ? 'raw' : 'preview')
         return
       }
 
@@ -1555,7 +1664,7 @@ function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTab, closeSplitPane, closeTab, focusedPane, mainTab, saveActive, selectMainTab, splitOpen, tabs])
+  }, [activeTab, closeSplitPane, closeTab, createNoteAction, focusedPane, mainTab, printActiveDocument, saveActive, selectMainTab, splitOpen, tabs, vault])
 
   useEffect(() => {
     setSearchRevealedFolders(new Set())
@@ -1818,6 +1927,14 @@ function App(): JSX.Element {
 
         <section className="search-panel">
           <div className="sidebar-actions">
+            <button
+              type="button"
+              className={workspaceMode === 'calendar' ? 'active' : ''}
+              onClick={() => setWorkspaceMode((mode) => (mode === 'calendar' ? 'notes' : 'calendar'))}
+              disabled={!vault}
+            >
+              Calendar
+            </button>
             <button type="button" onClick={() => void createNoteAction()} disabled={!vault || busy}>
               New note
             </button>
@@ -1988,22 +2105,37 @@ function App(): JSX.Element {
             onToggleBacklinks={() => setShowBacklinks((current) => !current)}
             onToggleHistory={(persistRecentFiles) => updateProfile({ ...profile, persistRecentFiles })}
             onTogglePreview={() => setShowPreview((current) => !current)}
+            onExportPreviewPdf={() => void exportPreviewPdf()}
+            onPrintPreview={() => printActiveDocument('preview')}
+            onPrintRaw={() => printActiveDocument('raw')}
             pathKey={pathKey}
           />
           <div className="note-heading">
-            <span className="note-path">{activeTab?.path ?? 'Open a Markdown file'}</span>
-            {dirty && <span className="dirty-pill">Modified</span>}
-            {activeTab?.externalStatus === 'changed' && <span className="external-pill">Changed on disk</span>}
-            {activeTab?.externalStatus === 'deleted' && <span className="external-pill danger">Deleted on disk</span>}
+            <span className="note-path">
+              {workspaceMode === 'calendar' ? 'Calendar' : activeTab?.path ?? 'Open a Markdown file'}
+            </span>
+            {workspaceMode === 'calendar' && calendarSaving && <span className="dirty-pill">Saving</span>}
+            {workspaceMode === 'notes' && dirty && <span className="dirty-pill">Modified</span>}
+            {workspaceMode === 'notes' && activeTab?.externalStatus === 'changed' && <span className="external-pill">Changed on disk</span>}
+            {workspaceMode === 'notes' && activeTab?.externalStatus === 'deleted' && <span className="external-pill danger">Deleted on disk</span>}
           </div>
           <div className="editor-actions">
             <button
               type="button"
+              className={workspaceMode === 'calendar' ? 'secondary-button active' : 'secondary-button'}
+              onClick={() => setWorkspaceMode((mode) => (mode === 'calendar' ? 'notes' : 'calendar'))}
+              disabled={!vault}
+            >
+              Calendar
+            </button>
+            <button
+              type="button"
               className={activeTab?.mode === 'canvas' ? 'secondary-button active' : 'secondary-button'}
               onClick={() => {
+                setWorkspaceMode('notes')
                 if (activeTab) void openCanvasNote(activeTab.path)
               }}
-              disabled={!activeTab || !isMarkdownPath(activeTab.path)}
+              disabled={workspaceMode === 'calendar' || !activeTab || !isMarkdownPath(activeTab.path)}
             >
               Canvas
             </button>
@@ -2011,9 +2143,10 @@ function App(): JSX.Element {
               type="button"
               className={activeTab?.mode === 'markdown' ? 'secondary-button active' : 'secondary-button'}
               onClick={() => {
+                setWorkspaceMode('notes')
                 if (activeTab) void openNote(activeTab.path)
               }}
-              disabled={!activeTab || !isMarkdownPath(activeTab.path)}
+              disabled={workspaceMode === 'calendar' || !activeTab || !isMarkdownPath(activeTab.path)}
             >
               Text
             </button>
@@ -2031,7 +2164,7 @@ function App(): JSX.Element {
               type="button"
               className={splitOpen ? 'secondary-button active' : 'secondary-button'}
               onClick={toggleSplitPane}
-              disabled={!vault}
+              disabled={!vault || workspaceMode === 'calendar'}
             >
               {splitOpen ? 'Close split' : 'Split'}
             </button>
@@ -2039,7 +2172,7 @@ function App(): JSX.Element {
               type="button"
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => void saveActive()}
-              disabled={!activeTab || !dirty || busy}
+              disabled={workspaceMode === 'calendar' || !activeTab || !dirty || busy}
             >
               Save
             </button>
@@ -2053,20 +2186,33 @@ function App(): JSX.Element {
           </div>
         </header>
 
-        <TabStrip
-          tabs={tabs}
-          activeId={activeId}
-          isDirty={isTabDirty}
-          onSelect={(id) => {
-            setFocusedPane('main')
-            if (id === splitId) setSplitId(null)
-            setActiveId(id)
-          }}
-          onClose={closeTab}
-        />
+        {workspaceMode === 'notes' && (
+          <TabStrip
+            tabs={tabs}
+            activeId={activeId}
+            isDirty={isTabDirty}
+            onSelect={(id) => {
+              setWorkspaceMode('notes')
+              setFocusedPane('main')
+              if (id === splitId) setSplitId(null)
+              setActiveId(id)
+            }}
+            onClose={closeTab}
+          />
+        )}
 
         {error && <div className="error-banner">{error}</div>}
+        {notice && <div className="notice-banner">{notice}</div>}
 
+        {workspaceMode === 'calendar' ? (
+          <React.Suspense fallback={<EditorLoading label="Loading Calendar..." />}>
+            <CalendarView
+              events={calendarEvents}
+              saving={calendarSaving}
+              onSaveEvents={(events) => void saveCalendarEvents(events)}
+            />
+          </React.Suspense>
+        ) : (
         <div className={`${splitOpen || ((showPreview || showBacklinks) && activeTab) ? 'workspace split' : 'workspace'}${splitOpen ? ' editor-split' : ''}`}>
           <div
             ref={mainPaneSlotRef}
@@ -2118,6 +2264,7 @@ function App(): JSX.Element {
                   onJumpHandled={() => setJumpOffset(null)}
                   onChange={updateTabBody}
                   onOpenWikiLink={(path) => void openNote(path)}
+                  onLoadWikiCompletionBody={loadWikiCompletionBody}
                 />
             )}
           </div>
@@ -2216,6 +2363,7 @@ function App(): JSX.Element {
                     onJumpHandled={() => setJumpOffset(null)}
                     onChange={updateTabBody}
                     onOpenWikiLink={(path) => void openNote(path)}
+                    onLoadWikiCompletionBody={loadWikiCompletionBody}
                   />
               )}
             </div>
@@ -2243,7 +2391,33 @@ function App(): JSX.Element {
             />
           )}
         </div>
+        )}
       </section>
+      {activeTab && workspaceMode === 'notes' && (
+        <div className="print-root" aria-hidden="true">
+          <article className="print-document print-raw-document">
+            <header className="print-document-header">
+              <h1>{activeTab.path}</h1>
+              <span>Raw Markdown</span>
+            </header>
+            <pre>{activePrintBody}</pre>
+          </article>
+          <div className="print-document print-preview-document">
+            {activeIsTypst ? (
+              <TypstPreviewPane preview={typstPreview?.tabId === activeTab.id ? typstPreview : null} />
+            ) : (
+              <React.Suspense fallback={<div className="preview-status">Loading preview...</div>}>
+                <MarkdownPreview
+                  body={activePrintBody}
+                  version={activeTab.bodyVersion}
+                  notePaths={allFilePaths}
+                  onOpenWikiLink={() => undefined}
+                />
+              </React.Suspense>
+            )}
+          </div>
+        </div>
+      )}
     </main>
   )
 }
@@ -2352,6 +2526,9 @@ function AppMenuBar({
   onToggleBacklinks,
   onToggleHistory,
   onTogglePreview,
+  onExportPreviewPdf,
+  onPrintPreview,
+  onPrintRaw,
   pathKey
 }: {
   activeTab: OpenTab | null
@@ -2375,6 +2552,9 @@ function AppMenuBar({
   onToggleBacklinks: () => void
   onToggleHistory: (persistRecentFiles: boolean) => void
   onTogglePreview: () => void
+  onExportPreviewPdf: () => void
+  onPrintPreview: () => void
+  onPrintRaw: () => void
   pathKey: (path: string) => string
 }): JSX.Element {
   const activeIsMarkdown = !!activeTab && isMarkdownPath(activeTab.path)
@@ -2438,8 +2618,45 @@ function AppMenuBar({
             />
             <span>Persist recent files</span>
           </label>
-          <button type="button" onClick={onDeleteCurrent} disabled={!activeTab || busy}>
+          <button
+            type="button"
+            onClick={() => {
+              setOpenMenu(null)
+              onDeleteCurrent()
+            }}
+            disabled={!activeTab || busy}
+          >
             Delete current file
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setOpenMenu(null)
+              onPrintRaw()
+            }}
+            disabled={!activeTab || busy}
+          >
+            Print raw Markdown
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setOpenMenu(null)
+              onPrintPreview()
+            }}
+            disabled={!activeTab || busy}
+          >
+            Print preview / PDF
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setOpenMenu(null)
+              onExportPreviewPdf()
+            }}
+            disabled={!activeTab || busy}
+          >
+            Export PDF
           </button>
         </div>
       </details>
@@ -2524,7 +2741,8 @@ function MarkdownEditor({
   selectAllRequest,
   onJumpHandled,
   onChange,
-  onOpenWikiLink
+  onOpenWikiLink,
+  onLoadWikiCompletionBody
 }: {
   activePath: string | null
   changeId: string | null
@@ -2540,6 +2758,7 @@ function MarkdownEditor({
   onJumpHandled: () => void
   onChange: (path: string, body: string) => void
   onOpenWikiLink: (path: string) => void
+  onLoadWikiCompletionBody: (path: string) => Promise<string | null>
 }): JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const viewRef = useRef<EditorView | null>(null)
@@ -2555,6 +2774,7 @@ function MarkdownEditor({
   const canvasMarkdownDisplayModeRef = useRef(canvasMarkdownDisplayMode)
   const searchHighlightRef = useRef<SearchHighlight | null>(searchHighlight)
   const onOpenWikiLinkRef = useRef(onOpenWikiLink)
+  const onLoadWikiCompletionBodyRef = useRef(onLoadWikiCompletionBody)
 
   useEffect(() => {
     onChangeRef.current = onChange
@@ -2584,6 +2804,10 @@ function MarkdownEditor({
   }, [onOpenWikiLink])
 
   useEffect(() => {
+    onLoadWikiCompletionBodyRef.current = onLoadWikiCompletionBody
+  }, [onLoadWikiCompletionBody])
+
+  useEffect(() => {
     const host = hostRef.current
     if (!host || viewRef.current) return
 
@@ -2600,7 +2824,7 @@ function MarkdownEditor({
       lineNumbers(),
       highlightActiveLine(),
       syntaxHighlighting(notesHighlightStyle, { fallback: true }),
-      noteMarkdownTools(notePathsRef, canvasMarkdownDisplayModeRef, searchHighlightRef, onOpenWikiLinkRef),
+      noteMarkdownTools(notePathsRef, canvasMarkdownDisplayModeRef, searchHighlightRef, onOpenWikiLinkRef, onLoadWikiCompletionBodyRef),
       EditorView.lineWrapping,
       EditorView.theme({
         '&': {
@@ -2807,7 +3031,8 @@ function noteMarkdownTools(
   notePathsRef: React.MutableRefObject<string[]>,
   canvasMarkdownDisplayModeRef: React.MutableRefObject<CanvasMarkdownDisplayMode>,
   searchHighlightRef: React.MutableRefObject<SearchHighlight | null>,
-  onOpenWikiLinkRef: React.MutableRefObject<(path: string) => void>
+  onOpenWikiLinkRef: React.MutableRefObject<(path: string) => void>,
+  onLoadWikiCompletionBodyRef: React.MutableRefObject<(path: string) => Promise<string | null>>
 ): Extension {
   const canvasSummaryField = StateField.define<DecorationSet>({
     create(state) {
@@ -2842,7 +3067,7 @@ function noteMarkdownTools(
     canvasSummaryField,
     wikiLinkPlugin,
     autocompletion({
-      override: [wikiCompletionSource(notePathsRef)],
+      override: [wikiCompletionSource(notePathsRef, onLoadWikiCompletionBodyRef)],
       activateOnTyping: true
     }),
     EditorView.updateListener.of((update) => {
@@ -2863,7 +3088,7 @@ function noteMarkdownTools(
         const link = wikiLinkAt(view.state, pos, notePathsRef.current)
         if (!link) return false
         event.preventDefault()
-        onOpenWikiLinkRef.current(link.path)
+        onOpenWikiLinkRef.current(link.destination)
         return true
       }
     }),
@@ -2873,7 +3098,7 @@ function noteMarkdownTools(
         run(view) {
           const link = wikiLinkAt(view.state, view.state.selection.main.head, notePathsRef.current)
           if (!link) return false
-          onOpenWikiLinkRef.current(link.path)
+          onOpenWikiLinkRef.current(link.destination)
           return true
         }
       }
@@ -2979,20 +3204,28 @@ function buildNoteDecorations(
         }) })
       }
 
-      for (const match of text.matchAll(/\[\[([^\]\n|#]+)(?:#[^\]\n|]+)?(?:\|[^\]\n]+)?\]\]/g)) {
+      for (const match of text.matchAll(/\[\[([^\]\n|#]+)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g)) {
         const label = match[1].trim()
+        const heading = match[2]?.slice(1).trim()
         const start = line.from + (match.index ?? 0)
         const end = start + match[0].length
         const linkStart = start + 2
         const linkEnd = end - 2
+        const displayRange = wikiLinkDisplayRange(line.from + (match.index ?? 0), match)
         const target = resolveWikiPath(label, notePaths)
         ranges.push({ from: start, to: linkStart, decoration: Decoration.replace({}) })
         ranges.push({ from: linkEnd, to: end, decoration: Decoration.replace({}) })
-        ranges.push({ from: linkStart, to: linkEnd, decoration: Decoration.mark({
+        if (displayRange.from > linkStart) {
+          ranges.push({ from: linkStart, to: displayRange.from, decoration: Decoration.replace({}) })
+        }
+        if (displayRange.to < linkEnd) {
+          ranges.push({ from: displayRange.to, to: linkEnd, decoration: Decoration.replace({}) })
+        }
+        ranges.push({ from: displayRange.from, to: displayRange.to, decoration: Decoration.mark({
           class: target ? 'cm-wiki-link' : 'cm-wiki-link cm-wiki-missing',
           attributes: {
             title: target
-              ? `Ctrl+click or Ctrl+Enter to open ${target}`
+              ? `Ctrl+click or Ctrl+Enter to open ${formatWikiDestination(target, heading)}`
               : `No matching note for ${label}`
           }
         }) })
@@ -3226,13 +3459,48 @@ function rangesOverlapAny(from: number, to: number, ranges: Array<{ from: number
   return ranges.some((range) => from < range.to && to > range.from)
 }
 
-function wikiCompletionSource(notePathsRef: React.MutableRefObject<string[]>) {
-  return (context: CompletionContext) => {
+function wikiCompletionSource(
+  notePathsRef: React.MutableRefObject<string[]>,
+  onLoadWikiCompletionBodyRef: React.MutableRefObject<(path: string) => Promise<string | null>>
+) {
+  return async (context: CompletionContext) => {
     const before = context.matchBefore(/\[\[[^\]\n]*/)
     if (!before) return null
-    const query = before.text.slice(2).trim().toLowerCase()
+    const source = before.text.slice(2)
+    const hashIndex = source.indexOf('#')
     const notePaths = notePathsRef.current
     if (!context.explicit && before.text === '') return null
+
+    if (hashIndex >= 0) {
+      const label = source.slice(0, hashIndex).trim()
+      const headingQuery = source.slice(hashIndex + 1)
+      if (!label || headingQuery.includes('|')) return null
+
+      const target = resolveWikiPath(label, notePaths)
+      if (!target) return null
+
+      const body = await onLoadWikiCompletionBodyRef.current(target)
+      if (body == null) return null
+
+      const needle = headingQuery.trim().toLowerCase()
+      const options = collectMarkdownHeadings(body)
+        .filter((heading) => heading.searchText.includes(needle))
+        .slice(0, 40)
+        .map((heading) => ({
+          label: heading.text,
+          detail: `${target} H${heading.level}`,
+          type: 'text',
+          apply: `${heading.text}]]`
+        }))
+
+      return {
+        from: before.from + 2 + hashIndex + 1,
+        options,
+        validFor: /^[^\]\n|]*$/
+      }
+    }
+
+    const query = source.trim().toLowerCase()
     const options = notePaths
       .filter((path) => wikiSearchText(path).includes(query))
       .slice(0, 40)
@@ -3250,20 +3518,118 @@ function wikiCompletionSource(notePathsRef: React.MutableRefObject<string[]>) {
   }
 }
 
+function collectMarkdownHeadings(markdown: string): Array<{ text: string; level: number; searchText: string }> {
+  return markdown
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .flatMap((line) => {
+      const match = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/)
+      if (!match) return []
+      const text = stripMarkdownInlineSyntax(match[2])
+      if (!text) return []
+      return [{
+        text,
+        level: match[1].length,
+        searchText: `${text} ${slugifyHeading(text)}`.toLowerCase()
+      }]
+    })
+}
+
 function wikiLinkAt(
   state: EditorState,
   pos: number,
   notePaths: string[]
-): { path: string; from: number; to: number } | null {
+): { destination: string; from: number; to: number } | null {
   const line = state.doc.lineAt(pos)
-  for (const match of line.text.matchAll(/\[\[([^\]\n|#]+)(?:#[^\]\n|]+)?(?:\|[^\]\n]+)?\]\]/g)) {
+  for (const match of line.text.matchAll(/\[\[([^\]\n|#]+)(#[^\]\n|]+)?(?:\|[^\]\n]+)?\]\]/g)) {
     const from = line.from + (match.index ?? 0)
     const to = from + match[0].length
     if (pos < from || pos > to) continue
     const path = resolveWikiPath(match[1].trim(), notePaths)
-    return path ? { path, from, to } : null
+    const heading = match[2]?.slice(1).trim()
+    return path ? { destination: formatWikiDestination(path, heading), from, to } : null
   }
   return null
+}
+
+function wikiLinkDisplayRange(
+  matchStart: number,
+  match: RegExpMatchArray
+): { from: number; to: number } {
+  const linkStart = matchStart + 2
+  const linkEnd = matchStart + match[0].length - 2
+  const labelLength = match[1].length
+  const anchorLength = match[2]?.length ?? 0
+  if (match[3]) {
+    const aliasStart = linkStart + labelLength + anchorLength + 1
+    return { from: aliasStart, to: linkEnd }
+  }
+  if (match[2]) {
+    const headingStart = linkStart + labelLength + 1
+    return { from: headingStart, to: linkEnd }
+  }
+  return { from: linkStart, to: linkEnd }
+}
+
+function splitWikiDestination(destination: string): { path: string; heading: string | null } {
+  const hashIndex = destination.indexOf('#')
+  if (hashIndex < 0) return { path: destination, heading: null }
+  const path = destination.slice(0, hashIndex)
+  const heading = destination.slice(hashIndex + 1).trim()
+  return { path, heading: heading || null }
+}
+
+function formatWikiDestination(path: string, heading: string | null | undefined): string {
+  const normalizedHeading = heading?.trim()
+  return normalizedHeading ? `${path}#${normalizedHeading}` : path
+}
+
+function resolveNoteJumpOffset(body: string, heading: string | null, fallbackOffset: number | null): number | null {
+  if (!heading) return fallbackOffset
+  return findHeadingOffset(body, heading)
+}
+
+function findHeadingOffset(markdown: string, target: string): number | null {
+  const targetKey = normalizeHeadingKey(target)
+  const targetSlug = slugifyHeading(target)
+  let offset = 0
+  const lineRegex = /([^\r\n]*)(\r\n|\r|\n|$)/g
+  let lineMatch: RegExpExecArray | null
+  while ((lineMatch = lineRegex.exec(markdown))) {
+    const line = lineMatch[1]
+    const match = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/)
+    if (match) {
+      const headingText = stripMarkdownInlineSyntax(match[2])
+      if (normalizeHeadingKey(headingText) === targetKey || slugifyHeading(headingText) === targetSlug) {
+        return offset + line.search(/\S|$/)
+      }
+    }
+    offset += line.length + lineMatch[2].length
+    if (!lineMatch[2]) break
+  }
+  return null
+}
+
+function normalizeHeadingKey(value: string): string {
+  return stripMarkdownInlineSyntax(value)
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+function slugifyHeading(value: string): string {
+  return normalizeHeadingKey(value)
+    .replace(/[^\p{L}\p{N}\s-]/gu, '')
+    .replace(/\s+/g, '-')
+}
+
+function stripMarkdownInlineSyntax(value: string): string {
+  return value
+    .replace(/\\([\\`*_[\]#])/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/[*_~]+/g, '')
+    .trim()
 }
 
 function resolveWikiPath(label: string, notePaths: string[]): string | null {
@@ -3285,7 +3651,7 @@ function wikiLabel(path: string): string {
 }
 
 function stripMarkdownExtension(path: string): string {
-  return path.replace(/\.md$/i, '')
+  return path.replace(/\.(md|markdown)$/i, '')
 }
 
 function normalizeWikiLabel(label: string): string {
@@ -4496,6 +4862,53 @@ function writeStoredSession(root: string, session: StoredSession): void {
   } catch {
     // Ignore quota/storage failures; session restore is best effort.
   }
+}
+
+function normalizeCalendarEvents(events: CalendarEvent[]): CalendarEvent[] {
+  return events
+    .map(normalizeCalendarEvent)
+    .filter((event) => event.id && event.date && event.title)
+    .sort(compareCalendarEvents)
+}
+
+function normalizeCalendarEvent(event: CalendarEvent): CalendarEvent {
+  return {
+    id: event.id || createCalendarEventId(),
+    date: isIsoDate(event.date) ? event.date : todayIsoDate(),
+    title: event.title.trim(),
+    time: isTimeValue(event.time) ? event.time : '',
+    notes: event.notes ?? ''
+  }
+}
+
+function compareCalendarEvents(left: CalendarEvent, right: CalendarEvent): number {
+  return (
+    left.date.localeCompare(right.date) ||
+    (left.time || '99:99').localeCompare(right.time || '99:99') ||
+    left.title.localeCompare(right.title)
+  )
+}
+
+function createCalendarEventId(): string {
+  const random =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return `evt_${random}`
+}
+
+function todayIsoDate(): string {
+  const now = new Date()
+  const offsetMs = now.getTimezoneOffset() * 60 * 1000
+  return new Date(now.getTime() - offsetMs).toISOString().slice(0, 10)
+}
+
+function isIsoDate(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value)
+}
+
+function isTimeValue(value: string): boolean {
+  return value === '' || /^([01]\d|2[0-3]):[0-5]\d$/.test(value)
 }
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(

@@ -51,10 +51,9 @@ function renderWikiLinks(source: string, notePaths: string[]): string {
     (_match, rawLabel: string, rawAnchor: string | undefined, rawAlias: string | undefined) => {
       const label = unescapeHtml(rawLabel).trim()
       const target = resolveWikiPath(label, notePaths)
-      const text = rawAlias?.trim() || escapeHtml(label)
-      const anchor = rawAnchor ?? ''
-      if (!target) return `<span class="canvas-wiki missing">${text}${anchor}</span>`
-      return `<a class="canvas-wiki" href="notesproject-wiki:${encodeURIComponent(target)}">${text}${anchor}</a>`
+      const text = wikiDisplayText(label, rawAnchor, rawAlias)
+      if (!target) return `<span class="canvas-wiki missing">${text}</span>`
+      return `<a class="canvas-wiki" href="notesproject-wiki:${encodeURIComponent(formatWikiDestination(target, rawAnchor))}">${text}</a>`
     }
   )
 }
@@ -74,11 +73,22 @@ function wikiLabel(path: string): string {
 }
 
 function stripMarkdownExtension(path: string): string {
-  return path.replace(/\.md$/i, '')
+  return path.replace(/\.(md|markdown)$/i, '')
 }
 
 function normalizeWikiLabel(label: string): string {
   return stripMarkdownExtension(label).replace(/\\/g, '/').trim().toLowerCase()
+}
+
+function wikiDisplayText(label: string, rawAnchor: string | undefined, rawAlias: string | undefined): string {
+  if (rawAlias?.trim()) return rawAlias.trim()
+  const heading = rawAnchor?.replace(/^#/, '').trim()
+  return heading || escapeHtml(label)
+}
+
+function formatWikiDestination(path: string, rawAnchor: string | undefined): string {
+  const heading = rawAnchor?.replace(/^#/, '').trim()
+  return heading ? `${path}#${heading}` : path
 }
 
 function basename(path: string): string {

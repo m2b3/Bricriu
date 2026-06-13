@@ -33,8 +33,9 @@ export function MarkdownPreview({
         const href = link.getAttribute('href') ?? ''
         if (!href.startsWith('notesproject-wiki:')) return
         event.preventDefault()
-        const path = decodeURIComponent(href.slice('notesproject-wiki:'.length))
-        if (notePaths.includes(path)) onOpenWikiLink(path)
+        const destination = decodeURIComponent(href.slice('notesproject-wiki:'.length))
+        const { path } = splitWikiDestination(destination)
+        if (notePaths.includes(path)) onOpenWikiLink(destination)
       }}
       dangerouslySetInnerHTML={{ __html: html }}
     />
@@ -140,10 +141,9 @@ function renderInlinePreviewSyntax(line: string, notePaths: string[], snippets: 
     (_match, rawLabel: string, rawAnchor: string | undefined, rawAlias: string | undefined) => {
       const label = rawLabel.trim()
       const target = resolveWikiPath(label, notePaths)
-      const text = escapeHtml(rawAlias?.trim() || label)
-      const anchor = rawAnchor ? escapeHtml(rawAnchor) : ''
-      if (!target) return htmlPlaceholder(`<span class="preview-wiki missing">${text}${anchor}</span>`, snippets)
-      return htmlPlaceholder(`<a class="preview-wiki" href="notesproject-wiki:${encodeURIComponent(target)}">${text}${anchor}</a>`, snippets)
+      const text = wikiDisplayText(label, rawAnchor, rawAlias)
+      if (!target) return htmlPlaceholder(`<span class="preview-wiki missing">${text}</span>`, snippets)
+      return htmlPlaceholder(`<a class="preview-wiki" href="notesproject-wiki:${encodeURIComponent(formatWikiDestination(target, rawAnchor))}">${text}</a>`, snippets)
     }
   )
 
@@ -193,11 +193,32 @@ function wikiLabel(path: string): string {
 }
 
 function stripMarkdownExtension(path: string): string {
-  return path.replace(/\.md$/i, '')
+  return path.replace(/\.(md|markdown)$/i, '')
 }
 
 function normalizeWikiLabel(label: string): string {
   return stripMarkdownExtension(label).replace(/\\/g, '/').trim().toLowerCase()
+}
+
+function wikiDisplayText(label: string, rawAnchor: string | undefined, rawAlias: string | undefined): string {
+  if (rawAlias?.trim()) return escapeHtml(rawAlias.trim())
+  const heading = rawAnchor?.replace(/^#/, '').trim()
+  return escapeHtml(heading || label)
+}
+
+function formatWikiDestination(path: string, rawAnchor: string | undefined): string {
+  const heading = rawAnchor?.replace(/^#/, '').trim()
+  return heading ? `${path}#${heading}` : path
+}
+
+function splitWikiDestination(destination: string): { path: string; heading: string | null } {
+  const hashIndex = destination.indexOf('#')
+  if (hashIndex < 0) return { path: destination, heading: null }
+  const heading = destination.slice(hashIndex + 1).trim()
+  return {
+    path: destination.slice(0, hashIndex),
+    heading: heading || null
+  }
 }
 
 function basename(path: string): string {

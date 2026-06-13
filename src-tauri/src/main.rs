@@ -65,6 +65,12 @@ struct TypstOverlaySource {
     body: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PdfExportResult {
+    path: String,
+}
+
 #[derive(Clone)]
 struct VaultTypstResolver {
     root: PathBuf,
@@ -175,6 +181,18 @@ struct BacklinkMatch {
     line_number: usize,
     line_text: String,
     offset: usize,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CalendarEvent {
+    id: String,
+    date: String,
+    title: String,
+    #[serde(default)]
+    time: String,
+    #[serde(default)]
+    notes: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -385,6 +403,38 @@ fn list_tree(state: tauri::State<AppState>) -> Result<Vec<TreeEntry>, String> {
 }
 
 #[tauri::command]
+fn read_calendar_events(state: tauri::State<AppState>) -> Result<Vec<CalendarEvent>, String> {
+    let root = current_root(&state)?;
+    let path = calendar_events_path(&root);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let body = fs::read_to_string(&path)
+        .map_err(|err| format!("Could not read calendar events: {err}"))?;
+    if body.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    serde_json::from_str(&body).map_err(|err| format!("Could not parse calendar events: {err}"))
+}
+
+#[tauri::command]
+fn save_calendar_events(
+    state: tauri::State<AppState>,
+    events: Vec<CalendarEvent>,
+) -> Result<(), String> {
+    let root = current_root(&state)?;
+    let path = calendar_events_path(&root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Could not create calendar folder: {err}"))?;
+    }
+    let body = serde_json::to_string_pretty(&events)
+        .map_err(|err| format!("Could not serialize calendar events: {err}"))?;
+    fs::write(path, format!("{body}\n"))
+        .map_err(|err| format!("Could not save calendar events: {err}"))
+}
+
+#[tauri::command]
 fn read_note(state: tauri::State<AppState>, path: String) -> Result<NoteContent, String> {
     let root = current_root(&state)?;
     let abs = resolve_safe(&root, &path)?;
@@ -436,7 +486,8 @@ fn save_note_if_unchanged(
         return Err("Only Markdown and Typst files can be saved.".to_string());
     }
 
-    let current_body = fs::read_to_string(&abs).map_err(|err| format!("Could not read note: {err}"))?;
+    let current_body =
+        fs::read_to_string(&abs).map_err(|err| format!("Could not read note: {err}"))?;
     if current_body != expected_body {
         return Ok(SaveNoteResult::Conflict {
             current: read_note(state, path)?,
@@ -521,6 +572,35 @@ fn compile_typst_preview(
         content,
         updated_at: modified_ms(&metadata),
     })
+}
+
+#[tauri::command]
+fn export_pdf(
+    state: tauri::State<AppState>,
+    path: String,
+    body: String,
+) -> Result<PdfExportResult, String> {
+    let root = current_root(&state)?;
+    let normalized = normalize_relative_input(&path)?;
+    let source_abs = resolve_safe(&root, &normalized)?;
+    if !is_note_file(&source_abs) {
+        return Err("Only Markdown and Typst notes can be exported.".to_string());
+    }
+
+    let output_rel = pdf_export_path_for(&normalized)?;
+    let output_abs = resolve_safe(&root, &output_rel)?;
+    let parent = output_abs
+        .parent()
+        .ok_or_else(|| "Could not resolve PDF export folder.".to_string())?;
+    fs::create_dir_all(parent).map_err(|err| format!("Could not create PDF folder: {err}"))?;
+
+    if is_typst_file(&source_abs) {
+        export_typst_pdf(&state, &root, &normalized, &body, &output_abs)?;
+    } else {
+        export_markdown_pdf_with_pandoc(&root, &source_abs, &body, &output_abs)?;
+    }
+
+    Ok(PdfExportResult { path: output_rel })
 }
 
 #[tauri::command]
@@ -930,6 +1010,10 @@ fn typst_preview_root(root: &Path) -> PathBuf {
     root.join(".notesproject").join("typst-preview")
 }
 
+fn calendar_events_path(root: &Path) -> PathBuf {
+    root.join(".vault-calendar").join("events.json")
+}
+
 fn typst_preview_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let normalized = normalize_relative_input(rel)?;
     let mut path = typst_preview_root(root);
@@ -947,6 +1031,157 @@ fn typst_preview_source_path(source_dir: &Path, rel: &str) -> PathBuf {
         ".notesproject-typst-preview-{:016x}.typ",
         hasher.finish()
     ))
+}
+
+fn pdf_export_path_for(rel: &str) -> Result<String, String> {
+    let normalized = normalize_relative_input(rel)?;
+    let mut path = PathBuf::new();
+    for part in normalized.split('/') {
+        path.push(part);
+    }
+    path.set_extension("pdf");
+    Ok(path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+fn temp_export_source_path(source: &Path, extension: &str) -> PathBuf {
+    let parent = source.parent().unwrap_or_else(|| Path::new("."));
+    let stem = source
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("note");
+    let stamp = now_ms();
+    let mut counter = 0u32;
+    loop {
+        let candidate = parent.join(format!(".{stem}.export.{stamp}.{counter}.{extension}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+fn temp_export_output_path(output: &Path) -> PathBuf {
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let stem = output
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("export");
+    let stamp = now_ms();
+    let mut counter = 0u32;
+    loop {
+        let candidate = parent.join(format!(".{stem}.export.{stamp}.{counter}.tmp.pdf"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+fn export_markdown_pdf_with_pandoc(
+    root: &Path,
+    source: &Path,
+    body: &str,
+    output: &Path,
+) -> Result<(), String> {
+    ensure_command_available(
+        "pandoc",
+        "Pandoc is required to export Markdown notes to PDF.",
+    )?;
+    let temp_source = temp_export_source_path(source, "md");
+    let temp_output = temp_export_output_path(output);
+    let result = (|| -> Result<(), String> {
+        fs::write(&temp_source, body)
+            .map_err(|err| format!("Could not write temporary Markdown export source: {err}"))?;
+        let source_dir = source
+            .parent()
+            .ok_or_else(|| "Could not resolve note folder.".to_string())?;
+        let resource_path = env::join_paths([source_dir, root])
+            .map_err(|err| format!("Could not build Pandoc resource path: {err}"))?;
+        let mut command = Command::new("pandoc");
+        hide_command_window(&mut command);
+        let output_result = command
+            .current_dir(source_dir)
+            .arg(&temp_source)
+            .arg("--from")
+            .arg("markdown+tex_math_dollars+tex_math_single_backslash")
+            .arg("--pdf-engine=typst")
+            .arg("--resource-path")
+            .arg(&resource_path)
+            .arg("-o")
+            .arg(&temp_output)
+            .output()
+            .map_err(|err| format!("Could not run pandoc: {err}"))?;
+        if !output_result.status.success() {
+            return Err(format_command_failure("pandoc", &output_result));
+        }
+        replace_file(&temp_output, output)
+            .map_err(|err| format!("Could not replace PDF: {err}"))?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&temp_source);
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_output);
+    }
+    result
+}
+
+fn ensure_command_available(command: &str, context: &str) -> Result<(), String> {
+    let mut command_process = Command::new(command);
+    hide_command_window(&mut command_process);
+    let output = command_process
+        .arg("--version")
+        .output()
+        .map_err(|_| format!("{context} Install {command} and make sure it is on PATH."))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format_command_failure(command, &output))
+    }
+}
+
+fn hide_command_window(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+fn export_typst_pdf(
+    state: &tauri::State<AppState>,
+    root: &Path,
+    rel: &str,
+    body: &str,
+    output: &Path,
+) -> Result<(), String> {
+    let temp_output = temp_export_output_path(output);
+    let result = (|| -> Result<(), String> {
+        let pdf = compile_typst_pdf_embedded(state, root, rel, body)?;
+        fs::write(&temp_output, pdf).map_err(|err| format!("Could not write PDF: {err}"))?;
+        replace_file(&temp_output, output)
+            .map_err(|err| format!("Could not replace PDF: {err}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_output);
+    }
+    result
+}
+
+fn format_command_failure(command: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stderr.is_empty() {
+        format!("{command} failed: {stderr}")
+    } else if !stdout.is_empty() {
+        format!("{command} failed: {stdout}")
+    } else {
+        format!("{command} failed with status {}", output.status)
+    }
 }
 
 fn track_sidecar_path(root: &Path, rel: &str) -> Result<PathBuf, String> {
@@ -1260,6 +1495,50 @@ fn compile_typst_embedded(
     body: &str,
     format: TypstPreviewFormat,
 ) -> Result<String, String> {
+    with_embedded_typst_session(state, root, rel, body, |session| match format {
+        TypstPreviewFormat::Svg => {
+            let doc: PagedDocument = session
+                .engine
+                .compile(rel)
+                .output
+                .map_err(|err| format!("Typst compile failed. {err}"))?;
+            Ok(typst_svg::svg_merged(&doc, Abs::pt(12.0)))
+        }
+        TypstPreviewFormat::Html => {
+            let doc: typst_html::HtmlDocument = session
+                .engine
+                .compile(rel)
+                .output
+                .map_err(|err| format!("Typst HTML compile failed. {err}"))?;
+            typst_html::html(&doc).map_err(|err| format!("Typst HTML export failed. {err:?}"))
+        }
+    })
+}
+
+fn compile_typst_pdf_embedded(
+    state: &tauri::State<AppState>,
+    root: &Path,
+    rel: &str,
+    body: &str,
+) -> Result<Vec<u8>, String> {
+    with_embedded_typst_session(state, root, rel, body, |session| {
+        let doc: PagedDocument = session
+            .engine
+            .compile(rel)
+            .output
+            .map_err(|err| format!("Typst compile failed. {err}"))?;
+        typst_pdf::pdf(&doc, &typst_pdf::PdfOptions::default())
+            .map_err(|err| format!("Typst PDF export failed. {err:?}"))
+    })
+}
+
+fn with_embedded_typst_session<T>(
+    state: &tauri::State<AppState>,
+    root: &Path,
+    rel: &str,
+    body: &str,
+    f: impl FnOnce(&mut EmbeddedTypstSession) -> Result<T, String>,
+) -> Result<T, String> {
     let mut session = state
         .typst_embedded
         .lock()
@@ -1281,25 +1560,7 @@ fn compile_typst_embedded(
         rel: rel.to_string(),
         body: body.to_string(),
     });
-
-    match format {
-        TypstPreviewFormat::Svg => {
-            let doc: PagedDocument = session
-                .engine
-                .compile(rel)
-                .output
-                .map_err(|err| format!("Typst compile failed. {err}"))?;
-            Ok(typst_svg::svg_merged(&doc, Abs::pt(12.0)))
-        }
-        TypstPreviewFormat::Html => {
-            let doc: typst_html::HtmlDocument = session
-                .engine
-                .compile(rel)
-                .output
-                .map_err(|err| format!("Typst HTML compile failed. {err}"))?;
-            typst_html::html(&doc).map_err(|err| format!("Typst HTML export failed. {err:?}"))
-        }
-    }
+    f(session)
 }
 
 fn fallback_pdf_embed_svg(pdf: &[u8]) -> String {
@@ -1630,9 +1891,7 @@ fn strip_windows_extended_path_prefix(path: &str) -> String {
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
         return format!(r"\\{rest}");
     }
-    path.strip_prefix(r"\\?\")
-        .unwrap_or(path)
-        .to_string()
+    path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
 }
 
 #[cfg(windows)]
@@ -1996,10 +2255,13 @@ fn main() {
             checkpoint_inuse,
             refresh_git_info,
             list_tree,
+            read_calendar_events,
+            save_calendar_events,
             read_note,
             save_note,
             save_note_if_unchanged,
             compile_typst_preview,
+            export_pdf,
             read_track_state,
             save_track_state,
             delete_track_state,
