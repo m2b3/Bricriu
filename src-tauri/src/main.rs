@@ -133,6 +133,13 @@ struct NoteContent {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateNoteResult {
+    note: NoteContent,
+    created_folder: Option<String>,
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase", tag = "status")]
 enum SaveNoteResult {
     Saved { note: NoteContent },
@@ -379,6 +386,26 @@ fn checkpoint_inuse(state: tauri::State<AppState>, paths: Vec<String>) -> Result
 }
 
 #[tauri::command]
+fn checkpoint_vault(state: tauri::State<AppState>) -> Result<GitInfo, String> {
+    let root = current_root(&state)?;
+    if !is_git_repo(&root)? {
+        return Ok(not_repo_git_info());
+    }
+
+    run_git_checked(&root, &["add", "."], "Could not stage vault changes.")?;
+    if run_git_status(&root, &["diff", "--cached", "--quiet"])?.success {
+        return inspect_git_info(&root, "No checkpoint changes to commit.");
+    }
+
+    run_git_checked(
+        &root,
+        &["commit", "-m", "auto"],
+        "Could not create checkpoint commit. Check Git user.name/user.email.",
+    )?;
+    inspect_git_info(&root, "Checkpoint committed.")
+}
+
+#[tauri::command]
 fn refresh_git_info(state: tauri::State<AppState>) -> Result<GitInfo, String> {
     let root = current_root(&state)?;
     if !git_available(&root)? {
@@ -394,6 +421,29 @@ fn refresh_git_info(state: tauri::State<AppState>) -> Result<GitInfo, String> {
         return Ok(not_repo_git_info());
     }
     inspect_git_info(&root, "Git status refreshed.")
+}
+
+#[tauri::command]
+fn dirty_git_files(state: tauri::State<AppState>) -> Result<Vec<String>, String> {
+    let root = current_root(&state)?;
+    if !git_available(&root)? {
+        return Err("Git is not available on PATH.".to_string());
+    }
+    if !is_git_repo(&root)? {
+        return Ok(Vec::new());
+    }
+    let result = run_git_checked(
+        &root,
+        &["status", "--porcelain"],
+        "Could not inspect Git working tree.",
+    )?;
+    Ok(result
+        .stdout
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .map(git_porcelain_path_name)
+        .collect())
 }
 
 #[tauri::command]
@@ -685,19 +735,27 @@ fn create_note(
     state: tauri::State<AppState>,
     path: String,
     body: Option<String>,
-) -> Result<NoteContent, String> {
+) -> Result<CreateNoteResult, String> {
     let root = current_root(&state)?;
     let normalized = normalize_note_path(&path)?;
     let abs = resolve_safe(&root, &normalized)?;
     if abs.exists() {
         return Err("A note already exists at that path.".to_string());
     }
+    let created_folder = normalized
+        .rsplit_once('/')
+        .and_then(|(folder, _)| (!folder.is_empty()).then(|| folder.to_string()));
+    let mut parent_created = false;
     if let Some(parent) = abs.parent() {
+        parent_created = !parent.exists();
         fs::create_dir_all(parent).map_err(|err| format!("Could not create folder: {err}"))?;
     }
     fs::write(&abs, body.unwrap_or_default())
         .map_err(|err| format!("Could not create note: {err}"))?;
-    read_note(state, normalized)
+    Ok(CreateNoteResult {
+        note: read_note(state, normalized)?,
+        created_folder: parent_created.then_some(created_folder).flatten(),
+    })
 }
 
 #[tauri::command]
@@ -2131,6 +2189,15 @@ fn is_worktree_dirty(root: &Path) -> Result<bool, String> {
     Ok(!result.stdout.trim().is_empty())
 }
 
+fn git_porcelain_path_name(line: &str) -> String {
+    let path = line.get(3..).unwrap_or(line).trim();
+    path.rsplit_once(" -> ")
+        .map(|(_, next)| next)
+        .unwrap_or(path)
+        .trim_matches('"')
+        .to_string()
+}
+
 fn switch_or_create_inuse(root: &Path) -> Result<(), String> {
     if branch_exists(root, "inuse")? {
         run_git_checked(
@@ -2253,7 +2320,9 @@ fn main() {
             watch_vault,
             checkpoint_and_switch_inuse,
             checkpoint_inuse,
+            checkpoint_vault,
             refresh_git_info,
+            dirty_git_files,
             list_tree,
             read_calendar_events,
             save_calendar_events,

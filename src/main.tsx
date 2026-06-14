@@ -100,6 +100,11 @@ type NoteContent = {
   size: number
 }
 
+type CreateNoteResult = {
+  note: NoteContent
+  createdFolder?: string | null
+}
+
 type SaveNoteCommandResult =
   | { status: 'saved'; note: NoteContent }
   | { status: 'conflict'; current: NoteContent }
@@ -291,6 +296,9 @@ function App(): JSX.Element {
   const [focusedPane, setFocusedPane] = useState<EditorPane>('main')
   const [fileQuery, setFileQuery] = useState('')
   const [contentQuery, setContentQuery] = useState('')
+  const [newNoteOpen, setNewNoteOpen] = useState(false)
+  const [newNotePath, setNewNotePath] = useState('')
+  const [newNoteError, setNewNoteError] = useState<string | null>(null)
   const [activeSearchView, setActiveSearchView] = useState<SearchView>('file')
   const [contentUsesFileFilter, setContentUsesFileFilter] = useState(false)
   const [contentMatches, setContentMatches] = useState<ContentMatch[]>([])
@@ -305,6 +313,9 @@ function App(): JSX.Element {
   const [searching, setSearching] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [showToCommit, setShowToCommit] = useState(false)
+  const [toCommitFiles, setToCommitFiles] = useState<string[]>([])
+  const [loadingToCommit, setLoadingToCommit] = useState(false)
   const [touchedPaths, setTouchedPaths] = useState<Set<string>>(() => new Set())
   const [profile, setProfile] = useState<AppProfile>(DEFAULT_PROFILE)
   const [showPreview, setShowPreview] = useState(false)
@@ -321,10 +332,13 @@ function App(): JSX.Element {
   const appShellRef = useRef<HTMLElement | null>(null)
   const mainPaneSlotRef = useRef<HTMLDivElement | null>(null)
   const splitPaneSlotRef = useRef<HTMLDivElement | null>(null)
+  const newNoteInputRef = useRef<HTMLInputElement | null>(null)
   const tabsRef = useRef<OpenTab[]>([])
   const latestBodiesRef = useRef<Map<string, string>>(new Map())
   const activeIdRef = useRef<string | null>(null)
   const activePathRef = useRef<string | null>(null)
+  const activeIdHistoryRef = useRef<string[]>([])
+  const lastMainActiveIdRef = useRef<string | null>(null)
   const splitOpenRef = useRef(false)
   const splitPathRef = useRef<string | null>(null)
   const splitModeRef = useRef<EditorMode | null>(null)
@@ -412,6 +426,7 @@ function App(): JSX.Element {
   const activePath = activeTab?.path ?? null
   const dirty = !!activeTab && isTabDirty(activeTab)
   const activePrintBody = activeTab ? latestTabBody(activeTab) : ''
+  const gitHasDirtyFiles = vault?.git.status === 'dirtyOnInuse' || vault?.git.status === 'needsCheckpoint'
 
   useEffect(() => {
     if (activeTab) activeTabHintRef.current = { path: activeTab.path, mode: activeTab.mode }
@@ -421,8 +436,32 @@ function App(): JSX.Element {
   }, [activeId, activeTab, mainTab])
 
   useEffect(() => {
+    const previousId = lastMainActiveIdRef.current
+    if (previousId && previousId !== activeId) {
+      activeIdHistoryRef.current = [
+        previousId,
+        ...activeIdHistoryRef.current.filter((id) => id !== previousId)
+      ]
+    }
+    lastMainActiveIdRef.current = activeId
+
+    const liveIds = new Set(tabs.map((tab) => tab.id))
+    activeIdHistoryRef.current = activeIdHistoryRef.current.filter(
+      (id) => id !== activeId && liveIds.has(id)
+    )
+  }, [activeId, tabs])
+
+  useEffect(() => {
     if (focusedPane === 'split' && !splitOpen) setFocusedPane('main')
   }, [focusedPane, splitOpen])
+
+  useEffect(() => {
+    if (!newNoteOpen) return
+    window.requestAnimationFrame(() => {
+      newNoteInputRef.current?.focus()
+      newNoteInputRef.current?.select()
+    })
+  }, [newNoteOpen])
 
   useEffect(() => {
     splitOpenRef.current = splitOpen
@@ -496,7 +535,7 @@ function App(): JSX.Element {
     })
   }, [activeTab, workspaceMode])
 
-  const clearExportStatusLater = useCallback((kind: 'error' | 'notice', message: string) => {
+  const clearStatusLater = useCallback((kind: 'error' | 'notice', message: string) => {
     window.setTimeout(() => {
       if (kind === 'error') {
         setError((current) => (current === message ? null : current))
@@ -517,14 +556,14 @@ function App(): JSX.Element {
       })
       const message = `Exported PDF: ${result.path}`
       setNotice(message)
-      clearExportStatusLater('notice', message)
+      clearStatusLater('notice', message)
     } catch (err) {
       const message = String(err)
       setNotice(null)
       setError(message)
-      clearExportStatusLater('error', message)
+      clearStatusLater('error', message)
     }
-  }, [activeTab, clearExportStatusLater, latestTabBody, workspaceMode])
+  }, [activeTab, clearStatusLater, latestTabBody, workspaceMode])
 
   useEffect(() => {
     void invoke<AppProfile>('load_profile')
@@ -606,7 +645,15 @@ function App(): JSX.Element {
     setFocusedPane('main')
     setWorkspaceMode('notes')
     setCalendarEvents([])
+    setShowToCommit(false)
+    setToCommitFiles([])
   }, [vault])
+
+  useEffect(() => {
+    if (gitHasDirtyFiles) return
+    setShowToCommit(false)
+    setToCommitFiles([])
+  }, [gitHasDirtyFiles])
 
   const refreshTree = useCallback(async () => {
     const next = await invoke<TreeEntry[]>('list_tree')
@@ -1201,6 +1248,58 @@ function App(): JSX.Element {
     }
   }, [tabs, touchedPaths, vault])
 
+  const checkpointVaultNow = useCallback(async () => {
+    if (!vault?.git.isRepo) return
+    setBusy(true)
+    setError(null)
+    setNotice(null)
+    try {
+      for (const tab of uniqueSaveTargets(tabs)) {
+        if (isTabDirty(tab)) {
+          const result = await saveTabBodyWithConflictCheck(tab, latestTabBody(tab))
+          if (!result.saved) {
+            throw new Error(result.message)
+          }
+        }
+        if (tab.mode === 'track' && tab.trackState) {
+          await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
+        }
+      }
+      const git = await invoke<GitInfo>('checkpoint_vault')
+      setVault((prev) => (prev ? { ...prev, git } : prev))
+      setTouchedPaths(new Set())
+      await refreshTree()
+      const message = git.message || 'Checkpoint committed.'
+      setNotice(message)
+      clearStatusLater('notice', message)
+    } catch (err) {
+      const message = String(err)
+      setError(message)
+      clearStatusLater('error', message)
+    } finally {
+      setBusy(false)
+    }
+  }, [clearStatusLater, isTabDirty, latestTabBody, refreshTree, saveTabBodyWithConflictCheck, tabs, vault])
+
+  const toggleToCommitFiles = useCallback(async () => {
+    if (!gitHasDirtyFiles || loadingToCommit) return
+    if (showToCommit) {
+      setShowToCommit(false)
+      return
+    }
+    setLoadingToCommit(true)
+    setError(null)
+    try {
+      const files = await invoke<string[]>('dirty_git_files')
+      setToCommitFiles(files)
+      setShowToCommit(true)
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setLoadingToCommit(false)
+    }
+  }, [gitHasDirtyFiles, loadingToCommit, showToCommit])
+
   const finalizeBeforeClose = useCallback(async () => {
     const vault = vaultRef.current
     if (vault) {
@@ -1225,13 +1324,25 @@ function App(): JSX.Element {
     }
   }, [])
 
+  const openNewNoteDialog = useCallback(() => {
+    if (!vault) return
+    setNewNotePath(fileQuery ? `${fileQuery}.md` : 'untitled.md')
+    setNewNoteError(null)
+    setNewNoteOpen(true)
+  }, [fileQuery, vault])
+
   const createNoteAction = useCallback(async () => {
-    const path = window.prompt('New note path', fileQuery ? `${fileQuery}.md` : 'untitled.md')
-    if (!path) return
+    const path = newNotePath.trim()
+    if (!path) {
+      setNewNoteError('Enter a note path.')
+      return
+    }
     setBusy(true)
     setError(null)
+    setNewNoteError(null)
     try {
-      const note = await invoke<NoteContent>('create_note', { path, body: '' })
+      const result = await invoke<CreateNoteResult>('create_note', { path, body: '' })
+      const { note } = result
       setTabs((prev) => [
         ...prev.filter((tab) => tab.id !== tabId(note.path, 'markdown')),
         {
@@ -1249,28 +1360,20 @@ function App(): JSX.Element {
       setJumpOffset(0)
       rememberRecentPath(note.path)
       await refreshTree()
+      if (result.createdFolder) {
+        const message = `Created folder: ${result.createdFolder}`
+        setNotice(message)
+        clearStatusLater('notice', message)
+        setExpanded((prev) => new Set([...prev, ...folderAncestors(result.createdFolder ?? '')]))
+      }
+      setNewNoteOpen(false)
+      setNewNotePath('')
     } catch (err) {
-      setError(String(err))
+      setNewNoteError(String(err))
     } finally {
       setBusy(false)
     }
-  }, [fileQuery, refreshTree, rememberRecentPath, selectMainTab])
-
-  const createFolderAction = useCallback(async () => {
-    const path = window.prompt('New folder path', '')
-    if (!path) return
-    setBusy(true)
-    setError(null)
-    try {
-      await invoke('create_folder', { path })
-      await refreshTree()
-      setExpanded((prev) => new Set([...prev, path.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')]))
-    } catch (err) {
-      setError(String(err))
-    } finally {
-      setBusy(false)
-    }
-  }, [refreshTree])
+  }, [clearStatusLater, newNotePath, refreshTree, rememberRecentPath, selectMainTab])
 
   const renameNoteAction = useCallback(async (oldPath: string) => {
     const nextPath = window.prompt('Rename note path', oldPath)
@@ -1470,10 +1573,16 @@ function App(): JSX.Element {
       const index = prev.findIndex((tab) => tab.id === id)
       const next = prev.filter((tab) => tab.id !== id)
       if (activeId === id) {
-        const replacement = next[Math.min(index, next.length - 1)] ?? null
+        const liveNextIds = new Set(next.map((tab) => tab.id))
+        const recentId = activeIdHistoryRef.current.find((candidate) => liveNextIds.has(candidate)) ?? null
+        const replacement = next.find((tab) => tab.id === recentId) ?? next[Math.min(index, next.length - 1)] ?? null
         setActiveId(replacement?.id ?? null)
+        if (replacement?.id === splitId) setSplitId(null)
       }
       if (splitId === id) setSplitId(null)
+      activeIdHistoryRef.current = activeIdHistoryRef.current.filter(
+        (candidate) => candidate !== id && next.some((tab) => tab.id === candidate)
+      )
       return next
     })
   }, [activeId, isTabDirty, splitId, tabs])
@@ -1617,7 +1726,7 @@ function App(): JSX.Element {
         event.preventDefault()
         if (vault) {
           setWorkspaceMode('notes')
-          void createNoteAction()
+          openNewNoteDialog()
         }
         return
       }
@@ -1664,7 +1773,7 @@ function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTab, closeSplitPane, closeTab, createNoteAction, focusedPane, mainTab, printActiveDocument, saveActive, selectMainTab, splitOpen, tabs, vault])
+  }, [activeTab, closeSplitPane, closeTab, focusedPane, mainTab, openNewNoteDialog, printActiveDocument, saveActive, selectMainTab, splitOpen, tabs, vault])
 
   useEffect(() => {
     setSearchRevealedFolders(new Set())
@@ -1674,6 +1783,22 @@ function App(): JSX.Element {
     () => filterTree(tree, fileQuery, searchRevealedFolders, pinnedPaths),
     [fileQuery, pinnedPaths, searchRevealedFolders, tree]
   )
+
+  const newNoteSimilarPaths = useMemo(() => {
+    const needle = stripMarkdownExtension(basename(newNotePath.trim()))
+      .toLowerCase()
+      .trim()
+    if (needle.length < 2) return []
+    const exactKey = pathKey(newNotePath.trim())
+    return collectFilePaths(tree)
+      .filter((path) => isMarkdownPath(path) || isTypstPath(path))
+      .filter((path) => {
+        const name = stripMarkdownExtension(basename(path)).toLowerCase()
+        return pathKey(path) === exactKey || name.includes(needle) || needle.includes(name)
+      })
+      .slice(0, 6)
+  }, [newNotePath, tree])
+
   useEffect(() => {
     if (!fileQuery.trim()) return
     setExpanded((prev) => new Set([...prev, ...collectDirPaths(filteredTree)]))
@@ -1891,6 +2016,7 @@ function App(): JSX.Element {
   }, [editorSplitRatio])
 
   return (
+    <>
     <main
       ref={appShellRef}
       className="app-shell"
@@ -1905,7 +2031,25 @@ function App(): JSX.Element {
               <span>{vault?.root ?? 'No vault open'}</span>
             </div>
           </div>
-          {vault && <GitBadge git={vault.git} />}
+          {vault && (
+            <GitBadge
+              git={vault.git}
+              loadingToCommit={loadingToCommit}
+              showToCommit={showToCommit}
+              onToggleToCommit={() => void toggleToCommitFiles()}
+            />
+          )}
+          {showToCommit && (
+            <div className="to-commit-panel">
+              {loadingToCommit ? (
+                <span>Loading...</span>
+              ) : toCommitFiles.length > 0 ? (
+                toCommitFiles.map((file) => <code key={file}>{file}</code>)
+              ) : (
+                <span>No dirty files.</span>
+              )}
+            </div>
+          )}
           <form
             className="vault-open"
             onSubmit={(event) => {
@@ -1929,17 +2073,15 @@ function App(): JSX.Element {
           <div className="sidebar-actions">
             <button
               type="button"
-              className={workspaceMode === 'calendar' ? 'active' : ''}
-              onClick={() => setWorkspaceMode((mode) => (mode === 'calendar' ? 'notes' : 'calendar'))}
-              disabled={!vault}
+              className="sidebar-checkpoint-button"
+              onClick={() => void checkpointVaultNow()}
+              disabled={!vault?.git.isRepo || busy}
             >
-              Calendar
+              <span className="checkpoint-label-full">Checkpoint</span>
+              <span className="checkpoint-label-short">CP</span>
             </button>
-            <button type="button" onClick={() => void createNoteAction()} disabled={!vault || busy}>
+            <button type="button" onClick={openNewNoteDialog} disabled={!vault || busy}>
               New note
-            </button>
-            <button type="button" onClick={() => void createFolderAction()} disabled={!vault || busy}>
-              New folder
             </button>
           </div>
           <label>
@@ -2086,7 +2228,6 @@ function App(): JSX.Element {
             activeIsTypst={activeIsTypst}
             busy={busy}
             canvasDocumentDisplayMode={canvasDocumentDisplayMode}
-            canvasMarkdownDisplayMode={canvasMarkdownDisplayMode}
             checkpointDisabled={!vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
             profile={profile}
             recentClosedPaths={recentClosedPaths}
@@ -2100,7 +2241,6 @@ function App(): JSX.Element {
             }}
             onOpenRecent={(path) => void openNote(path)}
             onSetCanvasDocumentDisplay={updateCanvasDocumentDisplayMode}
-            onSetCanvasMarkdownDisplay={updateCanvasMarkdownDisplayMode}
             onSetTypstPreviewFormat={setTypstPreviewFormat}
             onToggleBacklinks={() => setShowBacklinks((current) => !current)}
             onToggleHistory={(persistRecentFiles) => updateProfile({ ...profile, persistRecentFiles })}
@@ -2120,6 +2260,15 @@ function App(): JSX.Element {
             {workspaceMode === 'notes' && activeTab?.externalStatus === 'deleted' && <span className="external-pill danger">Deleted on disk</span>}
           </div>
           <div className="editor-actions">
+            <label className={canvasMarkdownDisplayMode === 'raw' ? 'raw-toggle active' : 'raw-toggle'}>
+              <input
+                type="checkbox"
+                checked={canvasMarkdownDisplayMode === 'raw'}
+                onChange={(event) => updateCanvasMarkdownDisplayMode(event.target.checked ? 'raw' : 'summary')}
+                disabled={workspaceMode === 'calendar' || activeTab?.mode !== 'markdown'}
+              />
+              <span>Raw</span>
+            </label>
             <button
               type="button"
               className={workspaceMode === 'calendar' ? 'secondary-button active' : 'secondary-button'}
@@ -2419,6 +2568,67 @@ function App(): JSX.Element {
         </div>
       )}
     </main>
+    {newNoteOpen && (
+      <div className="modal-backdrop" role="presentation" onMouseDown={() => setNewNoteOpen(false)}>
+        <form
+          className="new-note-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="new-note-title"
+          onMouseDown={(event) => event.stopPropagation()}
+          onSubmit={(event) => {
+            event.preventDefault()
+            void createNoteAction()
+          }}
+        >
+          <header>
+            <strong id="new-note-title">New note</strong>
+            <button type="button" className="icon-button" onClick={() => setNewNoteOpen(false)} aria-label="Close new note dialog">
+              x
+            </button>
+          </header>
+          <label>
+            <span>Path</span>
+            <input
+              ref={newNoteInputRef}
+              value={newNotePath}
+              onChange={(event) => {
+                setNewNotePath(event.target.value)
+                setNewNoteError(null)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  setNewNoteOpen(false)
+                }
+              }}
+              placeholder="untitled.md"
+              spellCheck={false}
+            />
+          </label>
+          {newNoteError && <div className="dialog-error">{newNoteError}</div>}
+          {newNoteSimilarPaths.length > 0 && (
+            <div className="similar-notes">
+              <span>Similar existing notes</span>
+              <ul>
+                {newNoteSimilarPaths.map((path) => (
+                  <li key={pathKey(path)}>{path}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="dialog-actions">
+            <button type="button" className="secondary-button" onClick={() => setNewNoteOpen(false)} disabled={busy}>
+              Cancel
+            </button>
+            <button type="submit" disabled={busy}>
+              Create
+            </button>
+          </div>
+        </form>
+      </div>
+    )}
+    </>
   )
 }
 
@@ -2509,7 +2719,6 @@ function AppMenuBar({
   activeIsTypst,
   busy,
   canvasDocumentDisplayMode,
-  canvasMarkdownDisplayMode,
   checkpointDisabled,
   profile,
   recentClosedPaths,
@@ -2521,7 +2730,6 @@ function AppMenuBar({
   onDeleteCurrent,
   onOpenRecent,
   onSetCanvasDocumentDisplay,
-  onSetCanvasMarkdownDisplay,
   onSetTypstPreviewFormat,
   onToggleBacklinks,
   onToggleHistory,
@@ -2535,7 +2743,6 @@ function AppMenuBar({
   activeIsTypst: boolean
   busy: boolean
   canvasDocumentDisplayMode: CanvasDocumentDisplayMode
-  canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode
   checkpointDisabled: boolean
   profile: AppProfile
   recentClosedPaths: string[]
@@ -2547,7 +2754,6 @@ function AppMenuBar({
   onDeleteCurrent: () => void
   onOpenRecent: (path: string) => void
   onSetCanvasDocumentDisplay: (mode: CanvasDocumentDisplayMode) => void
-  onSetCanvasMarkdownDisplay: (mode: CanvasMarkdownDisplayMode) => void
   onSetTypstPreviewFormat: React.Dispatch<React.SetStateAction<TypstPreviewFormat>>
   onToggleBacklinks: () => void
   onToggleHistory: (persistRecentFiles: boolean) => void
@@ -2697,17 +2903,6 @@ function AppMenuBar({
         }}>Options</summary>
         <div className="app-menu-popover">
           <label className="app-menu-field">
-            <span>Markdown canvas</span>
-            <select
-              value={canvasMarkdownDisplayMode}
-              onChange={(event) => onSetCanvasMarkdownDisplay(event.target.value as CanvasMarkdownDisplayMode)}
-              disabled={activeTab?.mode !== 'markdown'}
-            >
-              <option value="summary">Summary</option>
-              <option value="raw">Raw</option>
-            </select>
-          </label>
-          <label className="app-menu-field">
             <span>Canvas document</span>
             <select
               value={canvasDocumentDisplayMode}
@@ -2764,6 +2959,7 @@ function MarkdownEditor({
   const viewRef = useRef<EditorView | null>(null)
   const editableRef = useRef<Compartment | null>(null)
   const languageRef = useRef<Compartment | null>(null)
+  const markdownToolsRef = useRef<Compartment | null>(null)
   const pathRef = useRef<string | null>(null)
   const changeIdRef = useRef<string | null>(changeId)
   const statesRef = useRef<Map<string, EditorState>>(new Map())
@@ -2786,13 +2982,26 @@ function MarkdownEditor({
 
   useEffect(() => {
     notePathsRef.current = notePaths
-    viewRef.current?.dispatch({})
   }, [notePaths])
 
   useEffect(() => {
     canvasMarkdownDisplayModeRef.current = canvasMarkdownDisplayMode
-    viewRef.current?.dispatch({})
   }, [canvasMarkdownDisplayMode])
+
+  useEffect(() => {
+    const view = viewRef.current
+    const markdownTools = markdownToolsRef.current
+    if (!view || !markdownTools) return
+    view.dispatch({
+      effects: markdownTools.reconfigure(noteMarkdownTools(
+        notePathsRef,
+        canvasMarkdownDisplayModeRef,
+        searchHighlightRef,
+        onOpenWikiLinkRef,
+        onLoadWikiCompletionBodyRef
+      ))
+    })
+  }, [canvasMarkdownDisplayMode, notePaths])
 
   useEffect(() => {
     searchHighlightRef.current = searchHighlight
@@ -2813,8 +3022,10 @@ function MarkdownEditor({
 
     const editable = new Compartment()
     const language = new Compartment()
+    const markdownTools = new Compartment()
     editableRef.current = editable
     languageRef.current = language
+    markdownToolsRef.current = markdownTools
 
     const extensions: Extension[] = [
       language.of(markdown()),
@@ -2824,7 +3035,7 @@ function MarkdownEditor({
       lineNumbers(),
       highlightActiveLine(),
       syntaxHighlighting(notesHighlightStyle, { fallback: true }),
-      noteMarkdownTools(notePathsRef, canvasMarkdownDisplayModeRef, searchHighlightRef, onOpenWikiLinkRef, onLoadWikiCompletionBodyRef),
+      markdownTools.of(noteMarkdownTools(notePathsRef, canvasMarkdownDisplayModeRef, searchHighlightRef, onOpenWikiLinkRef, onLoadWikiCompletionBodyRef)),
       EditorView.lineWrapping,
       EditorView.theme({
         '&': {
@@ -2903,6 +3114,7 @@ function MarkdownEditor({
       viewRef.current = null
       editableRef.current = null
       languageRef.current = null
+      markdownToolsRef.current = null
       baseExtensionsRef.current = null
     }
   }, [])
@@ -3130,44 +3342,47 @@ function buildNoteDecorations(
   const doc = view.state.doc
   const fullText = doc.toString()
   const blockMathRanges: Array<{ from: number; to: number }> = []
+  const showRawMarkdown = canvasMarkdownDisplayMode === 'raw'
   const canvasBlockRanges = canvasMarkdownDisplayMode === 'summary'
     ? findCanvasBlockRanges(doc.toString(), view.visibleRanges)
     : []
 
-  for (const colorSpan of findColorSpans(fullText)) {
-    if (rangesOverlapAny(colorSpan.from, colorSpan.to, canvasBlockRanges)) continue
-    if (!view.visibleRanges.some((range) => colorSpan.from <= range.to && colorSpan.to >= range.from)) continue
-    ranges.push({ from: colorSpan.from, to: colorSpan.textFrom, decoration: Decoration.replace({}) })
-    ranges.push({
-      from: colorSpan.textFrom,
-      to: colorSpan.textTo,
-      decoration: Decoration.mark({
-        class: 'cm-color-span',
-        attributes: {
-          style: `color: ${colorSpan.color}`
-        }
+  if (!showRawMarkdown) {
+    for (const colorSpan of findColorSpans(fullText)) {
+      if (rangesOverlapAny(colorSpan.from, colorSpan.to, canvasBlockRanges)) continue
+      if (!view.visibleRanges.some((range) => colorSpan.from <= range.to && colorSpan.to >= range.from)) continue
+      ranges.push({ from: colorSpan.from, to: colorSpan.textFrom, decoration: Decoration.replace({}) })
+      ranges.push({
+        from: colorSpan.textFrom,
+        to: colorSpan.textTo,
+        decoration: Decoration.mark({
+          class: 'cm-color-span',
+          attributes: {
+            style: `color: ${colorSpan.color}`
+          }
+        })
       })
-    })
-    ranges.push({ from: colorSpan.textTo, to: colorSpan.to, decoration: Decoration.replace({}) })
-  }
+      ranges.push({ from: colorSpan.textTo, to: colorSpan.to, decoration: Decoration.replace({}) })
+    }
 
-  for (const emphasisSpan of findMarkdownEmphasisSpans(view)) {
-    if (rangesOverlapAny(emphasisSpan.from, emphasisSpan.to, canvasBlockRanges)) continue
-    if (!view.visibleRanges.some((range) => emphasisSpan.from <= range.to && emphasisSpan.to >= range.from)) continue
-    ranges.push({ from: emphasisSpan.from, to: emphasisSpan.textFrom, decoration: Decoration.replace({}) })
-    ranges.push({
-      from: emphasisSpan.textFrom,
-      to: emphasisSpan.textTo,
-      decoration: Decoration.mark({
-        class: emphasisSpan.kind === 'strong' ? 'cm-markdown-strong' : 'cm-markdown-emphasis'
+    for (const emphasisSpan of findMarkdownEmphasisSpans(view)) {
+      if (rangesOverlapAny(emphasisSpan.from, emphasisSpan.to, canvasBlockRanges)) continue
+      if (!view.visibleRanges.some((range) => emphasisSpan.from <= range.to && emphasisSpan.to >= range.from)) continue
+      ranges.push({ from: emphasisSpan.from, to: emphasisSpan.textFrom, decoration: Decoration.replace({}) })
+      ranges.push({
+        from: emphasisSpan.textFrom,
+        to: emphasisSpan.textTo,
+        decoration: Decoration.mark({
+          class: emphasisSpan.kind === 'strong' ? 'cm-markdown-strong' : 'cm-markdown-emphasis'
+        })
       })
-    })
-    ranges.push({ from: emphasisSpan.textTo, to: emphasisSpan.to, decoration: Decoration.replace({}) })
-  }
+      ranges.push({ from: emphasisSpan.textTo, to: emphasisSpan.to, decoration: Decoration.replace({}) })
+    }
 
-  for (const escape of findMarkdownEscapes(view)) {
-    if (rangesOverlapAny(escape.from, escape.to, canvasBlockRanges)) continue
-    ranges.push({ from: escape.from, to: escape.from + 1, decoration: Decoration.replace({}) })
+    for (const escape of findMarkdownEscapes(view)) {
+      if (rangesOverlapAny(escape.from, escape.to, canvasBlockRanges)) continue
+      ranges.push({ from: escape.from, to: escape.from + 1, decoration: Decoration.replace({}) })
+    }
   }
 
   for (const { from, to } of view.visibleRanges) {
@@ -3213,15 +3428,17 @@ function buildNoteDecorations(
         const linkEnd = end - 2
         const displayRange = wikiLinkDisplayRange(line.from + (match.index ?? 0), match)
         const target = resolveWikiPath(label, notePaths)
-        ranges.push({ from: start, to: linkStart, decoration: Decoration.replace({}) })
-        ranges.push({ from: linkEnd, to: end, decoration: Decoration.replace({}) })
-        if (displayRange.from > linkStart) {
-          ranges.push({ from: linkStart, to: displayRange.from, decoration: Decoration.replace({}) })
+        if (!showRawMarkdown) {
+          ranges.push({ from: start, to: linkStart, decoration: Decoration.replace({}) })
+          ranges.push({ from: linkEnd, to: end, decoration: Decoration.replace({}) })
+          if (displayRange.from > linkStart) {
+            ranges.push({ from: linkStart, to: displayRange.from, decoration: Decoration.replace({}) })
+          }
+          if (displayRange.to < linkEnd) {
+            ranges.push({ from: displayRange.to, to: linkEnd, decoration: Decoration.replace({}) })
+          }
         }
-        if (displayRange.to < linkEnd) {
-          ranges.push({ from: displayRange.to, to: linkEnd, decoration: Decoration.replace({}) })
-        }
-        ranges.push({ from: displayRange.from, to: displayRange.to, decoration: Decoration.mark({
+        ranges.push({ from: showRawMarkdown ? start : displayRange.from, to: showRawMarkdown ? end : displayRange.to, decoration: Decoration.mark({
           class: target ? 'cm-wiki-link' : 'cm-wiki-link cm-wiki-missing',
           attributes: {
             title: target
@@ -3796,11 +4013,22 @@ function isSafeEditorColor(color: string): boolean {
   return /^(#[0-9a-f]{3,8}|[a-z]+|rgba?\([^)]+\)|hsla?\([^)]+\))$/i.test(color)
 }
 
-function GitBadge({ git }: { git: GitInfo }): JSX.Element {
+function GitBadge({
+  git,
+  loadingToCommit,
+  showToCommit,
+  onToggleToCommit
+}: {
+  git: GitInfo
+  loadingToCommit: boolean
+  showToCommit: boolean
+  onToggleToCommit: () => void
+}): JSX.Element {
   if (!git.isRepo) {
     return <div className="git-badge muted">{git.message}</div>
   }
   const branch = git.currentBranch ?? 'detached'
+  const hasDirtyFiles = git.status === 'dirtyOnInuse' || git.status === 'needsCheckpoint'
   const className =
     git.status === 'needsCheckpoint' || git.status === 'gitUnavailable'
       ? 'git-badge warn'
@@ -3813,6 +4041,17 @@ function GitBadge({ git }: { git: GitInfo }): JSX.Element {
       <strong>{branch}</strong>
       {git.status === 'dirtyOnInuse' && <em>dirty</em>}
       {git.status === 'needsCheckpoint' && <em>needs checkpoint</em>}
+      {hasDirtyFiles && (
+        <button
+          type="button"
+          className={showToCommit ? 'to-commit-button active' : 'to-commit-button'}
+          onClick={onToggleToCommit}
+          disabled={loadingToCommit}
+          aria-pressed={showToCommit}
+        >
+          ToCommit
+        </button>
+      )}
     </div>
   )
 }
@@ -4545,6 +4784,11 @@ function collectDirPaths(entries: TreeEntry[]): string[] {
 function basename(path: string): string {
   const normalized = path.replace(/\\/g, '/')
   return normalized.split('/').filter(Boolean).pop() ?? path
+}
+
+function folderAncestors(path: string): string[] {
+  const parts = path.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)
+  return parts.map((_, index) => parts.slice(0, index + 1).join('/'))
 }
 
 function isMarkdownPath(path: string): boolean {
