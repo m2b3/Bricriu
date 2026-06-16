@@ -190,6 +190,13 @@ struct BacklinkMatch {
     offset: usize,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DirtyGitFile {
+    path: String,
+    status: String,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CalendarEvent {
@@ -424,7 +431,7 @@ fn refresh_git_info(state: tauri::State<AppState>) -> Result<GitInfo, String> {
 }
 
 #[tauri::command]
-fn dirty_git_files(state: tauri::State<AppState>) -> Result<Vec<String>, String> {
+fn dirty_git_files(state: tauri::State<AppState>) -> Result<Vec<DirtyGitFile>, String> {
     let root = current_root(&state)?;
     if !git_available(&root)? {
         return Err("Git is not available on PATH.".to_string());
@@ -442,7 +449,7 @@ fn dirty_git_files(state: tauri::State<AppState>) -> Result<Vec<String>, String>
         .lines()
         .map(str::trim_end)
         .filter(|line| !line.trim().is_empty())
-        .map(git_porcelain_path_name)
+        .map(parse_dirty_git_file)
         .collect())
 }
 
@@ -2189,13 +2196,27 @@ fn is_worktree_dirty(root: &Path) -> Result<bool, String> {
     Ok(!result.stdout.trim().is_empty())
 }
 
-fn git_porcelain_path_name(line: &str) -> String {
+fn parse_dirty_git_file(line: &str) -> DirtyGitFile {
+    let raw_status = line.get(..2).unwrap_or(line).trim();
+    let status = if raw_status.contains('D') {
+        "deleted"
+    } else if raw_status.contains('A') || raw_status.contains('?') {
+        "added"
+    } else if raw_status.contains('R') {
+        "renamed"
+    } else {
+        "modified"
+    };
     let path = line.get(3..).unwrap_or(line).trim();
-    path.rsplit_once(" -> ")
-        .map(|(_, next)| next)
-        .unwrap_or(path)
-        .trim_matches('"')
-        .to_string()
+    DirtyGitFile {
+        path: path
+            .rsplit_once(" -> ")
+            .map(|(_, next)| next)
+            .unwrap_or(path)
+            .trim_matches('"')
+            .to_string(),
+        status: status.to_string(),
+    }
 }
 
 fn switch_or_create_inuse(root: &Path) -> Result<(), String> {

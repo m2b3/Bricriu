@@ -135,6 +135,11 @@ type BacklinkMatch = {
   offset: number
 }
 
+type DirtyGitFile = {
+  path: string
+  status: 'added' | 'modified' | 'deleted' | 'renamed'
+}
+
 type SearchHighlight = {
   path: string
   query: string
@@ -314,7 +319,7 @@ function App(): JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [showToCommit, setShowToCommit] = useState(false)
-  const [toCommitFiles, setToCommitFiles] = useState<string[]>([])
+  const [toCommitFiles, setToCommitFiles] = useState<DirtyGitFile[]>([])
   const [loadingToCommit, setLoadingToCommit] = useState(false)
   const [touchedPaths, setTouchedPaths] = useState<Set<string>>(() => new Set())
   const [profile, setProfile] = useState<AppProfile>(DEFAULT_PROFILE)
@@ -1290,7 +1295,7 @@ function App(): JSX.Element {
     setLoadingToCommit(true)
     setError(null)
     try {
-      const files = await invoke<string[]>('dirty_git_files')
+      const files = await invoke<DirtyGitFile[]>('dirty_git_files')
       setToCommitFiles(files)
       setShowToCommit(true)
     } catch (err) {
@@ -2044,7 +2049,11 @@ function App(): JSX.Element {
               {loadingToCommit ? (
                 <span>Loading...</span>
               ) : toCommitFiles.length > 0 ? (
-                toCommitFiles.map((file) => <code key={file}>{file}</code>)
+                toCommitFiles.map((file) => (
+                  <code key={`${file.status}:${file.path}`}>
+                    {file.path}{file.status === 'deleted' ? ' (deleted)' : ''}
+                  </code>
+                ))
               ) : (
                 <span>No dirty files.</span>
               )}
@@ -2955,7 +2964,17 @@ function MarkdownEditor({
   onOpenWikiLink: (path: string) => void
   onLoadWikiCompletionBody: (path: string) => Promise<string | null>
 }): JSX.Element {
+  type ColorMenuState = {
+    x: number
+    y: number
+    colorOpen: boolean
+    colorValue: string
+    message: string | null
+    selectionRanges: Array<{ from: number; to: number }>
+  }
+
   const hostRef = useRef<HTMLDivElement | null>(null)
+  const colorInputRef = useRef<HTMLInputElement | null>(null)
   const viewRef = useRef<EditorView | null>(null)
   const editableRef = useRef<Compartment | null>(null)
   const languageRef = useRef<Compartment | null>(null)
@@ -2971,6 +2990,7 @@ function MarkdownEditor({
   const searchHighlightRef = useRef<SearchHighlight | null>(searchHighlight)
   const onOpenWikiLinkRef = useRef(onOpenWikiLink)
   const onLoadWikiCompletionBodyRef = useRef(onLoadWikiCompletionBody)
+  const [colorMenu, setColorMenu] = useState<ColorMenuState | null>(null)
 
   useEffect(() => {
     onChangeRef.current = onChange
@@ -3015,6 +3035,80 @@ function MarkdownEditor({
   useEffect(() => {
     onLoadWikiCompletionBodyRef.current = onLoadWikiCompletionBody
   }, [onLoadWikiCompletionBody])
+
+  useEffect(() => {
+    if (!colorMenu) return
+    const close = () => setColorMenu(null)
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close()
+    }
+    window.addEventListener('pointerdown', close)
+    window.addEventListener('keydown', closeOnEscape)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      window.removeEventListener('pointerdown', close)
+      window.removeEventListener('keydown', closeOnEscape)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [colorMenu])
+
+  useEffect(() => {
+    if (!colorMenu?.colorOpen) return
+    window.requestAnimationFrame(() => {
+      colorInputRef.current?.focus()
+      colorInputRef.current?.select()
+    })
+  }, [colorMenu?.colorOpen])
+
+  const openColorMenu = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!event.shiftKey) return
+    const view = viewRef.current
+    if (!view || disabled) return
+    event.preventDefault()
+    event.stopPropagation()
+    setColorMenu({
+      x: event.clientX,
+      y: event.clientY,
+      colorOpen: false,
+      colorValue: 'red',
+      message: null,
+      selectionRanges: view.state.selection.ranges
+        .filter((range) => !range.empty)
+        .map((range) => ({ from: range.from, to: range.to }))
+    })
+  }, [disabled])
+
+  const preserveSelectionForColorMenu = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!event.shiftKey || event.button !== 2) return
+    event.preventDefault()
+    event.stopPropagation()
+  }, [])
+
+  const applyColorValueToSelection = useCallback((rawColor: string) => {
+    const view = viewRef.current
+    if (!view || !colorMenu || disabled) return
+    const color = rawColor.trim()
+    if (colorMenu.selectionRanges.length === 0) {
+      setColorMenu((current) => current ? { ...current, message: 'No selection.' } : current)
+      return
+    }
+    if (!isSafeEditorColor(color)) {
+      setColorMenu((current) => current ? { ...current, message: 'Wrong color name.' } : current)
+      return
+    }
+    const changes = buildApplyColorChanges(view.state.doc.toString(), colorMenu.selectionRanges, color)
+    if (changes === 'crosses-color-markup') {
+      setColorMenu((current) => current ? { ...current, message: 'Selection crosses color markup.' } : current)
+      return
+    }
+    view.dispatch({ changes })
+    view.focus()
+    setColorMenu((current) => current ? { ...current, message: `Applied ${color}.` } : current)
+  }, [colorMenu, disabled])
+
+  const applyColorToSelection = useCallback(() => {
+    applyColorValueToSelection(colorMenu?.colorValue ?? '')
+  }, [applyColorValueToSelection, colorMenu?.colorValue])
 
   useEffect(() => {
     const host = hostRef.current
@@ -3227,8 +3321,64 @@ function MarkdownEditor({
   }, [disabled, selectAllRequest])
 
   return (
-    <div className={disabled ? 'editor-host is-empty' : 'editor-host'}>
+    <div
+      className={disabled ? 'editor-host is-empty' : 'editor-host'}
+      onMouseDownCapture={preserveSelectionForColorMenu}
+      onContextMenu={openColorMenu}
+    >
       <div ref={hostRef} className="cm-host" />
+      {colorMenu && (
+        <div
+          className="markdown-action-menu"
+          style={{ left: colorMenu.x, top: colorMenu.y }}
+          onContextMenu={(event) => event.preventDefault()}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          {!colorMenu.colorOpen ? (
+            <button
+              type="button"
+              onClick={() => setColorMenu((current) => current ? { ...current, colorOpen: true, message: null } : current)}
+            >
+              Color selection
+            </button>
+          ) : (
+            <form
+              className="markdown-color-form"
+              onSubmit={(event) => {
+                event.preventDefault()
+                applyColorToSelection()
+              }}
+            >
+              <label>
+                <span>Color</span>
+                <input
+                  ref={colorInputRef}
+                  value={colorMenu.colorValue}
+                  onChange={(event) => setColorMenu((current) => current ? { ...current, colorValue: event.target.value, message: null } : current)}
+                  placeholder="red, #b33, rgb(180, 30, 30)"
+                  spellCheck={false}
+                />
+              </label>
+              <div className="markdown-color-swatches">
+                {['red', 'orange', 'gold', 'green', 'blue', 'purple'].map((color) => (
+                  <button
+                    key={color}
+                    type="button"
+                    title={color}
+                    style={{ backgroundColor: color }}
+                    onClick={() => {
+                      setColorMenu((current) => current ? { ...current, colorValue: color, message: null } : current)
+                      applyColorValueToSelection(color)
+                    }}
+                  />
+                ))}
+              </div>
+              <button type="submit">Apply</button>
+              {colorMenu.message && <div className="markdown-color-message">{colorMenu.message}</div>}
+            </form>
+          )}
+        </div>
+      )}
       {disabled && (
         <div className="empty-editor">
           <strong>No file selected</strong>
@@ -4011,6 +4161,45 @@ function isSafeEditorColor(color: string): boolean {
     return CSS.supports('color', color)
   }
   return /^(#[0-9a-f]{3,8}|[a-z]+|rgba?\([^)]+\)|hsla?\([^)]+\))$/i.test(color)
+}
+
+function buildApplyColorChanges(
+  text: string,
+  ranges: Array<{ from: number; to: number }>,
+  color: string
+): Array<{ from: number; to: number; insert: string }> | 'crosses-color-markup' {
+  const spans = findColorSpans(text)
+  const changes: Array<{ from: number; to: number; insert: string }> = []
+  const recoloredSpanStarts = new Set<number>()
+
+  for (const range of ranges) {
+    const containingSpan = spans.find((span) => range.from >= span.textFrom && range.to <= span.textTo)
+    if (containingSpan) {
+      if (recoloredSpanStarts.has(containingSpan.from)) continue
+      const colorStart = containingSpan.from + '{color:'.length
+      const colorEnd = findNextUnescaped(text, '|', colorStart)
+      if (colorEnd < 0) return 'crosses-color-markup'
+      changes.push({ from: colorStart, to: colorEnd, insert: color })
+      recoloredSpanStarts.add(containingSpan.from)
+      continue
+    }
+
+    if (spans.some((span) => range.from < span.to && range.to > span.from)) {
+      return 'crosses-color-markup'
+    }
+
+    changes.push({
+      from: range.from,
+      to: range.to,
+      insert: `{color:${color}|${escapeColorSpanText(text.slice(range.from, range.to))}}`
+    })
+  }
+
+  return changes.sort((left, right) => left.from - right.from)
+}
+
+function escapeColorSpanText(text: string): string {
+  return text.replace(/([\\}])/g, '\\$1')
 }
 
 function GitBadge({

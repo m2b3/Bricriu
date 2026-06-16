@@ -1613,6 +1613,76 @@ input:focus {
   color: var(--danger);
 }
 
+.markdown-action-menu {
+  position: fixed;
+  z-index: 80;
+  min-width: 170px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 12px 28px rgba(42, 38, 31, 0.18);
+  padding: 6px;
+}
+
+.markdown-action-menu > button,
+.markdown-color-form > button {
+  width: 100%;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.markdown-action-menu > button:hover,
+.markdown-color-form > button:hover {
+  background: var(--panel-2);
+  color: var(--accent);
+}
+
+.markdown-color-form {
+  display: grid;
+  width: 240px;
+  gap: 8px;
+}
+
+.markdown-color-form label {
+  display: grid;
+  gap: 5px;
+}
+
+.markdown-color-form span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.markdown-color-form input {
+  font-size: 12px;
+  padding: 7px 8px;
+}
+
+.markdown-color-swatches {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 5px;
+}
+
+.markdown-color-swatches button {
+  height: 22px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 0;
+}
+
+.markdown-color-message {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .cm-color-span {
   font-weight: inherit;
 }
