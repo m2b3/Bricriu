@@ -805,6 +805,17 @@ input:focus {
   color: var(--danger);
 }
 
+.outside-pill {
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, #a8651a 35%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, #a8651a 8%, var(--panel));
+  color: #8a5315;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+}
+
 .error-banner {
   border-bottom: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line));
   background: color-mix(in srgb, var(--danger) 8%, var(--panel));
@@ -994,6 +1005,18 @@ input:focus {
   background: var(--accent-2);
 }
 
+.tab-outside {
+  flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, #a8651a 36%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, #a8651a 9%, var(--panel));
+  color: #8a5315;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
 .tab-close {
   display: inline-flex;
   width: 18px;
@@ -1023,6 +1046,10 @@ input:focus {
   display: flex;
   min-height: 0;
   flex: 1;
+}
+
+.workspace.is-hidden-workspace {
+  display: none;
 }
 
 .calendar-workspace {
@@ -1268,10 +1295,9 @@ input:focus {
   gap: 8px;
 }
 
+.calendar-form select,
 .calendar-form textarea {
   width: 100%;
-  min-height: 112px;
-  resize: vertical;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--panel);
@@ -1281,6 +1307,12 @@ input:focus {
   user-select: text;
 }
 
+.calendar-form textarea {
+  min-height: 112px;
+  resize: vertical;
+}
+
+.calendar-form select:focus,
 .calendar-form textarea:focus {
   border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
@@ -1624,8 +1656,7 @@ input:focus {
   padding: 6px;
 }
 
-.markdown-action-menu > button,
-.markdown-color-form > button {
+.markdown-action-menu > button {
   width: 100%;
   border: 0;
   border-radius: 5px;
@@ -1637,8 +1668,7 @@ input:focus {
   text-align: left;
 }
 
-.markdown-action-menu > button:hover,
-.markdown-color-form > button:hover {
+.markdown-action-menu > button:hover {
   background: var(--panel-2);
   color: var(--accent);
 }

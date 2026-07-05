@@ -130,6 +130,7 @@ struct NoteContent {
     body: String,
     updated_at: u64,
     size: u64,
+    out_of_vault: bool,
 }
 
 #[derive(Serialize)]
@@ -207,6 +208,14 @@ struct CalendarEvent {
     time: String,
     #[serde(default)]
     notes: String,
+    #[serde(default = "default_calendar_recurrence")]
+    recurrence: String,
+    #[serde(default)]
+    recurrence_end_date: String,
+}
+
+fn default_calendar_recurrence() -> String {
+    "none".to_string()
 }
 
 #[derive(Clone, Serialize)]
@@ -494,7 +503,8 @@ fn save_calendar_events(
 #[tauri::command]
 fn read_note(state: tauri::State<AppState>, path: String) -> Result<NoteContent, String> {
     let root = current_root(&state)?;
-    let abs = resolve_safe(&root, &path)?;
+    let resolved = resolve_document_path(&root, &path)?;
+    let abs = resolved.abs;
     if !is_note_file(&abs) {
         return Err("Only Markdown and Typst files can be opened.".to_string());
     }
@@ -505,10 +515,11 @@ fn read_note(state: tauri::State<AppState>, path: String) -> Result<NoteContent,
     let body = fs::read_to_string(&abs).map_err(|err| format!("Could not read note: {err}"))?;
     let metadata = fs::metadata(&abs).map_err(|err| format!("Could not read metadata: {err}"))?;
     Ok(NoteContent {
-        path: to_posix_relative(&root, &abs)?,
+        path: document_display_path(&root, &abs, resolved.out_of_vault)?,
         body,
         updated_at: modified_ms(&metadata),
         size: metadata.len(),
+        out_of_vault: resolved.out_of_vault,
     })
 }
 
@@ -519,7 +530,8 @@ fn save_note(
     body: String,
 ) -> Result<NoteContent, String> {
     let root = current_root(&state)?;
-    let abs = resolve_safe(&root, &path)?;
+    let resolved = resolve_document_path_for_write(&root, &path)?;
+    let abs = resolved.abs;
     if !is_note_file(&abs) {
         return Err("Only Markdown and Typst files can be saved.".to_string());
     }
@@ -538,7 +550,8 @@ fn save_note_if_unchanged(
     expected_body: String,
 ) -> Result<SaveNoteResult, String> {
     let root = current_root(&state)?;
-    let abs = resolve_safe(&root, &path)?;
+    let resolved = resolve_document_path_for_write(&root, &path)?;
+    let abs = resolved.abs;
     if !is_note_file(&abs) {
         return Err("Only Markdown and Typst files can be saved.".to_string());
     }
@@ -744,14 +757,12 @@ fn create_note(
     body: Option<String>,
 ) -> Result<CreateNoteResult, String> {
     let root = current_root(&state)?;
-    let normalized = normalize_note_path(&path)?;
-    let abs = resolve_safe(&root, &normalized)?;
+    let candidate = with_default_note_extension(document_path_candidate(&root, &path)?);
+    let resolved = resolve_document_candidate_for_write(&root, candidate)?;
+    let abs = resolved.abs;
     if abs.exists() {
         return Err("A note already exists at that path.".to_string());
     }
-    let created_folder = normalized
-        .rsplit_once('/')
-        .and_then(|(folder, _)| (!folder.is_empty()).then(|| folder.to_string()));
     let mut parent_created = false;
     if let Some(parent) = abs.parent() {
         parent_created = !parent.exists();
@@ -759,8 +770,16 @@ fn create_note(
     }
     fs::write(&abs, body.unwrap_or_default())
         .map_err(|err| format!("Could not create note: {err}"))?;
+    let display = document_display_path(&root, &abs, resolved.out_of_vault)?;
+    let created_folder = if !resolved.out_of_vault {
+        display
+            .rsplit_once('/')
+            .and_then(|(folder, _)| (!folder.is_empty()).then(|| folder.to_string()))
+    } else {
+        None
+    };
     Ok(CreateNoteResult {
-        note: read_note(state, normalized)?,
+        note: read_note(state, display)?,
         created_folder: parent_created.then_some(created_folder).flatten(),
     })
 }
@@ -991,6 +1010,91 @@ fn resolve_safe(root: &Path, rel: &str) -> Result<PathBuf, String> {
         }
     }
     Ok(root.join(clean))
+}
+
+struct ResolvedDocumentPath {
+    abs: PathBuf,
+    out_of_vault: bool,
+}
+
+fn resolve_document_path(root: &Path, path: &str) -> Result<ResolvedDocumentPath, String> {
+    let candidate = document_path_candidate(root, path)?;
+    let abs = candidate
+        .canonicalize()
+        .map_err(|err| format!("Could not resolve note path: {err}"))?;
+    Ok(ResolvedDocumentPath {
+        out_of_vault: !path_is_inside(&abs, root),
+        abs,
+    })
+}
+
+fn resolve_document_path_for_write(root: &Path, path: &str) -> Result<ResolvedDocumentPath, String> {
+    let candidate = document_path_candidate(root, path)?;
+    resolve_document_candidate_for_write(root, candidate)
+}
+
+fn resolve_document_candidate_for_write(
+    root: &Path,
+    candidate: PathBuf,
+) -> Result<ResolvedDocumentPath, String> {
+    if candidate.exists() {
+        let abs = candidate
+            .canonicalize()
+            .map_err(|err| format!("Could not resolve note path: {err}"))?;
+        return Ok(ResolvedDocumentPath {
+            out_of_vault: !path_is_inside(&abs, root),
+            abs,
+        });
+    }
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| "Could not resolve note folder.".to_string())?;
+    let parent = parent
+        .canonicalize()
+        .map_err(|err| format!("Could not resolve note folder: {err}"))?;
+    let file_name = candidate
+        .file_name()
+        .ok_or_else(|| "Note path must include a file name.".to_string())?;
+    let abs = parent.join(file_name);
+    Ok(ResolvedDocumentPath {
+        out_of_vault: !path_is_inside(&abs, root),
+        abs,
+    })
+}
+
+fn document_path_candidate(root: &Path, path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Path is required.".to_string());
+    }
+    let raw = PathBuf::from(trimmed);
+    if raw.is_absolute() {
+        Ok(raw)
+    } else {
+        Ok(root.join(raw))
+    }
+}
+
+fn with_default_note_extension(path: PathBuf) -> PathBuf {
+    let lower = path.to_string_lossy().to_lowercase();
+    if lower.ends_with(".md") || lower.ends_with(".markdown") || lower.ends_with(".typ") {
+        return path;
+    }
+    let mut path = path;
+    path.set_extension("md");
+    path
+}
+
+fn document_display_path(root: &Path, abs: &Path, out_of_vault: bool) -> Result<String, String> {
+    if out_of_vault {
+        Ok(display_path(abs))
+    } else {
+        to_posix_relative(root, abs)
+    }
+}
+
+fn path_is_inside(path: &Path, root: &Path) -> bool {
+    path.starts_with(root)
 }
 
 fn normalize_note_path(path: &str) -> Result<String, String> {

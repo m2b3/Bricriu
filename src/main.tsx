@@ -6,13 +6,14 @@ import { availableMonitors, getCurrentWindow, PhysicalPosition, PhysicalSize } f
 import {
   Annotation,
   Compartment,
+  Prec,
   RangeSetBuilder,
   EditorState,
   EditorSelection,
   StateField,
   type Extension
 } from '@codemirror/state'
-import { autocompletion, startCompletion, type CompletionContext } from '@codemirror/autocomplete'
+import { acceptCompletion, autocompletion, startCompletion, type CompletionContext } from '@codemirror/autocomplete'
 import {
   Decoration,
   type DecorationSet,
@@ -98,6 +99,7 @@ type NoteContent = {
   body: string
   updatedAt: number
   size: number
+  outOfVault: boolean
 }
 
 type CreateNoteResult = {
@@ -172,6 +174,7 @@ type OpenTab = {
   size: number
   trackState?: TrackState
   externalStatus?: 'changed' | 'deleted'
+  outOfVault?: boolean
 }
 
 type SaveConflictResult = {
@@ -430,6 +433,7 @@ function App(): JSX.Element {
   const activeTab = focusedPane === 'split' ? splitTab : mainTab
   const activePath = activeTab?.path ?? null
   const dirty = !!activeTab && isTabDirty(activeTab)
+  const activeOutOfVault = activeTab?.outOfVault === true
   const activePrintBody = activeTab ? latestTabBody(activeTab) : ''
   const gitHasDirtyFiles = vault?.git.status === 'dirtyOnInuse' || vault?.git.status === 'needsCheckpoint'
 
@@ -551,7 +555,7 @@ function App(): JSX.Element {
   }, [])
 
   const exportPreviewPdf = useCallback(async () => {
-    if (!activeTab || workspaceMode !== 'notes') return
+    if (!activeTab || activeTab.outOfVault || workspaceMode !== 'notes') return
     setError(null)
     setNotice(null)
     try {
@@ -709,21 +713,23 @@ function App(): JSX.Element {
     for (const storedTab of storedTabs) {
       try {
         const note = await invoke<NoteContent>('read_note', { path: storedTab.path })
-        const trackState = storedTab.mode === 'track'
+        const restoredMode = note.outOfVault ? 'markdown' : storedTab.mode
+        const trackState = restoredMode === 'track'
           ? await loadOrCreateTrackState(note.path, note.body)
           : undefined
-        const id = tabId(note.path, storedTab.mode)
+        const id = tabId(note.path, restoredMode)
         const existingIndex = restoredTabs.findIndex((tab) => tab.id === id)
         const restoredTab = {
           id,
           path: note.path,
-          mode: storedTab.mode,
+          mode: restoredMode,
           body: note.body,
           savedBody: note.body,
           bodyVersion: 0,
           updatedAt: note.updatedAt,
           size: note.size,
-          trackState
+          trackState,
+          outOfVault: note.outOfVault
         }
         if (existingIndex >= 0) restoredTabs[existingIndex] = restoredTab
         else restoredTabs.push(restoredTab)
@@ -767,9 +773,9 @@ function App(): JSX.Element {
           if (!samePath(tab.path, path)) return tab
           const nextId = tabId(note.path, tab.mode)
           if (tab.savedBody === note.body) {
-            return { ...tab, path: note.path, id: nextId, updatedAt: note.updatedAt, size: note.size, externalStatus: undefined }
+            return { ...tab, path: note.path, id: nextId, updatedAt: note.updatedAt, size: note.size, externalStatus: undefined, outOfVault: note.outOfVault }
           }
-          return { ...tab, path: note.path, id: nextId, externalStatus: 'changed' }
+          return { ...tab, path: note.path, id: nextId, externalStatus: 'changed', outOfVault: note.outOfVault }
         })
       )
       if (activeTabForPath) setActiveId(tabId(note.path, activeTabForPath.mode))
@@ -926,7 +932,8 @@ function App(): JSX.Element {
           bodyVersion: rawSource.bodyVersion,
           updatedAt: rawSource.updatedAt,
           size: rawSource.size,
-          externalStatus: rawSource.externalStatus
+          externalStatus: rawSource.externalStatus,
+          outOfVault: rawSource.outOfVault
         }
       ])
       selectMainTab(id)
@@ -954,7 +961,8 @@ function App(): JSX.Element {
           savedBody: note.body,
           bodyVersion: 0,
           updatedAt: note.updatedAt,
-          size: note.size
+          size: note.size,
+          outOfVault: note.outOfVault
         }
       ])
       selectMainTab(id)
@@ -969,6 +977,10 @@ function App(): JSX.Element {
 
   const openTrackNote = useCallback(async (path: string) => {
     setWorkspaceMode('notes')
+    if (tabs.some((tab) => samePath(tab.path, path) && tab.outOfVault)) {
+      setError('Track Changes is disabled for files outside the vault.')
+      return
+    }
     const existing = tabs.find((tab) => tab.mode === 'track' && samePath(tab.path, path))
     if (existing) {
       selectMainTab(existing.id)
@@ -999,6 +1011,10 @@ function App(): JSX.Element {
     setError(null)
     try {
       const note = await invoke<NoteContent>('read_note', { path })
+      if (note.outOfVault) {
+        setError('Track Changes is disabled for files outside the vault.')
+        return
+      }
       const trackState = await loadOrCreateTrackState(note.path, note.body)
       const id = tabId(note.path, 'track')
       setTabs((prev) => [
@@ -1012,7 +1028,8 @@ function App(): JSX.Element {
           bodyVersion: 0,
           updatedAt: note.updatedAt,
           size: note.size,
-          trackState
+          trackState,
+          outOfVault: note.outOfVault
         }
       ])
       selectMainTab(id)
@@ -1026,6 +1043,10 @@ function App(): JSX.Element {
 
   const openCanvasNote = useCallback(async (path: string) => {
     setWorkspaceMode('notes')
+    if (tabs.some((tab) => samePath(tab.path, path) && tab.outOfVault)) {
+      setError('Canvas is disabled for files outside the vault.')
+      return
+    }
     const existing = tabs.find((tab) => tab.mode === 'canvas' && samePath(tab.path, path))
     if (existing) {
       selectMainTab(existing.id)
@@ -1048,7 +1069,8 @@ function App(): JSX.Element {
           bodyVersion: rawSource.bodyVersion,
           updatedAt: rawSource.updatedAt,
           size: rawSource.size,
-          externalStatus: rawSource.externalStatus
+          externalStatus: rawSource.externalStatus,
+          outOfVault: rawSource.outOfVault
         }
       ])
       selectMainTab(id)
@@ -1059,6 +1081,10 @@ function App(): JSX.Element {
     setError(null)
     try {
       const note = await invoke<NoteContent>('read_note', { path })
+      if (note.outOfVault) {
+        setError('Canvas is disabled for files outside the vault.')
+        return
+      }
       const id = tabId(note.path, 'canvas')
       setTabs((prev) => [
         ...prev.filter((tab) => tab.id !== id),
@@ -1070,7 +1096,8 @@ function App(): JSX.Element {
           savedBody: note.body,
           bodyVersion: 0,
           updatedAt: note.updatedAt,
-          size: note.size
+          size: note.size,
+          outOfVault: note.outOfVault
         }
       ])
       selectMainTab(id)
@@ -1096,7 +1123,7 @@ function App(): JSX.Element {
     try {
       const result = await saveTabBodyWithConflictCheck(activeTab, requestedBody)
       if (!result.saved) {
-        if (activeTab.mode === 'track' && activeTab.trackState) {
+        if (!activeTab.outOfVault && activeTab.mode === 'track' && activeTab.trackState) {
           await invoke('save_track_state', { path: activeTab.path, trackState: activeTab.trackState })
         }
         const conflictPath = result.conflictPath
@@ -1108,7 +1135,7 @@ function App(): JSX.Element {
       }
       const saved = result.note
       const savedId = tabId(saved.path, activeTab.mode)
-      if (activeTab.mode === 'track' && activeTab.trackState) {
+      if (!activeTab.outOfVault && activeTab.mode === 'track' && activeTab.trackState) {
         await invoke('save_track_state', { path: activeTab.path, trackState: activeTab.trackState })
       }
       setTabs((prev) =>
@@ -1128,7 +1155,8 @@ function App(): JSX.Element {
                   savedBody: saved.body,
                   updatedAt: saved.updatedAt,
                   size: saved.size,
-                  externalStatus: undefined
+                  externalStatus: undefined,
+                  outOfVault: saved.outOfVault
                 }
               })()
             : tab.id === activeTab.id
@@ -1145,7 +1173,8 @@ function App(): JSX.Element {
                     savedBody: saved.body,
                     updatedAt: saved.updatedAt,
                     size: saved.size,
-                    externalStatus: undefined
+                    externalStatus: undefined,
+                    outOfVault: saved.outOfVault
                   }
                 })()
             : tab
@@ -1153,9 +1182,9 @@ function App(): JSX.Element {
       )
       setActiveId((current) => (current === activeTab.id ? savedId : current))
       setSplitId((current) => (current === activeTab.id ? savedId : current))
-      setTouchedPaths((prev) => new Set([...prev, saved.path]))
+      if (!saved.outOfVault) setTouchedPaths((prev) => new Set([...prev, saved.path]))
       rememberRecentPath(saved.path)
-      await refreshTree()
+      if (!saved.outOfVault) await refreshTree()
       if (activeTab.mode === 'markdown') setEditorFocusRequest((request) => request + 1)
     } catch (err) {
       setError(String(err))
@@ -1168,7 +1197,7 @@ function App(): JSX.Element {
     const requestedBody = latestTabBody(tab)
     const result = await saveTabBodyWithConflictCheck(tab, requestedBody)
     if (!result.saved) {
-      if (tab.mode === 'track' && tab.trackState) {
+      if (!tab.outOfVault && tab.mode === 'track' && tab.trackState) {
         await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
       }
       const conflictPath = result.conflictPath
@@ -1180,7 +1209,7 @@ function App(): JSX.Element {
     }
     const saved = result.note
     const savedId = tabId(saved.path, tab.mode)
-    if (tab.mode === 'track' && tab.trackState) {
+    if (!tab.outOfVault && tab.mode === 'track' && tab.trackState) {
       await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
     }
     setTabs((prev) =>
@@ -1200,7 +1229,8 @@ function App(): JSX.Element {
                 savedBody: saved.body,
                 updatedAt: saved.updatedAt,
                 size: saved.size,
-                externalStatus: undefined
+                externalStatus: undefined,
+                outOfVault: saved.outOfVault
               }
             })()
           : item.id === tab.id
@@ -1217,7 +1247,8 @@ function App(): JSX.Element {
                   savedBody: saved.body,
                   updatedAt: saved.updatedAt,
                   size: saved.size,
-                  externalStatus: undefined
+                  externalStatus: undefined,
+                  outOfVault: saved.outOfVault
                 }
               })()
           : item
@@ -1225,9 +1256,9 @@ function App(): JSX.Element {
     )
     setActiveId((current) => (current === tab.id ? savedId : current))
     setSplitId((current) => (current === tab.id ? savedId : current))
-    setTouchedPaths((prev) => new Set([...prev, saved.path]))
+    if (!saved.outOfVault) setTouchedPaths((prev) => new Set([...prev, saved.path]))
     rememberRecentPath(saved.path)
-    await refreshTree()
+    if (!saved.outOfVault) await refreshTree()
   }, [latestTabBody, refreshTree, rememberRecentPath])
 
   const checkpointNow = useCallback(async () => {
@@ -1239,7 +1270,7 @@ function App(): JSX.Element {
     setError(null)
     try {
       for (const tab of tabs) {
-        if (tab.mode === 'track' && tab.trackState && hasPath(touched, tab.path)) {
+        if (!tab.outOfVault && tab.mode === 'track' && tab.trackState && hasPath(touched, tab.path)) {
           await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
         }
       }
@@ -1266,7 +1297,7 @@ function App(): JSX.Element {
             throw new Error(result.message)
           }
         }
-        if (tab.mode === 'track' && tab.trackState) {
+        if (!tab.outOfVault && tab.mode === 'track' && tab.trackState) {
           await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
         }
       }
@@ -1358,14 +1389,15 @@ function App(): JSX.Element {
           savedBody: note.body,
           bodyVersion: 0,
           updatedAt: note.updatedAt,
-          size: note.size
+          size: note.size,
+          outOfVault: note.outOfVault
         }
       ])
       selectMainTab(tabId(note.path, 'markdown'))
       setJumpOffset(0)
       rememberRecentPath(note.path)
-      await refreshTree()
-      if (result.createdFolder) {
+      if (!note.outOfVault) await refreshTree()
+      if (!note.outOfVault && result.createdFolder) {
         const message = `Created folder: ${result.createdFolder}`
         setNotice(message)
         clearStatusLater('notice', message)
@@ -1414,7 +1446,8 @@ function App(): JSX.Element {
                 bodyVersion: tab.bodyVersion + 1,
                 updatedAt: note.updatedAt,
                 size: note.size,
-                trackState: tab.trackState ? { ...tab.trackState, path: note.path } : undefined
+                trackState: tab.trackState ? { ...tab.trackState, path: note.path } : undefined,
+                outOfVault: note.outOfVault
               }
             : tab
         )
@@ -1615,6 +1648,7 @@ function App(): JSX.Element {
   }, [profile.persistRecentFiles])
 
   const updateTrackState = useCallback((id: string, trackState: TrackState) => {
+    const sourceTab = tabsRef.current.find((tab) => tab.id === id)
     setTabs((prev) =>
       prev.map((tab) =>
         tab.id === id
@@ -1625,7 +1659,7 @@ function App(): JSX.Element {
           : tab
       )
     )
-    setTouchedPaths((prev) => new Set([...prev, trackState.path]))
+    if (!sourceTab?.outOfVault) setTouchedPaths((prev) => new Set([...prev, trackState.path]))
   }, [])
 
   const togglePinnedPath = useCallback((path: string) => {
@@ -1848,7 +1882,7 @@ function App(): JSX.Element {
   }, [contentQuery, contentUsesFileFilter, filteredFilePaths, vault])
 
   useEffect(() => {
-    if (!vault || !activePath || !isMarkdownPath(activePath) || !showBacklinks) {
+    if (!vault || !activePath || activeTab?.outOfVault || !isMarkdownPath(activePath) || !showBacklinks) {
       setBacklinks([])
       setLoadingBacklinks(false)
       return
@@ -1875,7 +1909,7 @@ function App(): JSX.Element {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [activePath, showBacklinks, tabs, tree, vault])
+  }, [activePath, activeTab?.outOfVault, showBacklinks, tabs, tree, vault])
 
   const totalFiles = useMemo(() => countFiles(tree), [tree])
   const allFilePaths = useMemo(() => collectFilePaths(tree), [tree])
@@ -1886,7 +1920,7 @@ function App(): JSX.Element {
   const activeIsTypst = !!activeTab && isTypstPath(activeTab.path)
 
   useEffect(() => {
-    if (!showPreview || !activeTab || !isTypstPath(activeTab.path)) return
+    if (!showPreview || !activeTab || activeTab.outOfVault || !isTypstPath(activeTab.path)) return
     const tab = activeTab
     let cancelled = false
     setTypstPreview((current) => ({
@@ -1929,6 +1963,7 @@ function App(): JSX.Element {
   }, [
     activeTab?.body,
     activeTab?.id,
+    activeTab?.outOfVault,
     activeTab?.path,
     profile.typstPreviewDebounceMs,
     showPreview,
@@ -2237,7 +2272,7 @@ function App(): JSX.Element {
             activeIsTypst={activeIsTypst}
             busy={busy}
             canvasDocumentDisplayMode={canvasDocumentDisplayMode}
-            checkpointDisabled={!vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
+            checkpointDisabled={activeOutOfVault || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
             profile={profile}
             recentClosedPaths={recentClosedPaths}
             showBacklinks={showBacklinks}
@@ -2263,6 +2298,7 @@ function App(): JSX.Element {
             <span className="note-path">
               {workspaceMode === 'calendar' ? 'Calendar' : activeTab?.path ?? 'Open a Markdown file'}
             </span>
+            {workspaceMode === 'notes' && activeTab?.outOfVault && <span className="outside-pill">Outside vault</span>}
             {workspaceMode === 'calendar' && calendarSaving && <span className="dirty-pill">Saving</span>}
             {workspaceMode === 'notes' && dirty && <span className="dirty-pill">Modified</span>}
             {workspaceMode === 'notes' && activeTab?.externalStatus === 'changed' && <span className="external-pill">Changed on disk</span>}
@@ -2293,7 +2329,7 @@ function App(): JSX.Element {
                 setWorkspaceMode('notes')
                 if (activeTab) void openCanvasNote(activeTab.path)
               }}
-              disabled={workspaceMode === 'calendar' || !activeTab || !isMarkdownPath(activeTab.path)}
+              disabled={workspaceMode === 'calendar' || !activeTab || activeTab.outOfVault || !isMarkdownPath(activeTab.path)}
             >
               Canvas
             </button>
@@ -2304,7 +2340,7 @@ function App(): JSX.Element {
                 setWorkspaceMode('notes')
                 if (activeTab) void openNote(activeTab.path)
               }}
-              disabled={workspaceMode === 'calendar' || !activeTab || !isMarkdownPath(activeTab.path)}
+              disabled={workspaceMode === 'calendar' || !activeTab || activeTab.outOfVault || !isMarkdownPath(activeTab.path)}
             >
               Text
             </button>
@@ -2337,7 +2373,7 @@ function App(): JSX.Element {
             <button
               type="button"
               onClick={() => void checkpointNow()}
-              disabled={!vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
+              disabled={activeOutOfVault || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
             >
               Checkpoint
             </button>
@@ -2362,7 +2398,7 @@ function App(): JSX.Element {
         {error && <div className="error-banner">{error}</div>}
         {notice && <div className="notice-banner">{notice}</div>}
 
-        {workspaceMode === 'calendar' ? (
+        {workspaceMode === 'calendar' && (
           <React.Suspense fallback={<EditorLoading label="Loading Calendar..." />}>
             <CalendarView
               events={calendarEvents}
@@ -2370,8 +2406,11 @@ function App(): JSX.Element {
               onSaveEvents={(events) => void saveCalendarEvents(events)}
             />
           </React.Suspense>
-        ) : (
-        <div className={`${splitOpen || ((showPreview || showBacklinks) && activeTab) ? 'workspace split' : 'workspace'}${splitOpen ? ' editor-split' : ''}`}>
+        )}
+        <div
+          className={`${splitOpen || ((showPreview || showBacklinks) && activeTab) ? 'workspace split' : 'workspace'}${splitOpen ? ' editor-split' : ''}${workspaceMode === 'calendar' ? ' is-hidden-workspace' : ''}`}
+          aria-hidden={workspaceMode === 'calendar' ? 'true' : undefined}
+        >
           <div
             ref={mainPaneSlotRef}
             className={focusedPane === 'main' ? 'editor-pane-slot active' : 'editor-pane-slot'}
@@ -2526,7 +2565,7 @@ function App(): JSX.Element {
               )}
             </div>
           )}
-          {showPreview && activeTab && (
+          {showPreview && activeTab && !(activeTab.outOfVault && activeIsTypst) && (
             activeIsTypst ? (
               <TypstPreviewPane preview={typstPreview?.tabId === activeTab.id ? typstPreview : null} />
             ) : (
@@ -2549,7 +2588,6 @@ function App(): JSX.Element {
             />
           )}
         </div>
-        )}
       </section>
       {activeTab && workspaceMode === 'notes' && (
         <div className="print-root" aria-hidden="true">
@@ -2773,6 +2811,7 @@ function AppMenuBar({
   pathKey: (path: string) => string
 }): JSX.Element {
   const activeIsMarkdown = !!activeTab && isMarkdownPath(activeTab.path)
+  const activeOutOfVault = activeTab?.outOfVault === true
   const [openMenu, setOpenMenu] = useState<'file' | 'view' | 'options' | null>(null)
   const menuRef = useRef<HTMLElement | null>(null)
 
@@ -2839,7 +2878,7 @@ function AppMenuBar({
               setOpenMenu(null)
               onDeleteCurrent()
             }}
-            disabled={!activeTab || busy}
+            disabled={!activeTab || activeOutOfVault || busy}
           >
             Delete current file
           </button>
@@ -2859,7 +2898,7 @@ function AppMenuBar({
               setOpenMenu(null)
               onPrintPreview()
             }}
-            disabled={!activeTab || busy}
+            disabled={!activeTab || (activeOutOfVault && activeIsTypst) || busy}
           >
             Print preview / PDF
           </button>
@@ -2869,7 +2908,7 @@ function AppMenuBar({
               setOpenMenu(null)
               onExportPreviewPdf()
             }}
-            disabled={!activeTab || busy}
+            disabled={!activeTab || activeOutOfVault || busy}
           >
             Export PDF
           </button>
@@ -2883,11 +2922,11 @@ function AppMenuBar({
         }}>View</summary>
         <div className="app-menu-popover">
           <label className="app-menu-check">
-            <input type="checkbox" checked={showPreview} onChange={onTogglePreview} disabled={!activeTab} />
+            <input type="checkbox" checked={showPreview} onChange={onTogglePreview} disabled={!activeTab || (activeOutOfVault && activeIsTypst)} />
             <span>Preview</span>
           </label>
           <label className="app-menu-check">
-            <input type="checkbox" checked={showBacklinks} onChange={onToggleBacklinks} disabled={!activeIsMarkdown} />
+            <input type="checkbox" checked={showBacklinks} onChange={onToggleBacklinks} disabled={!activeIsMarkdown || activeOutOfVault} />
             <span>Backlinks</span>
           </label>
           {activeIsTypst && showPreview && (
@@ -3176,6 +3215,7 @@ function MarkdownEditor({
         },
         { key: 'Ctrl-b', run: toggleMarkdownBold, preventDefault: true },
         { key: 'Ctrl-i', run: toggleMarkdownItalic, preventDefault: true },
+        { key: 'Ctrl-Enter', run: calculateMarkdownLine, preventDefault: true },
         { key: 'Ctrl-y', run: redo, preventDefault: true },
         { key: 'Ctrl-Shift-z', run: redo, preventDefault: true },
         indentWithTab,
@@ -3373,7 +3413,6 @@ function MarkdownEditor({
                   />
                 ))}
               </div>
-              <button type="submit">Apply</button>
               {colorMenu.message && <div className="markdown-color-message">{colorMenu.message}</div>}
             </form>
           )}
@@ -3428,6 +3467,9 @@ function noteMarkdownTools(
   return [
     canvasSummaryField,
     wikiLinkPlugin,
+    Prec.highest(keymap.of([
+      { key: 'Tab', run: acceptCompletion }
+    ])),
     autocompletion({
       override: [wikiCompletionSource(notePathsRef, onLoadWikiCompletionBodyRef)],
       activateOnTyping: true
@@ -3441,6 +3483,12 @@ function noteMarkdownTools(
       }
     }),
     EditorView.domEventHandlers({
+      copy(event, view) {
+        return copyExpandedConcealedMarkdownSelection(event, view, canvasMarkdownDisplayModeRef.current)
+      },
+      cut(event, view) {
+        return cutExpandedConcealedMarkdownSelection(event, view, canvasMarkdownDisplayModeRef.current)
+      },
       mousedown(event, view) {
         if (!(event.ctrlKey || event.metaKey)) return false
         const target = event.target as HTMLElement | null
@@ -3455,6 +3503,18 @@ function noteMarkdownTools(
       }
     }),
     keymap.of([
+      {
+        key: 'Backspace',
+        run(view) {
+          return deleteExpandedConcealedMarkdownSelection(view, canvasMarkdownDisplayModeRef.current)
+        }
+      },
+      {
+        key: 'Delete',
+        run(view) {
+          return deleteExpandedConcealedMarkdownSelection(view, canvasMarkdownDisplayModeRef.current)
+        }
+      },
       {
         key: 'Mod-Enter',
         run(view) {
@@ -3826,6 +3886,170 @@ function rangesOverlapAny(from: number, to: number, ranges: Array<{ from: number
   return ranges.some((range) => from < range.to && to > range.from)
 }
 
+type ConcealedMarkdownSpan = {
+  from: number
+  to: number
+  textFrom: number
+  textTo: number
+}
+
+function copyExpandedConcealedMarkdownSelection(
+  event: ClipboardEvent,
+  view: EditorView,
+  canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode
+): boolean {
+  const expandedRanges = expandedConcealedMarkdownSelectionRanges(view, canvasMarkdownDisplayMode)
+  if (!expandedRanges) return false
+  const clipboard = event.clipboardData
+  if (!clipboard) return false
+
+  clipboard.setData('text/plain', expandedRanges
+    .map((range) => view.state.doc.sliceString(range.from, range.to))
+    .join('\n'))
+  event.preventDefault()
+  return true
+}
+
+function cutExpandedConcealedMarkdownSelection(
+  event: ClipboardEvent,
+  view: EditorView,
+  canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode
+): boolean {
+  const expandedRanges = expandedConcealedMarkdownSelectionRanges(view, canvasMarkdownDisplayMode)
+  if (!expandedRanges) return false
+  const clipboard = event.clipboardData
+  if (!clipboard) return false
+
+  clipboard.setData('text/plain', expandedRanges
+    .map((range) => view.state.doc.sliceString(range.from, range.to))
+    .join('\n'))
+  event.preventDefault()
+  deleteConcealedMarkdownRanges(view, expandedRanges)
+  return true
+}
+
+function deleteExpandedConcealedMarkdownSelection(
+  view: EditorView,
+  canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode
+): boolean {
+  const expandedRanges = expandedConcealedMarkdownSelectionRanges(view, canvasMarkdownDisplayMode)
+  if (!expandedRanges) return false
+  deleteConcealedMarkdownRanges(view, expandedRanges)
+  return true
+}
+
+function deleteConcealedMarkdownRanges(
+  view: EditorView,
+  ranges: Array<{ from: number; to: number }>
+): void {
+  const transaction = view.state.changeByRange((range) => {
+    const expanded = ranges.find((candidate) => range.from >= candidate.from && range.to <= candidate.to)
+    if (!expanded) return { range }
+    return {
+      changes: { from: expanded.from, to: expanded.to },
+      range: EditorSelection.cursor(expanded.from)
+    }
+  })
+  view.dispatch({
+    ...transaction,
+    userEvent: 'delete.selection'
+  })
+}
+
+function expandedConcealedMarkdownSelectionRanges(
+  view: EditorView,
+  canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode
+): Array<{ from: number; to: number }> | null {
+  if (canvasMarkdownDisplayMode === 'raw') return null
+
+  const selectedRanges = view.state.selection.ranges.filter((range) => !range.empty)
+  if (selectedRanges.length === 0) return null
+
+  const spans = findConcealedMarkdownSpans(view)
+  if (spans.length === 0) return null
+
+  let changed = false
+  const expandedRanges = selectedRanges.map((range) => {
+    const expanded = expandConcealedMarkdownRange(range.from, range.to, spans)
+    if (expanded.from !== range.from || expanded.to !== range.to) changed = true
+    return expanded
+  })
+
+  return changed ? expandedRanges : null
+}
+
+function expandConcealedMarkdownRange(
+  from: number,
+  to: number,
+  spans: ConcealedMarkdownSpan[]
+): { from: number; to: number } {
+  let expandedFrom = from
+  let expandedTo = to
+  let changed = true
+
+  while (changed) {
+    changed = false
+    for (const span of spans) {
+      if (expandedFrom === span.textFrom && expandedTo >= span.textTo && expandedFrom !== span.from) {
+        expandedFrom = span.from
+        changed = true
+      }
+      if (expandedTo === span.textTo && expandedFrom <= span.textFrom && expandedTo !== span.to) {
+        expandedTo = span.to
+        changed = true
+      }
+    }
+  }
+
+  return { from: expandedFrom, to: expandedTo }
+}
+
+function findConcealedMarkdownSpans(view: EditorView): ConcealedMarkdownSpan[] {
+  const text = view.state.doc.toString()
+  const spans: ConcealedMarkdownSpan[] = [
+    ...findColorSpans(text).map((span) => ({
+      from: span.from,
+      to: span.to,
+      textFrom: span.textFrom,
+      textTo: span.textTo
+    })),
+    ...findMarkdownEmphasisSpans(view).map((span) => ({
+      from: span.from,
+      to: span.to,
+      textFrom: span.textFrom,
+      textTo: span.textTo
+    })),
+    ...findWikiLinkSpans(view)
+  ]
+
+  return spans.sort((left, right) => (left.to - left.from) - (right.to - right.from))
+}
+
+function findWikiLinkSpans(view: EditorView): ConcealedMarkdownSpan[] {
+  const spans: ConcealedMarkdownSpan[] = []
+  const doc = view.state.doc
+  for (const { from, to } of view.visibleRanges) {
+    let pos = from
+    while (pos <= to) {
+      const line = doc.lineAt(pos)
+      if (line.from >= to) break
+      for (const match of line.text.matchAll(/\[\[([^\]\n|#]+)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g)) {
+        const start = line.from + (match.index ?? 0)
+        const end = start + match[0].length
+        const displayRange = wikiLinkDisplayRange(start, match)
+        spans.push({
+          from: start,
+          to: end,
+          textFrom: displayRange.from,
+          textTo: displayRange.to
+        })
+      }
+      pos = line.to + 1
+    }
+  }
+  return spans
+}
+
 function wikiCompletionSource(
   notePathsRef: React.MutableRefObject<string[]>,
   onLoadWikiCompletionBodyRef: React.MutableRefObject<(path: string) => Promise<string | null>>
@@ -4006,7 +4230,9 @@ function resolveWikiPath(label: string, notePaths: string[]): string | null {
   if (exact) return exact
   const withExtension = notePaths.find((path) => normalizeWikiLabel(stripMarkdownExtension(path)) === normalized)
   if (withExtension) return withExtension
-  return notePaths.find((path) => normalizeWikiLabel(wikiLabel(path)) === normalized) ?? null
+  const byLabel = notePaths.find((path) => normalizeWikiLabel(wikiLabel(path)) === normalized)
+  if (byLabel) return byLabel
+  return isExplicitDocumentPath(label) ? label.replace(/\\/g, '/') : null
 }
 
 function wikiSearchText(path: string): string {
@@ -4453,6 +4679,54 @@ function indentColumn(indent: string): number {
   return [...indent].reduce((total, char) => total + (char === '\t' ? 4 : 1), 0)
 }
 
+function calculateMarkdownLine(view: EditorView): boolean {
+  const range = view.state.selection.main
+  if (!range.empty) return false
+  const line = view.state.doc.lineAt(range.head)
+  const calculation = parseMarkdownCalculationLine(line.text)
+  if (!calculation) return false
+
+  const value = evaluateArithmeticExpression(calculation.expression)
+  if (value == null) return false
+
+  const result = formatCalculationResult(value)
+  const nextText = `${calculation.prefix}${calculation.expression} = ${result}`
+  view.dispatch({
+    changes: { from: line.from, to: line.to, insert: nextText },
+    selection: EditorSelection.cursor(line.from + nextText.length),
+    userEvent: 'input'
+  })
+  return true
+}
+
+function parseMarkdownCalculationLine(text: string): { prefix: string; expression: string } | null {
+  const match = text.match(/^(\s*)((?:[-+*/().%\d\s]|\*\*)+?)(?:\s*=\s*[-+.\deE]*)?\s*$/)
+  if (!match) return null
+  const expression = match[2].trim()
+  if (!/[+\-*/%]/.test(expression)) return null
+  if (!/\d/.test(expression)) return null
+  return {
+    prefix: match[1],
+    expression
+  }
+}
+
+function evaluateArithmeticExpression(expression: string): number | null {
+  if (!/^[\d+\-*/().%\s]+$/.test(expression)) return null
+  if (!/\d/.test(expression)) return null
+  try {
+    const value = Function(`"use strict"; return (${expression})`)()
+    return typeof value === 'number' && Number.isFinite(value) ? value : null
+  } catch {
+    return null
+  }
+}
+
+function formatCalculationResult(value: number): string {
+  if (Number.isInteger(value)) return String(value)
+  return Number.parseFloat(value.toPrecision(12)).toString()
+}
+
 function toggleMarkdownBold(view: EditorView): boolean {
   return toggleMarkdownWrap(view, '**')
 }
@@ -4532,6 +4806,7 @@ function TabStrip({
             title={tabLabel(tab)}
           >
             <span className="tab-title">{basename(tab.path)}{tab.mode === 'markdown' ? '' : ` - ${modeLabel(tab.mode)}`}</span>
+            {tab.outOfVault && <span className="tab-outside" aria-label="Outside vault">OUT</span>}
             {dirty && <span className="tab-dirty" aria-label="Modified" />}
             {tab.externalStatus && <span className="tab-external" aria-label={tab.externalStatus} />}
             <span
@@ -4899,13 +5174,7 @@ function filterTree(
     if (entry.kind === 'file') return selfMatches ? [entry] : []
 
     if (selfMatches) {
-      if (revealedFolders.has(entry.path)) {
-        return [entry]
-      }
-      const children = filterTree(entry.children, query, revealedFolders, pinnedPaths)
-      const visibleTopLevel = new Set(children.map((child) => child.path))
-      const hiddenChildren = entry.children.filter((child) => !visibleTopLevel.has(child.path))
-      return [{ ...entry, children, hiddenChildren }]
+      return [entry]
     }
 
     const children = filterTree(entry.children, query, revealedFolders, pinnedPaths)
@@ -4982,6 +5251,21 @@ function folderAncestors(path: string): string[] {
 
 function isMarkdownPath(path: string): boolean {
   return /\.(md|markdown)$/i.test(path)
+}
+
+function isDocumentPath(path: string): boolean {
+  return /\.(md|markdown|typ)$/i.test(path)
+}
+
+function isExplicitDocumentPath(path: string): boolean {
+  const normalized = path.trim().replace(/\\/g, '/')
+  return isDocumentPath(normalized) && (
+    normalized.startsWith('../') ||
+    normalized.startsWith('./') ||
+    normalized.startsWith('/') ||
+    /^[A-Za-z]:\//.test(normalized) ||
+    normalized.includes('/')
+  )
 }
 
 function fileIcon(path: string): string {
@@ -5078,7 +5362,7 @@ async function saveTabBodyWithConflictCheck(tab: OpenTab, body: string): Promise
     if (disk.body === body) {
       return { saved: true, note: disk }
     }
-    if (isMarkdownPath(tab.path)) {
+    if (isMarkdownPath(tab.path) && !tab.outOfVault) {
       const candidate = await invoke<NoteContent>('write_track_merge_candidate', {
         path: tab.path,
         body
@@ -5305,12 +5589,20 @@ function normalizeCalendarEvents(events: CalendarEvent[]): CalendarEvent[] {
 }
 
 function normalizeCalendarEvent(event: CalendarEvent): CalendarEvent {
+  const date = isIsoDate(event.date) ? event.date : todayIsoDate()
+  const recurrence = normalizeCalendarRecurrence(event.recurrence)
+  const recurrenceEndDate =
+    recurrence !== 'none' && isIsoDate(event.recurrenceEndDate) && event.recurrenceEndDate >= date
+      ? event.recurrenceEndDate
+      : ''
   return {
     id: event.id || createCalendarEventId(),
-    date: isIsoDate(event.date) ? event.date : todayIsoDate(),
+    date,
     title: event.title.trim(),
     time: isTimeValue(event.time) ? event.time : '',
-    notes: event.notes ?? ''
+    notes: event.notes ?? '',
+    recurrence,
+    recurrenceEndDate
   }
 }
 
@@ -5342,6 +5634,10 @@ function isIsoDate(value: string): boolean {
 
 function isTimeValue(value: string): boolean {
   return value === '' || /^([01]\d|2[0-3]):[0-5]\d$/.test(value)
+}
+
+function normalizeCalendarRecurrence(value: string | undefined): CalendarEvent['recurrence'] {
+  return value === 'daily' || value === 'weekly' || value === 'monthly' ? value : 'none'
 }
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(

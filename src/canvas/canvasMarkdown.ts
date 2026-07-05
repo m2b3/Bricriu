@@ -65,7 +65,9 @@ function resolveWikiPath(label: string, notePaths: string[]): string | null {
   if (exact) return exact
   const withExtension = notePaths.find((path) => normalizeWikiLabel(stripMarkdownExtension(path)) === normalized)
   if (withExtension) return withExtension
-  return notePaths.find((path) => normalizeWikiLabel(wikiLabel(path)) === normalized) ?? null
+  const byLabel = notePaths.find((path) => normalizeWikiLabel(wikiLabel(path)) === normalized)
+  if (byLabel) return byLabel
+  return isExplicitDocumentPath(label) ? label.replace(/\\/g, '/') : null
 }
 
 function wikiLabel(path: string): string {
@@ -74,6 +76,21 @@ function wikiLabel(path: string): string {
 
 function stripMarkdownExtension(path: string): string {
   return path.replace(/\.(md|markdown)$/i, '')
+}
+
+function isDocumentPath(path: string): boolean {
+  return /\.(md|markdown|typ)$/i.test(path)
+}
+
+function isExplicitDocumentPath(path: string): boolean {
+  const normalized = path.trim().replace(/\\/g, '/')
+  return isDocumentPath(normalized) && (
+    normalized.startsWith('../') ||
+    normalized.startsWith('./') ||
+    normalized.startsWith('/') ||
+    /^[A-Za-z]:\//.test(normalized) ||
+    normalized.includes('/')
+  )
 }
 
 function normalizeWikiLabel(label: string): string {

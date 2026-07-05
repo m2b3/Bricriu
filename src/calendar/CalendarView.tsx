@@ -2,7 +2,9 @@ import { useCallback, useMemo, useRef, useState, type CSSProperties } from 'reac
 import FullCalendar from '@fullcalendar/react'
 import dayGridPlugin from '@fullcalendar/daygrid'
 import interactionPlugin, { type DateClickArg } from '@fullcalendar/interaction'
-import type { EventClickArg, EventInput } from '@fullcalendar/core'
+import type { DatesSetArg, EventClickArg, EventInput } from '@fullcalendar/core'
+
+export type CalendarRecurrence = 'none' | 'daily' | 'weekly' | 'monthly'
 
 export type CalendarEvent = {
   id: string
@@ -10,6 +12,17 @@ export type CalendarEvent = {
   title: string
   time: string
   notes: string
+  recurrence: CalendarRecurrence
+  recurrenceEndDate: string
+}
+
+type CalendarOccurrence = CalendarEvent & {
+  occurrenceDate: string
+}
+
+type CalendarVisibleRange = {
+  start: string
+  end: string
 }
 
 const CALENDAR_EDITOR_WIDTH_KEY = 'notesproject:calendar-editor-width'
@@ -28,24 +41,36 @@ export function CalendarView({
   const [draft, setDraft] = useState<CalendarEvent | null>(null)
   const [selectedDate, setSelectedDate] = useState(todayIsoDate())
   const [editorWidth, setEditorWidth] = useState(readStoredCalendarEditorWidth)
+  const [visibleRange, setVisibleRange] = useState<CalendarVisibleRange>(() => createInitialVisibleRange())
   const workspaceRef = useRef<HTMLDivElement | null>(null)
+  const calendarRef = useRef<FullCalendar | null>(null)
+
+  const visibleOccurrences = useMemo(
+    () => expandCalendarEvents(events, visibleRange.start, visibleRange.end),
+    [events, visibleRange]
+  )
 
   const calendarItems = useMemo<EventInput[]>(
-    () => events.map((event) => ({
-      id: event.id,
+    () => visibleOccurrences.map((event) => ({
+      id: createCalendarOccurrenceId(event),
       title: event.title,
-      date: event.date,
+      date: event.occurrenceDate,
       allDay: true,
       extendedProps: {
+        originalId: event.id,
         time: event.time,
-        notes: event.notes
+        notes: event.notes,
+        recurrence: event.recurrence
       }
     })),
-    [events]
+    [visibleOccurrences]
   )
 
   const selectedDateEvents = useMemo(
-    () => events.filter((event) => event.date === selectedDate).sort(compareCalendarEvents),
+    () => events
+      .filter((event) => eventOccursOnDate(event, selectedDate))
+      .map((event) => ({ ...event, occurrenceDate: selectedDate }))
+      .sort(compareCalendarOccurrences),
     [events, selectedDate]
   )
 
@@ -61,17 +86,34 @@ export function CalendarView({
     writeStoredCalendarEditorWidth(nextWidth)
   }, [])
 
-  const openDate = useCallback((date: string) => {
-    setSelectedDate(date)
-    setDraft(createBlankCalendarEvent(date))
+  const focusDate = useCallback((date: string) => {
+    const nextDate = isIsoDate(date) ? date : todayIsoDate()
+    setSelectedDate(nextDate)
+    calendarRef.current?.getApi().gotoDate(nextDate)
+    return nextDate
   }, [])
 
-  const openEvent = useCallback((id: string) => {
+  const openDate = useCallback((date: string) => {
+    const nextDate = focusDate(date)
+    setDraft(createBlankCalendarEvent(nextDate))
+  }, [focusDate])
+
+  const openEvent = useCallback((id: string, occurrenceDate = selectedDate) => {
     const event = events.find((candidate) => candidate.id === id)
     if (!event) return
-    setSelectedDate(event.date)
+    if (eventOccursOnDate(event, occurrenceDate)) {
+      focusDate(occurrenceDate)
+    } else {
+      focusDate(event.date)
+    }
     setDraft({ ...event })
-  }, [events])
+  }, [events, focusDate, selectedDate])
+
+  const updateDraftDate = useCallback((date: string) => {
+    if (!draft) return
+    const nextDate = focusDate(date)
+    setDraft({ ...draft, date: nextDate })
+  }, [draft, focusDate])
 
   const saveDraft = useCallback(() => {
     if (!draft) return
@@ -81,10 +123,10 @@ export function CalendarView({
     const next = exists
       ? events.map((event) => (event.id === normalized.id ? normalized : event))
       : [...events, normalized]
-    setSelectedDate(normalized.date)
+    focusDate(eventOccursOnDate(normalized, selectedDate) ? selectedDate : normalized.date)
     setDraft({ ...normalized })
     onSaveEvents(next)
-  }, [draft, events, onSaveEvents])
+  }, [draft, events, focusDate, onSaveEvents, selectedDate])
 
   const deleteDraft = useCallback(() => {
     if (!draft) return
@@ -100,6 +142,7 @@ export function CalendarView({
     >
       <section className="calendar-main">
         <FullCalendar
+          ref={calendarRef}
           plugins={[dayGridPlugin, interactionPlugin]}
           initialView="dayGridMonth"
           headerToolbar={{
@@ -110,10 +153,18 @@ export function CalendarView({
           height="100%"
           dayMaxEvents={3}
           events={calendarItems}
+          datesSet={(arg: DatesSetArg) => {
+            setVisibleRange({
+              start: toIsoDate(arg.start),
+              end: toIsoDate(addDays(toIsoDate(arg.end), -1))
+            })
+          }}
           dateClick={(arg: DateClickArg) => openDate(arg.dateStr)}
           eventClick={(arg: EventClickArg) => {
             arg.jsEvent.preventDefault()
-            openEvent(arg.event.id)
+            focusDate(arg.event.startStr.slice(0, 10))
+            const originalId = arg.event.extendedProps.originalId
+            openEvent(typeof originalId === 'string' ? originalId : arg.event.id, arg.event.startStr.slice(0, 10))
           }}
           eventContent={(arg) => (
             <span className="calendar-event-chip">
@@ -190,6 +241,7 @@ export function CalendarView({
               >
                 <span>{event.time || 'All day'}</span>
                 <strong>{event.title}</strong>
+                {event.recurrence !== 'none' && <span>{formatRecurrence(event)}</span>}
               </button>
             ))
           )}
@@ -217,9 +269,7 @@ export function CalendarView({
                   type="date"
                   value={draft.date}
                   onChange={(event) => {
-                    const nextDate = event.target.value || todayIsoDate()
-                    setSelectedDate(nextDate)
-                    setDraft({ ...draft, date: nextDate })
+                    updateDraftDate(event.target.value)
                   }}
                 />
               </label>
@@ -232,6 +282,36 @@ export function CalendarView({
                 />
               </label>
             </div>
+            <label>
+              <span>Repeat</span>
+              <select
+                value={draft.recurrence}
+                onChange={(event) => {
+                  const recurrence = normalizeRecurrence(event.target.value)
+                  setDraft({
+                    ...draft,
+                    recurrence,
+                    recurrenceEndDate: recurrence === 'none' ? '' : draft.recurrenceEndDate
+                  })
+                }}
+              >
+                <option value="none">Does not repeat</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+            </label>
+            {draft.recurrence !== 'none' && (
+              <label>
+                <span>Repeat until</span>
+                <input
+                  type="date"
+                  value={draft.recurrenceEndDate}
+                  min={draft.date}
+                  onChange={(event) => setDraft({ ...draft, recurrenceEndDate: event.target.value })}
+                />
+              </label>
+            )}
             <label>
               <span>Notes</span>
               <textarea
@@ -272,12 +352,20 @@ export function CalendarView({
 }
 
 function normalizeCalendarEvent(event: CalendarEvent): CalendarEvent {
+  const date = isIsoDate(event.date) ? event.date : todayIsoDate()
+  const recurrence = normalizeRecurrence(event.recurrence)
+  const recurrenceEndDate =
+    recurrence !== 'none' && isIsoDate(event.recurrenceEndDate) && event.recurrenceEndDate >= date
+      ? event.recurrenceEndDate
+      : ''
   return {
     id: event.id || createCalendarEventId(),
-    date: isIsoDate(event.date) ? event.date : todayIsoDate(),
+    date,
     title: event.title.trim(),
     time: isTimeValue(event.time) ? event.time : '',
-    notes: event.notes ?? ''
+    notes: event.notes ?? '',
+    recurrence,
+    recurrenceEndDate
   }
 }
 
@@ -287,16 +375,85 @@ function createBlankCalendarEvent(date: string): CalendarEvent {
     date: isIsoDate(date) ? date : todayIsoDate(),
     title: '',
     time: '',
-    notes: ''
+    notes: '',
+    recurrence: 'none',
+    recurrenceEndDate: ''
   }
 }
 
-function compareCalendarEvents(left: CalendarEvent, right: CalendarEvent): number {
+function compareCalendarOccurrences(left: CalendarOccurrence, right: CalendarOccurrence): number {
   return (
-    left.date.localeCompare(right.date) ||
+    left.occurrenceDate.localeCompare(right.occurrenceDate) ||
     (left.time || '99:99').localeCompare(right.time || '99:99') ||
     left.title.localeCompare(right.title)
   )
+}
+
+function expandCalendarEvents(events: CalendarEvent[], startDate: string, endDate: string): CalendarOccurrence[] {
+  return events
+    .flatMap((event) => expandCalendarEvent(event, startDate, endDate))
+    .sort(compareCalendarOccurrences)
+}
+
+function expandCalendarEvent(event: CalendarEvent, startDate: string, endDate: string): CalendarOccurrence[] {
+  const normalized = normalizeCalendarEvent(event)
+  const occurrenceEndDate =
+    normalized.recurrenceEndDate && normalized.recurrenceEndDate < endDate
+      ? normalized.recurrenceEndDate
+      : endDate
+  if (normalized.date > occurrenceEndDate || startDate > occurrenceEndDate) return []
+  if (normalized.recurrence === 'none') {
+    return normalized.date >= startDate && normalized.date <= endDate
+      ? [{ ...normalized, occurrenceDate: normalized.date }]
+      : []
+  }
+
+  const occurrences: CalendarOccurrence[] = []
+  let cursor = normalized.date
+  while (cursor < startDate) {
+    const next = nextOccurrenceDate(cursor, normalized)
+    if (next <= cursor) return occurrences
+    cursor = next
+  }
+  while (cursor <= occurrenceEndDate) {
+    occurrences.push({ ...normalized, occurrenceDate: cursor })
+    const next = nextOccurrenceDate(cursor, normalized)
+    if (next <= cursor) break
+    cursor = next
+  }
+  return occurrences
+}
+
+function eventOccursOnDate(event: CalendarEvent, date: string): boolean {
+  if (!isIsoDate(date)) return false
+  return expandCalendarEvent(event, date, date).length > 0
+}
+
+function nextOccurrenceDate(date: string, event: CalendarEvent): string {
+  if (event.recurrence === 'daily') return addDays(date, 1)
+  if (event.recurrence === 'weekly') return addDays(date, 7)
+  if (event.recurrence === 'monthly') return addMonthsClamped(date, 1, Number(event.date.slice(8, 10)))
+  return date
+}
+
+function createCalendarOccurrenceId(event: CalendarOccurrence): string {
+  return event.recurrence === 'none' ? event.id : `${event.id}:${event.occurrenceDate}`
+}
+
+function normalizeRecurrence(value: string | undefined): CalendarRecurrence {
+  return value === 'daily' || value === 'weekly' || value === 'monthly' ? value : 'none'
+}
+
+function formatRecurrence(event: CalendarEvent): string {
+  const labels: Record<CalendarRecurrence, string> = {
+    none: '',
+    daily: 'Daily',
+    weekly: 'Weekly',
+    monthly: 'Monthly'
+  }
+  return event.recurrenceEndDate
+    ? `${labels[event.recurrence]} until ${formatShortDate(event.recurrenceEndDate)}`
+    : labels[event.recurrence]
 }
 
 function createCalendarEventId(): string {
@@ -311,6 +468,37 @@ function todayIsoDate(): string {
   const now = new Date()
   const offsetMs = now.getTimezoneOffset() * 60 * 1000
   return new Date(now.getTime() - offsetMs).toISOString().slice(0, 10)
+}
+
+function createInitialVisibleRange(): CalendarVisibleRange {
+  const today = todayIsoDate()
+  return {
+    start: addDays(today, -45),
+    end: addDays(today, 45)
+  }
+}
+
+function addDays(date: string, days: number): string {
+  const [year, month, day] = date.split('-').map(Number)
+  const next = new Date(year, month - 1, day)
+  next.setDate(next.getDate() + days)
+  return toIsoDate(next)
+}
+
+function addMonthsClamped(date: string, months: number, preferredDay: number): string {
+  const [year, month] = date.split('-').map(Number)
+  const next = new Date(year, month - 1 + months, 1)
+  const lastDay = new Date(next.getFullYear(), next.getMonth() + 1, 0).getDate()
+  next.setDate(Math.min(preferredDay, lastDay))
+  return toIsoDate(next)
+}
+
+function toIsoDate(date: Date): string
+function toIsoDate(date: string): string
+function toIsoDate(date: Date | string): string {
+  if (typeof date === 'string') return date.slice(0, 10)
+  const offsetMs = date.getTimezoneOffset() * 60 * 1000
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 10)
 }
 
 function isIsoDate(value: string): boolean {
@@ -329,6 +517,16 @@ function formatCalendarDate(date: string): string {
     year: 'numeric',
     month: 'short',
     day: 'numeric'
+  }).format(new Date(year, month - 1, day))
+}
+
+function formatShortDate(date: string): string {
+  if (!isIsoDate(date)) return date
+  const [year, month, day] = date.split('-').map(Number)
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric'
   }).format(new Date(year, month - 1, day))
 }
 
