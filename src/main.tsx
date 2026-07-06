@@ -335,6 +335,8 @@ function App(): JSX.Element {
   const [typstPreview, setTypstPreview] = useState<TypstPreviewState | null>(null)
   const [editorFocusRequest, setEditorFocusRequest] = useState(0)
   const [editorSelectAllRequest, setEditorSelectAllRequest] = useState(0)
+  const [editorBulletListRequest, setEditorBulletListRequest] = useState(0)
+  const [editorNumberedListRequest, setEditorNumberedListRequest] = useState(0)
   const [sidebarWidth, setSidebarWidth] = useState(readStoredSidebarWidth)
   const [editorSplitRatio, setEditorSplitRatio] = useState(readStoredEditorSplitRatio)
   const appShellRef = useRef<HTMLElement | null>(null)
@@ -2344,6 +2346,26 @@ function App(): JSX.Element {
             >
               Text
             </button>
+            <button
+              type="button"
+              className="secondary-button"
+              title="Make selection a bulleted Markdown list"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => setEditorBulletListRequest((request) => request + 1)}
+              disabled={workspaceMode === 'calendar' || activeTab?.mode !== 'markdown'}
+            >
+              Bullets
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              title="Make selection a numbered Markdown list"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => setEditorNumberedListRequest((request) => request + 1)}
+              disabled={workspaceMode === 'calendar' || activeTab?.mode !== 'markdown'}
+            >
+              Numbers
+            </button>
             {splitOpen && (
               <button
                 type="button"
@@ -2458,6 +2480,8 @@ function App(): JSX.Element {
                   jumpOffset={focusedPane === 'main' ? jumpOffset : null}
                   focusRequest={focusedPane === 'main' ? editorFocusRequest : 0}
                   selectAllRequest={focusedPane === 'main' ? editorSelectAllRequest : 0}
+                  bulletListRequest={focusedPane === 'main' ? editorBulletListRequest : 0}
+                  numberedListRequest={focusedPane === 'main' ? editorNumberedListRequest : 0}
                   onJumpHandled={() => setJumpOffset(null)}
                   onChange={updateTabBody}
                   onOpenWikiLink={(path) => void openNote(path)}
@@ -2557,6 +2581,8 @@ function App(): JSX.Element {
                     jumpOffset={focusedPane === 'split' ? jumpOffset : null}
                     focusRequest={focusedPane === 'split' ? editorFocusRequest : 0}
                     selectAllRequest={focusedPane === 'split' ? editorSelectAllRequest : 0}
+                    bulletListRequest={focusedPane === 'split' ? editorBulletListRequest : 0}
+                    numberedListRequest={focusedPane === 'split' ? editorNumberedListRequest : 0}
                     onJumpHandled={() => setJumpOffset(null)}
                     onChange={updateTabBody}
                     onOpenWikiLink={(path) => void openNote(path)}
@@ -2982,6 +3008,8 @@ function MarkdownEditor({
   jumpOffset,
   focusRequest,
   selectAllRequest,
+  bulletListRequest,
+  numberedListRequest,
   onJumpHandled,
   onChange,
   onOpenWikiLink,
@@ -2998,6 +3026,8 @@ function MarkdownEditor({
   jumpOffset: number | null
   focusRequest: number
   selectAllRequest: number
+  bulletListRequest: number
+  numberedListRequest: number
   onJumpHandled: () => void
   onChange: (path: string, body: string) => void
   onOpenWikiLink: (path: string) => void
@@ -3215,6 +3245,8 @@ function MarkdownEditor({
         },
         { key: 'Ctrl-b', run: toggleMarkdownBold, preventDefault: true },
         { key: 'Ctrl-i', run: toggleMarkdownItalic, preventDefault: true },
+        { key: 'Ctrl-Shift-8', run: (view) => formatMarkdownListSelection(view, 'bullet'), preventDefault: true },
+        { key: 'Ctrl-Shift-7', run: (view) => formatMarkdownListSelection(view, 'numbered'), preventDefault: true },
         { key: 'Ctrl-Enter', run: calculateMarkdownLine, preventDefault: true },
         { key: 'Ctrl-y', run: redo, preventDefault: true },
         { key: 'Ctrl-Shift-z', run: redo, preventDefault: true },
@@ -3359,6 +3391,20 @@ function MarkdownEditor({
     })
     view.focus()
   }, [disabled, selectAllRequest])
+
+  useEffect(() => {
+    const view = viewRef.current
+    if (disabled || bulletListRequest === 0 || !view) return
+    formatMarkdownListSelection(view, 'bullet')
+    view.focus()
+  }, [bulletListRequest, disabled])
+
+  useEffect(() => {
+    const view = viewRef.current
+    if (disabled || numberedListRequest === 0 || !view) return
+    formatMarkdownListSelection(view, 'numbered')
+    view.focus()
+  }, [disabled, numberedListRequest])
 
   return (
     <div
@@ -3562,17 +3608,30 @@ function buildNoteDecorations(
       if (rangesOverlapAny(colorSpan.from, colorSpan.to, canvasBlockRanges)) continue
       if (!view.visibleRanges.some((range) => colorSpan.from <= range.to && colorSpan.to >= range.from)) continue
       ranges.push({ from: colorSpan.from, to: colorSpan.textFrom, decoration: Decoration.replace({}) })
-      ranges.push({
-        from: colorSpan.textFrom,
-        to: colorSpan.textTo,
-        decoration: Decoration.mark({
-          class: 'cm-color-span',
-          attributes: {
-            style: `color: ${colorSpan.color}`
-          }
-        })
-      })
-      ranges.push({ from: colorSpan.textTo, to: colorSpan.to, decoration: Decoration.replace({}) })
+      const closeFrom = colorSpan.textFrom < doc.lineAt(colorSpan.textTo).from && /^\s*$/.test(doc.sliceString(doc.lineAt(colorSpan.textTo).from, colorSpan.textTo))
+        ? doc.lineAt(colorSpan.textTo).from
+        : colorSpan.textTo
+      let lineNumber = doc.lineAt(colorSpan.textFrom).number
+      const lastLineNumber = doc.lineAt(closeFrom).number
+      while (lineNumber <= lastLineNumber) {
+        const line = doc.line(lineNumber)
+        const from = Math.max(colorSpan.textFrom, line.from)
+        const to = Math.min(closeFrom, line.to)
+        if (from < to) {
+          ranges.push({
+            from,
+            to,
+            decoration: Decoration.mark({
+              class: 'cm-color-span',
+              attributes: {
+                style: `color: ${colorSpan.color}`
+              }
+            })
+          })
+        }
+        lineNumber += 1
+      }
+      ranges.push({ from: closeFrom, to: colorSpan.to, decoration: Decoration.replace({}) })
     }
 
     for (const emphasisSpan of findMarkdownEmphasisSpans(view)) {
@@ -4580,6 +4639,59 @@ function continueMarkdownList(view: EditorView): boolean {
     userEvent: 'input'
   })
   renumberMarkdownOrderedLists(view)
+  return true
+}
+
+type MarkdownListStyle = 'bullet' | 'numbered'
+
+function formatMarkdownListSelection(view: EditorView, style: MarkdownListStyle): boolean {
+  const transaction = view.state.changeByRange((range) => {
+    const startLine = view.state.doc.lineAt(range.from)
+    const endPosition = range.to > range.from && range.to === view.state.doc.lineAt(range.to).from
+      ? range.to - 1
+      : range.to
+    const endLine = view.state.doc.lineAt(Math.max(range.from, endPosition))
+    const lines: string[] = []
+
+    for (let lineNumber = startLine.number; lineNumber <= endLine.number; lineNumber += 1) {
+      lines.push(view.state.doc.line(lineNumber).text)
+    }
+
+    const counters = new Map<number, number>()
+    const formattedLines = lines.map((line) => {
+      if (line.trim().length === 0) {
+        counters.clear()
+        return line
+      }
+
+      const existing = parseMarkdownListLine(line)
+      const indent = existing?.indent ?? line.match(/^\s*/)?.[0] ?? ''
+      const body = existing ? existing.body : line.slice(indent.length)
+
+      if (style === 'bullet') return `${indent}- ${body.trimStart()}`
+
+      const level = Math.floor(indentColumn(indent) / 4)
+      for (const key of [...counters.keys()]) {
+        if (key > level) counters.delete(key)
+      }
+      const next = (counters.get(level) ?? 0) + 1
+      counters.set(level, next)
+      return `${indent}${next}. ${body.trimStart()}`
+    })
+
+    const insert = formattedLines.join('\n')
+    return {
+      changes: { from: startLine.from, to: endLine.to, insert },
+      range: EditorSelection.range(startLine.from, startLine.from + insert.length)
+    }
+  })
+
+  if (transaction.changes.empty) return false
+  view.dispatch({
+    ...transaction,
+    userEvent: 'input'
+  })
+  if (style === 'numbered') renumberMarkdownOrderedLists(view)
   return true
 }
 
