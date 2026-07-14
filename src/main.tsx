@@ -148,6 +148,12 @@ type SearchHighlight = {
   offset: number
 }
 
+type TextCountResult = {
+  scope: 'selection' | 'document'
+  words: number
+  characters: number
+}
+
 type TypstPreviewState = {
   tabId: string
   format: TypstPreviewFormat
@@ -337,6 +343,8 @@ function App(): JSX.Element {
   const [editorSelectAllRequest, setEditorSelectAllRequest] = useState(0)
   const [editorBulletListRequest, setEditorBulletListRequest] = useState(0)
   const [editorNumberedListRequest, setEditorNumberedListRequest] = useState(0)
+  const [editorTextCountRequest, setEditorTextCountRequest] = useState(0)
+  const [textCountResult, setTextCountResult] = useState<TextCountResult | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(readStoredSidebarWidth)
   const [editorSplitRatio, setEditorSplitRatio] = useState(readStoredEditorSplitRatio)
   const appShellRef = useRef<HTMLElement | null>(null)
@@ -445,6 +453,10 @@ function App(): JSX.Element {
     activeIdRef.current = activeTab?.id ?? activeId
     activePathRef.current = activeTab?.path ?? null
   }, [activeId, activeTab, mainTab])
+
+  useEffect(() => {
+    setTextCountResult(null)
+  }, [activeTab?.id, workspaceMode])
 
   useEffect(() => {
     const previousId = lastMainActiveIdRef.current
@@ -2300,6 +2312,11 @@ function App(): JSX.Element {
             <span className="note-path">
               {workspaceMode === 'calendar' ? 'Calendar' : activeTab?.path ?? 'Open a Markdown file'}
             </span>
+            {textCountResult && workspaceMode === 'notes' && activeTab?.mode === 'markdown' && (
+              <span className="text-count-pill">
+                {textCountResult.scope === 'selection' ? 'Selection' : 'Document'}: {formatCount(textCountResult.words)} words, {formatCount(textCountResult.characters)} characters
+              </span>
+            )}
             {workspaceMode === 'notes' && activeTab?.outOfVault && <span className="outside-pill">Outside vault</span>}
             {workspaceMode === 'calendar' && calendarSaving && <span className="dirty-pill">Saving</span>}
             {workspaceMode === 'notes' && dirty && <span className="dirty-pill">Modified</span>}
@@ -2345,6 +2362,16 @@ function App(): JSX.Element {
               disabled={workspaceMode === 'calendar' || !activeTab || activeTab.outOfVault || !isMarkdownPath(activeTab.path)}
             >
               Text
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              title="Count words and characters in the selection or document"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => setEditorTextCountRequest((request) => request + 1)}
+              disabled={workspaceMode === 'calendar' || activeTab?.mode !== 'markdown'}
+            >
+              Count
             </button>
             <button
               type="button"
@@ -2482,7 +2509,9 @@ function App(): JSX.Element {
                   selectAllRequest={focusedPane === 'main' ? editorSelectAllRequest : 0}
                   bulletListRequest={focusedPane === 'main' ? editorBulletListRequest : 0}
                   numberedListRequest={focusedPane === 'main' ? editorNumberedListRequest : 0}
+                  textCountRequest={focusedPane === 'main' ? editorTextCountRequest : 0}
                   onJumpHandled={() => setJumpOffset(null)}
+                  onTextCount={setTextCountResult}
                   onChange={updateTabBody}
                   onOpenWikiLink={(path) => void openNote(path)}
                   onLoadWikiCompletionBody={loadWikiCompletionBody}
@@ -2583,7 +2612,9 @@ function App(): JSX.Element {
                     selectAllRequest={focusedPane === 'split' ? editorSelectAllRequest : 0}
                     bulletListRequest={focusedPane === 'split' ? editorBulletListRequest : 0}
                     numberedListRequest={focusedPane === 'split' ? editorNumberedListRequest : 0}
+                    textCountRequest={focusedPane === 'split' ? editorTextCountRequest : 0}
                     onJumpHandled={() => setJumpOffset(null)}
+                    onTextCount={setTextCountResult}
                     onChange={updateTabBody}
                     onOpenWikiLink={(path) => void openNote(path)}
                     onLoadWikiCompletionBody={loadWikiCompletionBody}
@@ -3010,7 +3041,9 @@ function MarkdownEditor({
   selectAllRequest,
   bulletListRequest,
   numberedListRequest,
+  textCountRequest,
   onJumpHandled,
+  onTextCount,
   onChange,
   onOpenWikiLink,
   onLoadWikiCompletionBody
@@ -3028,7 +3061,9 @@ function MarkdownEditor({
   selectAllRequest: number
   bulletListRequest: number
   numberedListRequest: number
+  textCountRequest: number
   onJumpHandled: () => void
+  onTextCount: (result: TextCountResult) => void
   onChange: (path: string, body: string) => void
   onOpenWikiLink: (path: string) => void
   onLoadWikiCompletionBody: (path: string) => Promise<string | null>
@@ -3405,6 +3440,13 @@ function MarkdownEditor({
     formatMarkdownListSelection(view, 'numbered')
     view.focus()
   }, [disabled, numberedListRequest])
+
+  useEffect(() => {
+    const view = viewRef.current
+    if (disabled || textCountRequest === 0 || !view) return
+    onTextCount(countEditorText(view.state))
+    view.focus()
+  }, [disabled, onTextCount, textCountRequest])
 
   return (
     <div
@@ -5441,6 +5483,25 @@ function uniquePaths(paths: string[]): string[] {
 
 function isRawSourceMode(mode: EditorMode): boolean {
   return mode === 'markdown' || mode === 'canvas'
+}
+
+function countEditorText(state: EditorState): TextCountResult {
+  const selectedRanges = state.selection.ranges.filter((range) => !range.empty)
+  const scope = selectedRanges.length > 0 ? 'selection' : 'document'
+  const texts = selectedRanges.length > 0
+    ? selectedRanges.map((range) => state.doc.sliceString(range.from, range.to))
+    : [state.doc.toString()]
+  const characters = texts.reduce((total, text) => total + text.length, 0)
+  const words = texts.reduce((total, text) => total + countWords(text), 0)
+  return { scope, words, characters }
+}
+
+function countWords(text: string): number {
+  return text.trim().match(/\S+/g)?.length ?? 0
+}
+
+function formatCount(count: number): string {
+  return new Intl.NumberFormat().format(count)
 }
 
 function uniqueSaveTargets(tabs: OpenTab[]): OpenTab[] {
