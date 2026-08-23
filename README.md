@@ -152,6 +152,43 @@ When the opened vault is a Git repository, NotesProject uses an `inuse` branch f
 
 Autosave writes files to disk. Checkpoints are Git commits created separately, either manually or periodically for touched files.
 
+## Private `.h` Notes
+
+A vault can have an encrypted private area:
+
+1. Create a `.h/` folder in the vault and put private Markdown or Typst files in it.
+2. Open the vault in NotesProject and enter a password in the masked unlock dialog.
+3. NotesProject leaves a new `.h/` untouched on open. The first checkpoint or commit creates its AES-256 encrypted `.h.zip` and `.horig/` baseline. If `.h.zip` already exists, opening the vault decrypts it.
+4. Commit `.h.zip`. The plaintext `.h/` and comparison baseline `.horig/` are added to the repository's local `.git/info/exclude`.
+
+`.h/` is relative to the folder opened as the vault, not necessarily the Git worktree root. For example, if `repo/notes` is the vault inside the parent `repo` Git repository, use `repo/notes/.h`; Git tracks the encrypted archive as `notes/.h.zip`.
+
+Passwords are stored as plaintext in the local, git-ignored `private-vaults.json` settings file. `defaultPassword` applies when a vault has no path-specific entry; entries under `vaults` are keyed by canonical vault path and take precedence. Do not share that file, and back up the password separately: the archive cannot be recovered without it.
+
+```json
+{
+  "defaultPassword": "change-this-local-password",
+  "vaults": {
+    "c:/path/to/vault": {
+      "password": "optional-vault-specific-password"
+    }
+  }
+}
+```
+
+Before every NotesProject checkpoint, `.h/` is compared byte-for-byte with `.horig/`. If they differ, a new encrypted archive atomically replaces `.h.zip` and the baseline is refreshed. Local `pre-commit` and `pre-push` hooks provide the same check for command-line Git. Existing hooks are preserved and run first. A pre-push that discovers new private changes refreshes the archive and stops the push so `.h.zip` can be committed.
+
+Git hooks can be bypassed with `--no-verify`. If the repository already configures `core.hooksPath`, NotesProject does not modify that custom location and reports a warning; add equivalent synchronization there before relying on command-line commits or pushes.
+
+On open, NotesProject shows the ordinary vault first and safely extracts an existing `.h.zip` on a background worker. Until that finishes, `.h/` is omitted from the tree and content search, private-note access is rejected, and checkpoints are paused. Restored public tabs open immediately; restored `.h/` tabs are added when the private folder is ready. A new `.h/` with no archive is not zipped or extracted until the first checkpoint or commit. If a crash left `.h/` ahead of `.horig/`, it archives those changes before extracting, rather than silently overwriting them. Password-protected ZIPs whose contents are rooted either directly in the archive or under `.h/` are accepted; archives rewritten by NotesProject use AES-256.
+
+Security boundaries:
+
+- `.h/`, `.horig/`, the password file, editor memory, filesystem caches, backups, and swap are plaintext while in use.
+- ZIP entry names are visible without the password even though file contents are encrypted.
+- A weak password remains vulnerable to offline guessing.
+- This protects the committed archive; it is not full-disk encryption or a hardened secret manager.
+
 ## Configuration
 
 Runtime profile settings are stored in `profile.json`:
@@ -177,6 +214,7 @@ src/
 
 src-tauri/
   src/main.rs           Tauri commands, filesystem access, search, Git, Typst
+  src/private_vault.rs  Encrypted .h lifecycle and Git-hook support
   tauri.conf.json       Tauri app configuration
   Cargo.toml            Rust dependencies
 

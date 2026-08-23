@@ -77,6 +77,14 @@ type VaultInfo = {
   name: string
   pathsCaseSensitive: boolean
   git: GitInfo
+  privateVault: PrivateVaultInfo
+}
+
+type PrivateVaultInfo = {
+  enabled: boolean
+  archiveUpdated: boolean
+  hooksInstalled: boolean
+  message: string
 }
 
 type GitInfo = {
@@ -239,6 +247,7 @@ const SIDEBAR_MAX_WIDTH = 560
 const EDITOR_MIN_WIDTH = 360
 const EDITOR_SPLIT_MIN_RATIO = 0.2
 const EDITOR_SPLIT_MAX_RATIO = 0.8
+const PRIVATE_VAULT_PASSWORD_REQUIRED = 'PRIVATE_VAULT_PASSWORD_REQUIRED:'
 
 type AppProfile = {
   autosaveDelayMs: number
@@ -289,6 +298,11 @@ type RestoredSession = {
   contentUsesFileFilter: boolean
 }
 
+type DeferredPrivateRestore = {
+  session: StoredSession | null
+  fallbackActiveId: string | null
+}
+
 type StoredWindowPlacement = {
   x: number
   y: number
@@ -313,6 +327,11 @@ function App(): JSX.Element {
   const [newNoteOpen, setNewNoteOpen] = useState(false)
   const [newNotePath, setNewNotePath] = useState('')
   const [newNoteError, setNewNoteError] = useState<string | null>(null)
+  const [privatePasswordOpen, setPrivatePasswordOpen] = useState(false)
+  const [privatePassword, setPrivatePassword] = useState('')
+  const [privatePasswordPath, setPrivatePasswordPath] = useState('')
+  const [privatePasswordError, setPrivatePasswordError] = useState<string | null>(null)
+  const [privatePasswordBusy, setPrivatePasswordBusy] = useState(false)
   const [activeSearchView, setActiveSearchView] = useState<SearchView>('file')
   const [contentUsesFileFilter, setContentUsesFileFilter] = useState(false)
   const [contentMatches, setContentMatches] = useState<ContentMatch[]>([])
@@ -324,6 +343,7 @@ function App(): JSX.Element {
   const [jumpOffset, setJumpOffset] = useState<number | null>(null)
   const [searchHighlight, setSearchHighlight] = useState<SearchHighlight | null>(null)
   const [busy, setBusy] = useState(false)
+  const [privatePending, setPrivatePending] = useState(false)
   const [searching, setSearching] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -367,6 +387,9 @@ function App(): JSX.Element {
   const contentUsesFileFilterRef = useRef(false)
   const touchedPathsRef = useRef<Set<string>>(new Set())
   const vaultRef = useRef<VaultInfo | null>(null)
+  const privatePendingRef = useRef(false)
+  const privatePreparationIdRef = useRef(0)
+  const deferredPrivateRestoreRef = useRef<DeferredPrivateRestore | null>(null)
   const closingRef = useRef(false)
   const activeTabHintRef = useRef<{ path: string; mode: EditorMode } | null>(null)
 
@@ -662,6 +685,10 @@ function App(): JSX.Element {
   }, [vault])
 
   useEffect(() => {
+    privatePendingRef.current = privatePending
+  }, [privatePending])
+
+  useEffect(() => {
     if (vault) return
     setSplitOpen(false)
     setSplitId(null)
@@ -718,11 +745,19 @@ function App(): JSX.Element {
     }
   }, [])
 
-  const loadStoredSession = useCallback(async (root: string): Promise<RestoredSession | null> => {
-    const session = readStoredSession(root)
+  const loadStoredSession = useCallback(async (
+    root: string,
+    includePrivate = true,
+    storedSession?: StoredSession | null
+  ): Promise<RestoredSession | null> => {
+    const session = storedSession === undefined ? readStoredSession(root) : storedSession
     if (!session) return null
 
-    const storedTabs = session.openTabs ?? session.openPaths?.map((path) => ({ path, mode: 'markdown' as const })) ?? []
+    const storedTabs = (
+      session.openTabs
+      ?? session.openPaths?.map((path) => ({ path, mode: 'markdown' as const }))
+      ?? []
+    ).filter((tab) => includePrivate || !isPrivateVaultPath(tab.path))
     const restoredTabs: OpenTab[] = []
     for (const storedTab of storedTabs) {
       try {
@@ -804,6 +839,174 @@ function App(): JSX.Element {
     }
   }, [activeId, tabs])
 
+  const completePrivateVaultPreparation = useCallback(async (
+    path: string,
+    info: PrivateVaultInfo,
+    preparationId: number
+  ) => {
+    if (
+      preparationId !== privatePreparationIdRef.current
+      || !vaultRef.current
+      || !samePath(vaultRef.current.root, path)
+    ) return
+
+    const currentVault = vaultRef.current
+    let openedVault = { ...currentVault, privateVault: info }
+    vaultRef.current = openedVault
+    setVault(openedVault)
+    privatePendingRef.current = false
+    setPrivatePending(false)
+
+    const deferred = deferredPrivateRestoreRef.current
+    if (deferred) {
+      const restored = await loadStoredSession(path, true, deferred.session)
+      if (preparationId !== privatePreparationIdRef.current) return
+      const privateTabs = restored?.tabs.filter((tab) => isPrivateVaultPath(tab.path)) ?? []
+      setTabs((previous) => {
+        const existing = new Set(previous.map((tab) => tab.id))
+        const merged = [...previous, ...privateTabs.filter((tab) => !existing.has(tab.id))]
+        tabsRef.current = merged
+        return merged
+      })
+
+      const restoredActive = restored?.activeId
+      if (
+        restoredActive
+        && privateTabs.some((tab) => tab.id === restoredActive)
+        && (
+          activeIdRef.current == null
+          || activeIdRef.current === deferred.fallbackActiveId
+        )
+      ) {
+        activeIdRef.current = restoredActive
+        setActiveId(restoredActive)
+      }
+      if (!splitOpenRef.current && restored?.splitId) {
+        const restoredSplit = privateTabs.find((tab) => tab.id === restored.splitId)
+        if (restoredSplit && restoredSplit.id !== activeIdRef.current) {
+          setSplitOpen(true)
+          setSplitId(restoredSplit.id)
+        }
+      }
+      setExpanded((previous) => new Set([
+        ...previous,
+        ...(restored?.expanded.filter(isPrivateVaultPath) ?? [])
+      ]))
+      setPinnedPaths((previous) => new Set([
+        ...previous,
+        ...(restored?.pinnedPaths.filter(isPrivateVaultPath) ?? [])
+      ]))
+      deferredPrivateRestoreRef.current = null
+    }
+
+    await refreshTree()
+    if (openedVault.git.status === 'needsCheckpoint') {
+      const proceed = window.confirm(
+        `${openedVault.git.message}\n\nCreate a checkpoint commit and switch to inuse?`
+      )
+      if (proceed) {
+        const git = await invoke<GitInfo>('checkpoint_and_switch_inuse')
+        openedVault = { ...openedVault, git }
+        vaultRef.current = openedVault
+        setVault(openedVault)
+      }
+    }
+    setNotice(info.message)
+  }, [loadStoredSession, refreshTree])
+
+  const preparePrivateVaultInBackground = useCallback(async (
+    path: string,
+    preparationId: number,
+    password?: string
+  ) => {
+    try {
+      const info = await invoke<PrivateVaultInfo>('prepare_private_vault', {
+        path,
+        privatePassword: password
+      })
+      await completePrivateVaultPreparation(path, info, preparationId)
+      if (preparationId === privatePreparationIdRef.current) {
+        setPrivatePassword('')
+        setPrivatePasswordOpen(false)
+        setPrivatePasswordError(null)
+      }
+    } catch (err) {
+      if (preparationId !== privatePreparationIdRef.current) return
+      const message = String(err)
+      if (message.includes(PRIVATE_VAULT_PASSWORD_REQUIRED)) {
+        setPrivatePasswordPath(path)
+        setPrivatePassword('')
+        setPrivatePasswordError(password ? 'The password is incorrect, or .h.zip is damaged.' : null)
+        setPrivatePasswordOpen(true)
+        setNotice('The vault is open. Enter the password to make the private .h folder available.')
+      } else {
+        setError(message)
+        setNotice('The vault is open, but its private .h folder is unavailable.')
+      }
+    }
+  }, [completePrivateVaultPreparation])
+
+  const activateOpenedVault = useCallback(async (nextVault: VaultInfo, path: string) => {
+    let openedVault = nextVault
+    localStorage.setItem(LAST_VAULT_KEY, path)
+    if (!nextVault.privateVault.enabled && nextVault.git.status === 'needsCheckpoint') {
+      const proceed = window.confirm(
+        `${nextVault.git.message}\n\nCreate a checkpoint commit and switch to inuse?`
+      )
+      if (proceed) {
+        const git = await invoke<GitInfo>('checkpoint_and_switch_inuse')
+        openedVault = { ...nextVault, git }
+      }
+    }
+    vaultRef.current = openedVault
+    currentPathsCaseSensitive = openedVault.pathsCaseSensitive
+    const storedSession = readStoredSession(openedVault.root)
+    const restoredSession = await loadStoredSession(
+      openedVault.root,
+      !openedVault.privateVault.enabled,
+      storedSession
+    )
+    const preparationId = privatePreparationIdRef.current + 1
+    privatePreparationIdRef.current = preparationId
+    deferredPrivateRestoreRef.current = openedVault.privateVault.enabled
+      ? { session: storedSession, fallbackActiveId: restoredSession?.activeId ?? null }
+      : null
+    privatePendingRef.current = openedVault.privateVault.enabled
+    setPrivatePending(openedVault.privateVault.enabled)
+    setVault(openedVault)
+    const restoredTabs = restoredSession?.tabs ?? []
+    const restoredActiveId = restoredSession?.activeId ?? null
+    tabsRef.current = restoredTabs
+    activeIdRef.current = restoredActiveId
+    setTabs(restoredTabs)
+    setActiveId(restoredActiveId)
+    setSplitOpen(restoredSession?.splitOpen ?? false)
+    setSplitId(restoredSession?.splitId ?? null)
+    setFocusedPane(restoredSession?.splitOpen ? 'split' : 'main')
+    setExpanded(new Set(restoredSession?.expanded ?? []))
+    setPinnedPaths(new Set(restoredSession?.pinnedPaths ?? []))
+    recentPathsRef.current = profile.persistRecentFiles ? restoredSession?.recentPaths ?? [] : []
+    setRecentPaths(profile.persistRecentFiles ? restoredSession?.recentPaths ?? [] : [])
+    setFileQuery(restoredSession?.fileQuery ?? '')
+    setContentUsesFileFilter(restoredSession?.contentUsesFileFilter ?? false)
+    setContentMatches([])
+    if (openedVault.privateVault.enabled) setNotice(openedVault.privateVault.message)
+    await refreshTree()
+    await loadCalendarEvents()
+    await invoke('watch_vault')
+    if (openedVault.privateVault.enabled) {
+      window.setTimeout(() => {
+        void preparePrivateVaultInBackground(openedVault.root, preparationId)
+      }, 0)
+    }
+  }, [
+    loadCalendarEvents,
+    loadStoredSession,
+    preparePrivateVaultInBackground,
+    profile.persistRecentFiles,
+    refreshTree
+  ])
+
   const openVault = useCallback(async () => {
     const trimmed = vaultPath.trim()
     if (!trimmed) {
@@ -814,42 +1017,32 @@ function App(): JSX.Element {
     setError(null)
     try {
       const nextVault = await invoke<VaultInfo>('open_vault', { path: trimmed })
-      let openedVault = nextVault
-      localStorage.setItem(LAST_VAULT_KEY, trimmed)
-      if (nextVault.git.status === 'needsCheckpoint') {
-        const proceed = window.confirm(
-          `${nextVault.git.message}\n\nCreate a checkpoint commit and switch to inuse?`
-        )
-        if (proceed) {
-          const git = await invoke<GitInfo>('checkpoint_and_switch_inuse')
-          openedVault = { ...nextVault, git }
-        }
-      }
-      vaultRef.current = openedVault
-      currentPathsCaseSensitive = openedVault.pathsCaseSensitive
-      const restoredSession = await loadStoredSession(openedVault.root)
-      setVault(openedVault)
-      setTabs(restoredSession?.tabs ?? [])
-      setActiveId(restoredSession?.activeId ?? null)
-      setSplitOpen(restoredSession?.splitOpen ?? false)
-      setSplitId(restoredSession?.splitId ?? null)
-      setFocusedPane(restoredSession?.splitOpen ? 'split' : 'main')
-      setExpanded(new Set(restoredSession?.expanded ?? []))
-      setPinnedPaths(new Set(restoredSession?.pinnedPaths ?? []))
-      recentPathsRef.current = profile.persistRecentFiles ? restoredSession?.recentPaths ?? [] : []
-      setRecentPaths(profile.persistRecentFiles ? restoredSession?.recentPaths ?? [] : [])
-      setFileQuery(restoredSession?.fileQuery ?? '')
-      setContentUsesFileFilter(restoredSession?.contentUsesFileFilter ?? false)
-      setContentMatches([])
-      await refreshTree()
-      await loadCalendarEvents()
-      await invoke('watch_vault')
+      await activateOpenedVault(nextVault, trimmed)
     } catch (err) {
       setError(String(err))
     } finally {
       setBusy(false)
     }
-  }, [loadCalendarEvents, loadStoredSession, profile.persistRecentFiles, refreshTree, vaultPath])
+  }, [activateOpenedVault, vaultPath])
+
+  const unlockPrivateVault = useCallback(async () => {
+    if (!privatePassword) {
+      setPrivatePasswordError('Enter the private-vault password.')
+      return
+    }
+    setPrivatePasswordBusy(true)
+    setError(null)
+    setPrivatePasswordError(null)
+    try {
+      await preparePrivateVaultInBackground(
+        privatePasswordPath,
+        privatePreparationIdRef.current,
+        privatePassword
+      )
+    } finally {
+      setPrivatePasswordBusy(false)
+    }
+  }, [preparePrivateVaultInBackground, privatePassword, privatePasswordPath])
 
   useEffect(() => {
     if (!vault) return
@@ -904,7 +1097,7 @@ function App(): JSX.Element {
   }, [profile.gitStatusPollIntervalMs, vault?.git.isRepo, vault?.root])
 
   useEffect(() => {
-    if (!vault) return
+    if (!vault || privatePending) return
     writeStoredSession(vault.root, {
       openTabs: tabs.map((tab) => ({ path: tab.path, mode: tab.mode })),
       activeId,
@@ -918,7 +1111,7 @@ function App(): JSX.Element {
       fileQuery,
       contentUsesFileFilter
     })
-  }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, pinnedPaths, profile.persistRecentFiles, recentPaths, splitOpen, splitTab, tabs, vault])
+  }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, pinnedPaths, privatePending, profile.persistRecentFiles, recentPaths, splitOpen, splitTab, tabs, vault])
 
   const openNote = useCallback(async (destination: string, offset: number | null = null) => {
     const { path, heading } = splitWikiDestination(destination)
@@ -1276,7 +1469,7 @@ function App(): JSX.Element {
   }, [latestTabBody, refreshTree, rememberRecentPath])
 
   const checkpointNow = useCallback(async () => {
-    if (!vault?.git.isRepo || vault.git.currentBranch !== 'inuse') return
+    if (privatePending || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse') return
     const paths = [...touchedPaths]
     if (paths.length === 0) return
     const touched = new Set(paths)
@@ -1296,10 +1489,10 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [tabs, touchedPaths, vault])
+  }, [privatePending, tabs, touchedPaths, vault])
 
   const checkpointVaultNow = useCallback(async () => {
-    if (!vault?.git.isRepo) return
+    if (privatePending || !vault?.git.isRepo) return
     setBusy(true)
     setError(null)
     setNotice(null)
@@ -1329,7 +1522,7 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [clearStatusLater, isTabDirty, latestTabBody, refreshTree, saveTabBodyWithConflictCheck, tabs, vault])
+  }, [clearStatusLater, isTabDirty, latestTabBody, privatePending, refreshTree, saveTabBodyWithConflictCheck, tabs, vault])
 
   const toggleToCommitFiles = useCallback(async () => {
     if (!gitHasDirtyFiles || loadingToCommit) return
@@ -1352,7 +1545,7 @@ function App(): JSX.Element {
 
   const finalizeBeforeClose = useCallback(async () => {
     const vault = vaultRef.current
-    if (vault) {
+    if (vault && !privatePendingRef.current) {
       writeStoredSession(vault.root, {
         openTabs: tabsRef.current.map((tab) => ({ path: tab.path, mode: tab.mode })),
         activeId: activeIdRef.current,
@@ -1369,7 +1562,12 @@ function App(): JSX.Element {
     }
     const paths = new Set(touchedPathsRef.current)
 
-    if (vault?.git.isRepo && vault.git.currentBranch === 'inuse' && paths.size > 0) {
+    if (
+      !privatePendingRef.current
+      && vault?.git.isRepo
+      && vault.git.currentBranch === 'inuse'
+      && paths.size > 0
+    ) {
       await invoke<GitInfo>('checkpoint_inuse', { paths: uniquePaths([...paths]) })
     }
   }, [])
@@ -1425,6 +1623,56 @@ function App(): JSX.Element {
       setBusy(false)
     }
   }, [clearStatusLater, newNotePath, refreshTree, rememberRecentPath, selectMainTab])
+
+  const createFolderAction = useCallback(async () => {
+    if (!vault) return
+    const requestedPath = window.prompt('New folder path (relative to the vault)')
+    if (requestedPath == null) return
+    if (!requestedPath.trim()) {
+      setError('Enter a folder path.')
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      const createdPath = await invoke<string>('create_folder', { path: requestedPath })
+      await refreshTree()
+      setExpanded((prev) => new Set([...prev, ...folderAncestors(createdPath)]))
+      const message = `Created folder: ${createdPath}`
+      setNotice(message)
+      clearStatusLater('notice', message)
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }, [clearStatusLater, refreshTree, vault])
+
+  const createFolderForNewNote = useCallback(async () => {
+    const initialPath = parentFolder(newNotePath)
+    const requestedPath = window.prompt('New folder path (relative to the vault)', initialPath)
+    if (requestedPath == null) return
+    if (!requestedPath.trim()) {
+      setNewNoteError('Enter a folder path.')
+      return
+    }
+    setBusy(true)
+    setNewNoteError(null)
+    try {
+      const createdPath = await invoke<string>('create_folder', { path: requestedPath })
+      await refreshTree()
+      setExpanded((prev) => new Set([...prev, ...folderAncestors(createdPath)]))
+      setNewNotePath(`${createdPath}/${noteName(newNotePath)}`)
+      const message = `Created folder: ${createdPath}`
+      setNotice(message)
+      clearStatusLater('notice', message)
+      window.requestAnimationFrame(() => newNoteInputRef.current?.focus())
+    } catch (err) {
+      setNewNoteError(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }, [clearStatusLater, newNotePath, refreshTree])
 
   const renameNoteAction = useCallback(async (oldPath: string) => {
     const nextPath = window.prompt('Rename note path', oldPath)
@@ -1696,13 +1944,13 @@ function App(): JSX.Element {
   }, [isTabDirty, profile.autosaveDelayMs, saveTab, tabs])
 
   useEffect(() => {
-    if (!vault?.git.isRepo || vault.git.currentBranch !== 'inuse') return
+    if (privatePending || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse') return
     if (touchedPaths.size === 0) return
     const timer = window.setTimeout(() => {
       void checkpointNow()
     }, profile.checkpointIntervalMs)
     return () => window.clearTimeout(timer)
-  }, [checkpointNow, profile.checkpointIntervalMs, touchedPaths, vault])
+  }, [checkpointNow, privatePending, profile.checkpointIntervalMs, touchedPaths, vault])
 
   useEffect(() => {
     const appWindow = getCurrentWindow()
@@ -1860,6 +2108,16 @@ function App(): JSX.Element {
   const pinnedEntries = useMemo(
     () => collectPinnedFiles(tree, pinnedPaths),
     [pinnedPaths, tree]
+  )
+  const focusedMarkdownPath = (
+    workspaceMode === 'notes'
+    && activePath
+    && !activeOutOfVault
+    && isMarkdownPath(activePath)
+  ) ? activePath : null
+  const focusedMarkdownEntry = useMemo(
+    () => focusedMarkdownPath == null ? null : findFileEntry(tree, focusedMarkdownPath),
+    [focusedMarkdownPath, tree]
   )
   const filteredFilePaths = useMemo(() => collectFilePaths(filteredTree), [filteredTree])
 
@@ -2133,13 +2391,16 @@ function App(): JSX.Element {
               type="button"
               className="sidebar-checkpoint-button"
               onClick={() => void checkpointVaultNow()}
-              disabled={!vault?.git.isRepo || busy}
+              disabled={!vault?.git.isRepo || privatePending || busy}
             >
               <span className="checkpoint-label-full">Checkpoint</span>
               <span className="checkpoint-label-short">CP</span>
             </button>
             <button type="button" onClick={openNewNoteDialog} disabled={!vault || busy}>
               New note
+            </button>
+            <button type="button" onClick={() => void createFolderAction()} disabled={!vault || busy}>
+              New folder
             </button>
           </div>
           <label>
@@ -2183,6 +2444,7 @@ function App(): JSX.Element {
             <>
               <PinnedNotes
                 entries={pinnedEntries}
+                focusedEntry={focusedMarkdownEntry}
                 activePath={activePath}
                 onOpen={(path) => void openNote(path)}
                 onOpenTrack={(path) => void openTrackNote(path)}
@@ -2201,6 +2463,7 @@ function App(): JSX.Element {
             <>
               <PinnedNotes
                 entries={pinnedEntries}
+                focusedEntry={focusedMarkdownEntry}
                 activePath={activePath}
                 onOpen={(path) => void openNote(path)}
                 onOpenTrack={(path) => void openTrackNote(path)}
@@ -2211,6 +2474,7 @@ function App(): JSX.Element {
               <FileTree
                 entries={filteredTree}
                 activePath={activePath}
+                featuredPath={focusedMarkdownEntry?.path ?? null}
                 expanded={expanded}
                 pinnedPaths={pinnedPaths}
                 onToggle={(path) => {
@@ -2238,6 +2502,7 @@ function App(): JSX.Element {
 
         <footer className="sidebar-footer">
           <span>{totalFiles} files</span>
+          {privatePending && <span>Private .h pending...</span>}
           {busy && <span>Working...</span>}
         </footer>
       </aside>
@@ -2286,7 +2551,7 @@ function App(): JSX.Element {
             activeIsTypst={activeIsTypst}
             busy={busy}
             canvasDocumentDisplayMode={canvasDocumentDisplayMode}
-            checkpointDisabled={activeOutOfVault || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
+            checkpointDisabled={activeOutOfVault || privatePending || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
             profile={profile}
             recentClosedPaths={recentClosedPaths}
             showBacklinks={showBacklinks}
@@ -2422,7 +2687,7 @@ function App(): JSX.Element {
             <button
               type="button"
               onClick={() => void checkpointNow()}
-              disabled={activeOutOfVault || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
+              disabled={activeOutOfVault || privatePending || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
             >
               Checkpoint
             </button>
@@ -2505,11 +2770,12 @@ function App(): JSX.Element {
                   canvasMarkdownDisplayMode={canvasMarkdownDisplayMode}
                   searchHighlight={searchHighlight && mainTab?.path != null && samePath(searchHighlight.path, mainTab.path) ? searchHighlight : null}
                   jumpOffset={focusedPane === 'main' ? jumpOffset : null}
-                  focusRequest={focusedPane === 'main' ? editorFocusRequest : 0}
-                  selectAllRequest={focusedPane === 'main' ? editorSelectAllRequest : 0}
-                  bulletListRequest={focusedPane === 'main' ? editorBulletListRequest : 0}
-                  numberedListRequest={focusedPane === 'main' ? editorNumberedListRequest : 0}
-                  textCountRequest={focusedPane === 'main' ? editorTextCountRequest : 0}
+                  isActivePane={focusedPane === 'main'}
+                  focusRequest={editorFocusRequest}
+                  selectAllRequest={editorSelectAllRequest}
+                  bulletListRequest={editorBulletListRequest}
+                  numberedListRequest={editorNumberedListRequest}
+                  textCountRequest={editorTextCountRequest}
                   onJumpHandled={() => setJumpOffset(null)}
                   onTextCount={setTextCountResult}
                   onChange={updateTabBody}
@@ -2608,11 +2874,12 @@ function App(): JSX.Element {
                     canvasMarkdownDisplayMode={canvasMarkdownDisplayMode}
                     searchHighlight={searchHighlight && splitTab?.path != null && samePath(searchHighlight.path, splitTab.path) ? searchHighlight : null}
                     jumpOffset={focusedPane === 'split' ? jumpOffset : null}
-                    focusRequest={focusedPane === 'split' ? editorFocusRequest : 0}
-                    selectAllRequest={focusedPane === 'split' ? editorSelectAllRequest : 0}
-                    bulletListRequest={focusedPane === 'split' ? editorBulletListRequest : 0}
-                    numberedListRequest={focusedPane === 'split' ? editorNumberedListRequest : 0}
-                    textCountRequest={focusedPane === 'split' ? editorTextCountRequest : 0}
+                    isActivePane={focusedPane === 'split'}
+                    focusRequest={editorFocusRequest}
+                    selectAllRequest={editorSelectAllRequest}
+                    bulletListRequest={editorBulletListRequest}
+                    numberedListRequest={editorNumberedListRequest}
+                    textCountRequest={editorTextCountRequest}
                     onJumpHandled={() => setJumpOffset(null)}
                     onTextCount={setTextCountResult}
                     onChange={updateTabBody}
@@ -2722,11 +2989,77 @@ function App(): JSX.Element {
             </div>
           )}
           <div className="dialog-actions">
+            <button type="button" className="secondary-button" onClick={() => void createFolderForNewNote()} disabled={busy}>
+              New folder
+            </button>
             <button type="button" className="secondary-button" onClick={() => setNewNoteOpen(false)} disabled={busy}>
               Cancel
             </button>
             <button type="submit" disabled={busy}>
               Create
+            </button>
+          </div>
+        </form>
+      </div>
+    )}
+    {privatePasswordOpen && (
+      <div className="modal-backdrop" role="presentation">
+        <form
+          className="new-note-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="private-password-title"
+          onSubmit={(event) => {
+            event.preventDefault()
+            void unlockPrivateVault()
+          }}
+        >
+          <header>
+            <strong id="private-password-title">Unlock private notes</strong>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => {
+                setPrivatePassword('')
+                setPrivatePasswordOpen(false)
+              }}
+              aria-label="Cancel private vault unlock"
+            >
+              x
+            </button>
+          </header>
+          <p>
+            This vault contains <code>.h</code> or <code>.h.zip</code>. Enter its password to
+            decrypt the private notes.
+          </p>
+          <label>
+            <span>Password</span>
+            <input
+              type="password"
+              value={privatePassword}
+              onChange={(event) => {
+                setPrivatePassword(event.target.value)
+                setPrivatePasswordError(null)
+              }}
+              autoFocus
+              autoComplete="current-password"
+            />
+          </label>
+          {privatePasswordError && <div className="dialog-error">{privatePasswordError}</div>}
+          <div className="dialog-actions">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => {
+                setPrivatePassword('')
+                setPrivatePasswordOpen(false)
+              }}
+              disabled={privatePasswordBusy}
+            >
+              Cancel
+            </button>
+            <button type="submit" disabled={privatePasswordBusy || !privatePassword}>
+              Unlock
             </button>
           </div>
         </form>
@@ -3037,6 +3370,7 @@ function MarkdownEditor({
   canvasMarkdownDisplayMode,
   searchHighlight,
   jumpOffset,
+  isActivePane,
   focusRequest,
   selectAllRequest,
   bulletListRequest,
@@ -3057,6 +3391,7 @@ function MarkdownEditor({
   canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode
   searchHighlight: SearchHighlight | null
   jumpOffset: number | null
+  isActivePane: boolean
   focusRequest: number
   selectAllRequest: number
   bulletListRequest: number
@@ -3086,6 +3421,8 @@ function MarkdownEditor({
   const pathRef = useRef<string | null>(null)
   const changeIdRef = useRef<string | null>(changeId)
   const statesRef = useRef<Map<string, EditorState>>(new Map())
+  const scrollSnapshotsRef = useRef<Map<string, ReturnType<EditorView['scrollSnapshot']>>>(new Map())
+  const scrollPositionsRef = useRef<Map<string, { top: number; left: number }>>(new Map())
   const pendingEditorEchoesRef = useRef<Map<string, string[]>>(new Map())
   const baseExtensionsRef = useRef<Extension[] | null>(null)
   const onChangeRef = useRef(onChange)
@@ -3094,6 +3431,11 @@ function MarkdownEditor({
   const searchHighlightRef = useRef<SearchHighlight | null>(searchHighlight)
   const onOpenWikiLinkRef = useRef(onOpenWikiLink)
   const onLoadWikiCompletionBodyRef = useRef(onLoadWikiCompletionBody)
+  const handledFocusRequestRef = useRef(focusRequest)
+  const handledSelectAllRequestRef = useRef(selectAllRequest)
+  const handledBulletListRequestRef = useRef(bulletListRequest)
+  const handledNumberedListRequestRef = useRef(numberedListRequest)
+  const handledTextCountRequestRef = useRef(textCountRequest)
   const [colorMenu, setColorMenu] = useState<ColorMenuState | null>(null)
 
   useEffect(() => {
@@ -3357,6 +3699,11 @@ function MarkdownEditor({
     const sameActivePath = previousPath != null && activePath != null && samePath(previousPath, activePath)
     if (previousPath && !sameActivePath) {
       statesRef.current.set(previousPath, view.state)
+      scrollSnapshotsRef.current.set(previousPath, view.scrollSnapshot())
+      scrollPositionsRef.current.set(previousPath, {
+        top: view.scrollDOM.scrollTop,
+        left: view.scrollDOM.scrollLeft
+      })
     }
     if (sameActivePath) {
       const current = view.state.doc.toString()
@@ -3382,9 +3729,10 @@ function MarkdownEditor({
 
     const cached = statesRef.current.get(activePath)
     if (cached) {
+      const cachedMatchesBody = cached.doc.toString() === body
       view.setState(cached)
       applyEditable(view, editableRef.current, !disabled)
-      if (cached.doc.toString() !== body) {
+      if (!cachedMatchesBody) {
         const scrollTop = view.scrollDOM.scrollTop
         view.dispatch({
           changes: { from: 0, to: view.state.doc.length, insert: body },
@@ -3392,6 +3740,24 @@ function MarkdownEditor({
           selection: { anchor: Math.min(view.state.selection.main.head, body.length) }
         })
         view.scrollDOM.scrollTop = scrollTop
+      }
+      const scrollSnapshot = scrollSnapshotsRef.current.get(activePath)
+      if (scrollSnapshot && cachedMatchesBody) {
+        view.dispatch({ effects: scrollSnapshot })
+        return
+      }
+      const scrollPosition = scrollPositionsRef.current.get(activePath)
+      if (scrollPosition) {
+        view.scrollDOM.scrollTop = scrollPosition.top
+        view.scrollDOM.scrollLeft = scrollPosition.left
+        view.requestMeasure({
+          read: () => null,
+          write: (_, measuredView) => {
+            if (pathRef.current == null || !samePath(pathRef.current, activePath)) return
+            measuredView.scrollDOM.scrollTop = scrollPosition.top
+            measuredView.scrollDOM.scrollLeft = scrollPosition.left
+          }
+        })
       }
       return
     }
@@ -3414,39 +3780,49 @@ function MarkdownEditor({
   }, [jumpOffset, onJumpHandled])
 
   useEffect(() => {
-    if (disabled || focusRequest === 0) return
+    if (focusRequest === handledFocusRequestRef.current) return
+    handledFocusRequestRef.current = focusRequest
+    if (disabled || !isActivePane || focusRequest === 0) return
     viewRef.current?.focus()
-  }, [disabled, focusRequest])
+  }, [disabled, focusRequest, isActivePane])
 
   useEffect(() => {
     const view = viewRef.current
-    if (disabled || selectAllRequest === 0 || !view) return
+    if (selectAllRequest === handledSelectAllRequestRef.current) return
+    handledSelectAllRequestRef.current = selectAllRequest
+    if (disabled || !isActivePane || selectAllRequest === 0 || !view) return
     view.dispatch({
       selection: EditorSelection.range(0, view.state.doc.length)
     })
     view.focus()
-  }, [disabled, selectAllRequest])
+  }, [disabled, isActivePane, selectAllRequest])
 
   useEffect(() => {
     const view = viewRef.current
-    if (disabled || bulletListRequest === 0 || !view) return
+    if (bulletListRequest === handledBulletListRequestRef.current) return
+    handledBulletListRequestRef.current = bulletListRequest
+    if (disabled || !isActivePane || bulletListRequest === 0 || !view) return
     formatMarkdownListSelection(view, 'bullet')
     view.focus()
-  }, [bulletListRequest, disabled])
+  }, [bulletListRequest, disabled, isActivePane])
 
   useEffect(() => {
     const view = viewRef.current
-    if (disabled || numberedListRequest === 0 || !view) return
+    if (numberedListRequest === handledNumberedListRequestRef.current) return
+    handledNumberedListRequestRef.current = numberedListRequest
+    if (disabled || !isActivePane || numberedListRequest === 0 || !view) return
     formatMarkdownListSelection(view, 'numbered')
     view.focus()
-  }, [disabled, numberedListRequest])
+  }, [disabled, isActivePane, numberedListRequest])
 
   useEffect(() => {
     const view = viewRef.current
-    if (disabled || textCountRequest === 0 || !view) return
+    if (textCountRequest === handledTextCountRequestRef.current) return
+    handledTextCountRequestRef.current = textCountRequest
+    if (disabled || !isActivePane || textCountRequest === 0 || !view) return
     onTextCount(countEditorText(view.state))
     view.focus()
-  }, [disabled, onTextCount, textCountRequest])
+  }, [disabled, isActivePane, onTextCount, textCountRequest])
 
   return (
     <div
@@ -4991,6 +5367,7 @@ function TabStrip({
 function FileTree({
   entries,
   activePath,
+  featuredPath,
   expanded,
   pinnedPaths,
   onToggle,
@@ -5006,6 +5383,7 @@ function FileTree({
 }: {
   entries: TreeEntry[]
   activePath: string | null
+  featuredPath: string | null
   expanded: Set<string>
   pinnedPaths: Set<string>
   onToggle: (path: string) => void
@@ -5024,7 +5402,10 @@ function FileTree({
   }
 
   const visibleEntries = orderTreeEntries(entries, pinnedPaths).filter(
-    (entry) => entry.kind === 'dir' || !hasPath(pinnedPaths, entry.path)
+    (entry) => entry.kind === 'dir' || (
+      !hasPath(pinnedPaths, entry.path)
+      && (featuredPath == null || !samePath(featuredPath, entry.path))
+    )
   )
   if (visibleEntries.length === 0) return <></>
 
@@ -5132,6 +5513,7 @@ function FileTree({
                 <FileTree
                   entries={entry.children}
                   activePath={activePath}
+                  featuredPath={featuredPath}
                   expanded={expanded}
                   pinnedPaths={pinnedPaths}
                   onToggle={onToggle}
@@ -5169,6 +5551,7 @@ function FileTree({
 
 function PinnedNotes({
   entries,
+  focusedEntry,
   activePath,
   onOpen,
   onOpenTrack,
@@ -5177,6 +5560,7 @@ function PinnedNotes({
   onDeleteFile
 }: {
   entries: TreeEntry[]
+  focusedEntry: TreeEntry | null
   activePath: string | null
   onOpen: (path: string) => void
   onOpenTrack: (path: string) => void
@@ -5184,95 +5568,143 @@ function PinnedNotes({
   onRenameFile: (path: string) => void
   onDeleteFile: (path: string) => void
 }): JSX.Element | null {
-  if (entries.length === 0) return null
+  const focusedIsPinned = focusedEntry != null && entries.some((entry) => samePath(entry.path, focusedEntry.path))
+  const visibleFocusedEntry = focusedIsPinned ? null : focusedEntry
+  if (entries.length === 0 && visibleFocusedEntry == null) return null
   return (
     <div className="pinned-notes">
       <div className="tree-list">
         {entries.map((entry) => (
-          <button
+          <SidebarNoteRow
             key={entry.path}
-            type="button"
-            className={`${activePath != null && samePath(activePath, entry.path) ? 'tree-row active' : 'tree-row'} pinned`}
-            onClick={() => onOpen(entry.path)}
-            title={entry.path}
-          >
-            <span className="tree-chevron" />
-            <span className="tree-icon">{fileIcon(entry.path)}</span>
-            <span className="tree-name">{entry.path}</span>
-            <span className="tree-actions">
-              <span
-                role="button"
-                tabIndex={0}
-                title="Unpin note"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onTogglePin(entry.path)
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== 'Enter' && event.key !== ' ') return
-                  event.preventDefault()
-                  event.stopPropagation()
-                  onTogglePin(entry.path)
-                }}
-              >
-                unpin
-              </span>
-              <span
-                role="button"
-                tabIndex={0}
-                title={isMarkdownPath(entry.path) ? 'Open with Track Changes' : 'Track Changes is Markdown-only'}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  if (isMarkdownPath(entry.path)) onOpenTrack(entry.path)
-                }}
-                onKeyDown={(event) => {
-                  if (!isMarkdownPath(entry.path) || (event.key !== 'Enter' && event.key !== ' ')) return
-                  event.preventDefault()
-                  event.stopPropagation()
-                  onOpenTrack(entry.path)
-                }}
-              >
-                track
-              </span>
-              <span
-                role="button"
-                tabIndex={0}
-                title="Rename note"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onRenameFile(entry.path)
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== 'Enter' && event.key !== ' ') return
-                  event.preventDefault()
-                  event.stopPropagation()
-                  onRenameFile(entry.path)
-                }}
-              >
-                rename
-              </span>
-              <span
-                role="button"
-                tabIndex={0}
-                title="Delete note"
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onDeleteFile(entry.path)
-                }}
-                onKeyDown={(event) => {
-                  if (event.key !== 'Enter' && event.key !== ' ') return
-                  event.preventDefault()
-                  event.stopPropagation()
-                  onDeleteFile(entry.path)
-                }}
-              >
-                delete
-              </span>
-            </span>
-          </button>
+            entry={entry}
+            active={activePath != null && samePath(activePath, entry.path)}
+            pinned
+            onOpen={onOpen}
+            onOpenTrack={onOpenTrack}
+            onTogglePin={onTogglePin}
+            onRenameFile={onRenameFile}
+            onDeleteFile={onDeleteFile}
+          />
         ))}
+        {visibleFocusedEntry && (
+          <SidebarNoteRow
+            key={`focused:${visibleFocusedEntry.path}`}
+            entry={visibleFocusedEntry}
+            active
+            pinned={false}
+            onOpen={onOpen}
+            onOpenTrack={onOpenTrack}
+            onTogglePin={onTogglePin}
+            onRenameFile={onRenameFile}
+            onDeleteFile={onDeleteFile}
+          />
+        )}
       </div>
     </div>
+  )
+}
+
+function SidebarNoteRow({
+  entry,
+  active,
+  pinned,
+  onOpen,
+  onOpenTrack,
+  onTogglePin,
+  onRenameFile,
+  onDeleteFile
+}: {
+  entry: TreeEntry
+  active: boolean
+  pinned: boolean
+  onOpen: (path: string) => void
+  onOpenTrack: (path: string) => void
+  onTogglePin: (path: string) => void
+  onRenameFile: (path: string) => void
+  onDeleteFile: (path: string) => void
+}): JSX.Element {
+  return (
+    <button
+      type="button"
+      className={`${active ? 'tree-row active' : 'tree-row'}${pinned ? ' pinned' : ''}`}
+      onClick={() => onOpen(entry.path)}
+      title={entry.path}
+    >
+      <span className="tree-chevron" />
+      <span className="tree-icon">{fileIcon(entry.path)}</span>
+      <span className="tree-name">{entry.path}</span>
+      <span className="tree-actions">
+        <span
+          role="button"
+          tabIndex={0}
+          title={pinned ? 'Unpin note' : 'Pin note'}
+          onClick={(event) => {
+            event.stopPropagation()
+            onTogglePin(entry.path)
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            event.preventDefault()
+            event.stopPropagation()
+            onTogglePin(entry.path)
+          }}
+        >
+          {pinned ? 'unpin' : 'pin'}
+        </span>
+        <span
+          role="button"
+          tabIndex={0}
+          title={isMarkdownPath(entry.path) ? 'Open with Track Changes' : 'Track Changes is Markdown-only'}
+          onClick={(event) => {
+            event.stopPropagation()
+            if (isMarkdownPath(entry.path)) onOpenTrack(entry.path)
+          }}
+          onKeyDown={(event) => {
+            if (!isMarkdownPath(entry.path) || (event.key !== 'Enter' && event.key !== ' ')) return
+            event.preventDefault()
+            event.stopPropagation()
+            onOpenTrack(entry.path)
+          }}
+        >
+          track
+        </span>
+        <span
+          role="button"
+          tabIndex={0}
+          title="Rename note"
+          onClick={(event) => {
+            event.stopPropagation()
+            onRenameFile(entry.path)
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            event.preventDefault()
+            event.stopPropagation()
+            onRenameFile(entry.path)
+          }}
+        >
+          rename
+        </span>
+        <span
+          role="button"
+          tabIndex={0}
+          title="Delete note"
+          onClick={(event) => {
+            event.stopPropagation()
+            onDeleteFile(entry.path)
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return
+            event.preventDefault()
+            event.stopPropagation()
+            onDeleteFile(entry.path)
+          }}
+        >
+          delete
+        </span>
+      </span>
+    </button>
   )
 }
 
@@ -5386,6 +5818,18 @@ function collectPinnedFiles(entries: TreeEntry[], pinnedPaths: Set<string>): Tre
     })
 }
 
+function findFileEntry(entries: TreeEntry[], path: string): TreeEntry | null {
+  for (const entry of entries) {
+    if (entry.kind === 'file') {
+      if (samePath(entry.path, path)) return entry
+      continue
+    }
+    const match = findFileEntry(entry.children, path)
+    if (match) return match
+  }
+  return null
+}
+
 function collectDirPaths(entries: TreeEntry[]): string[] {
   return entries.flatMap((entry) => {
     if (entry.kind === 'file') return []
@@ -5396,6 +5840,16 @@ function collectDirPaths(entries: TreeEntry[]): string[] {
 function basename(path: string): string {
   const normalized = path.replace(/\\/g, '/')
   return normalized.split('/').filter(Boolean).pop() ?? path
+}
+
+function parentFolder(path: string): string {
+  const normalized = path.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+  return normalized.includes('/') ? normalized.slice(0, normalized.lastIndexOf('/')) : ''
+}
+
+function noteName(path: string): string {
+  const name = basename(path.trim())
+  return name || 'untitled.md'
 }
 
 function folderAncestors(path: string): string[] {
@@ -5459,6 +5913,11 @@ function pathKey(path: string): string {
 
 function samePath(left: string, right: string): boolean {
   return pathKey(left) === pathKey(right)
+}
+
+function isPrivateVaultPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+  return normalized === '.h' || normalized.startsWith('.h/')
 }
 
 function hasPath(paths: Set<string>, path: string): boolean {

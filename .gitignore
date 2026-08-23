@@ -13,6 +13,9 @@ src-tauri/gen/
 # Local command/build logs.
 *.log
 
+# Local private-vault passwords. This file contains plaintext secrets.
+private-vaults.json
+
 # Local demo/reference copy; not part of the app build.
 /tiptap-track-demo/
 /tiptap-track-demo/**

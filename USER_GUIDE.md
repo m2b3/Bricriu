@@ -156,6 +156,24 @@ Checkpoint behavior:
 - Periodic checkpoint default is 3 minutes when changed files exist.
 - On app close, dirty tabs are saved and touched files are checkpointed before exit.
 
+## Private Notes
+
+To create a private part of a vault:
+
+1. Create `.h/` in the vault.
+2. Add private notes beneath it.
+3. Open the vault and enter a password when prompted.
+4. Use **Checkpoint** or commit. That first checkpoint or commit creates `.h.zip` and the `.horig/` baseline.
+5. Commit the generated `.h.zip`, but never force-add `.h/` or `.horig/`.
+
+Place `.h/` directly inside the folder opened as the vault. If that vault is a subfolder of a larger Git repository, NotesProject automatically uses repository-relative ignore, archive, and hook paths.
+
+NotesProject stores passwords in its git-ignored `private-vaults.json` file. Its `defaultPassword` is used unless `vaults` contains an entry for the canonical vault path. The private folder remains visible in the NotesProject tree so it can be edited normally. Its plaintext and `.horig/` baseline are placed in the vault repository's local Git exclude file.
+
+Opening shows ordinary notes first and decrypts an existing `.h.zip` into `.h/` and `.horig/` on a background worker. Private notes stay out of the tree and content search until they are ready; checkpoints wait as well. Restored private tabs appear after decryption. If `.h/` is new and no archive exists yet, opening leaves it untouched; the first checkpoint or commit creates the archive and baseline. Before later app checkpoints or command-line commits, NotesProject compares the two directories and refreshes `.h.zip` when needed. A command-line push is stopped if it finds an uncommitted archive update.
+
+Keep a separate password backup. Deleted passwords cannot be recovered. File names in the ZIP remain visible, and the working folders are plaintext while the vault is open.
+
 Defaults are stored in `profile.json`:
 
 ```json

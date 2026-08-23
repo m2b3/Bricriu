@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod private_vault;
+
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{SearcherBuilder, Sink, SinkMatch};
@@ -33,6 +35,7 @@ use typst_as_lib::{
 #[derive(Default)]
 struct AppState {
     vault_root: Mutex<Option<PathBuf>>,
+    private_vault_ready: Mutex<bool>,
     watcher: Mutex<Option<RecommendedWatcher>>,
     typst_preview: Mutex<Option<TypstPreviewSession>>,
     typst_embedded: Mutex<Option<EmbeddedTypstSession>>,
@@ -78,11 +81,13 @@ struct VaultTypstResolver {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct VaultInfo {
     root: String,
     name: String,
     paths_case_sensitive: bool,
     git: GitInfo,
+    private_vault: private_vault::PrivateVaultInfo,
 }
 
 #[derive(Serialize)]
@@ -240,7 +245,7 @@ struct AppProfile {
 }
 
 #[tauri::command]
-fn open_vault(state: tauri::State<AppState>, path: String) -> Result<VaultInfo, String> {
+async fn open_vault(state: tauri::State<'_, AppState>, path: String) -> Result<VaultInfo, String> {
     let root = PathBuf::from(path.trim());
     if root.as_os_str().is_empty() {
         return Err("Vault path is required.".to_string());
@@ -257,12 +262,20 @@ fn open_vault(state: tauri::State<AppState>, path: String) -> Result<VaultInfo, 
         .and_then(|name| name.to_str())
         .unwrap_or("Vault")
         .to_string();
-    let git = prepare_inuse_branch(&root)?;
+    let private_configured = private_vault::is_configured(&root);
+    let work_root = root.clone();
+    let git = tauri::async_runtime::spawn_blocking(move || prepare_inuse_branch(&work_root))
+        .await
+        .map_err(|err| format!("Vault-opening worker failed: {err}"))??;
     let root_string = display_path(&root);
     *state
         .vault_root
         .lock()
         .map_err(|_| "Vault state is locked.")? = Some(root);
+    *state
+        .private_vault_ready
+        .lock()
+        .map_err(|_| "Private-vault state is locked.")? = !private_configured;
     *state
         .typst_preview
         .lock()
@@ -277,7 +290,53 @@ fn open_vault(state: tauri::State<AppState>, path: String) -> Result<VaultInfo, 
         name,
         paths_case_sensitive: paths_case_sensitive(),
         git,
+        private_vault: if private_configured {
+            private_vault::PrivateVaultInfo::pending()
+        } else {
+            private_vault::PrivateVaultInfo::disabled()
+        },
     })
+}
+
+#[tauri::command]
+async fn prepare_private_vault(
+    state: tauri::State<'_, AppState>,
+    path: String,
+    private_password: Option<String>,
+) -> Result<private_vault::PrivateVaultInfo, String> {
+    let root = current_root(&state)?;
+    let requested = PathBuf::from(path.trim())
+        .canonicalize()
+        .map_err(|err| format!("Could not resolve private vault: {err}"))?;
+    if requested != root {
+        return Err("The open vault changed before its private folder was ready.".to_string());
+    }
+    if !private_vault::is_configured(&root) {
+        *state
+            .private_vault_ready
+            .lock()
+            .map_err(|_| "Private-vault state is locked.")? = true;
+        return Ok(private_vault::PrivateVaultInfo::disabled());
+    }
+
+    let work_root = root.clone();
+    let prepared = tauri::async_runtime::spawn_blocking(move || {
+        let is_git_repo = git_available(&work_root)? && is_git_repo(&work_root)?;
+        private_vault::prepare_on_open(&work_root, private_password.as_deref(), is_git_repo)
+    })
+    .await
+    .map_err(|err| format!("Private-vault worker failed: {err}"))??;
+
+    if current_root(&state)? != root {
+        return Err(
+            "The open vault changed while its private folder was being prepared.".to_string(),
+        );
+    }
+    *state
+        .private_vault_ready
+        .lock()
+        .map_err(|_| "Private-vault state is locked.")? = true;
+    Ok(prepared)
 }
 
 #[tauri::command]
@@ -342,83 +401,112 @@ fn save_profile(profile: AppProfile) -> Result<AppProfile, String> {
 }
 
 #[tauri::command]
-fn checkpoint_and_switch_inuse(state: tauri::State<AppState>) -> Result<GitInfo, String> {
+async fn checkpoint_and_switch_inuse(state: tauri::State<'_, AppState>) -> Result<GitInfo, String> {
+    ensure_private_vault_ready(&state)?;
     let root = current_root(&state)?;
-    if !is_git_repo(&root)? {
+    tauri::async_runtime::spawn_blocking(move || checkpoint_and_switch_inuse_at(&root))
+        .await
+        .map_err(|err| format!("Checkpoint worker failed: {err}"))?
+}
+
+fn checkpoint_and_switch_inuse_at(root: &Path) -> Result<GitInfo, String> {
+    if !is_git_repo(root)? {
         return Ok(not_repo_git_info());
     }
 
+    private_vault::sync_if_needed(root)?;
     run_git_checked(
-        &root,
+        root,
         &["add", "-A"],
         "Could not stage current vault changes for checkpoint.",
     )?;
-    let has_staged = !run_git_status(&root, &["diff", "--cached", "--quiet"])?.success;
+    stage_private_archive(root)?;
+    let has_staged = !run_git_status(root, &["diff", "--cached", "--quiet"])?.success;
     if has_staged {
         let message = format!(
             "NotesProject checkpoint before inuse: {}",
             checkpoint_timestamp()
         );
         run_git_checked(
-            &root,
+            root,
             &["commit", "-m", &message],
             "Could not create checkpoint commit. Check Git user.name/user.email.",
         )?;
     }
 
-    switch_or_create_inuse(&root)?;
-    inspect_git_info(&root, "Using inuse branch.")
+    switch_or_create_inuse(root)?;
+    inspect_git_info(root, "Using inuse branch.")
 }
 
 #[tauri::command]
-fn checkpoint_inuse(state: tauri::State<AppState>, paths: Vec<String>) -> Result<GitInfo, String> {
+async fn checkpoint_inuse(
+    state: tauri::State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<GitInfo, String> {
+    ensure_private_vault_ready(&state)?;
     let root = current_root(&state)?;
-    if !is_git_repo(&root)? {
+    tauri::async_runtime::spawn_blocking(move || checkpoint_inuse_at(&root, paths))
+        .await
+        .map_err(|err| format!("Checkpoint worker failed: {err}"))?
+}
+
+fn checkpoint_inuse_at(root: &Path, paths: Vec<String>) -> Result<GitInfo, String> {
+    if !is_git_repo(root)? {
         return Ok(not_repo_git_info());
     }
-    if current_branch(&root)?.as_deref() != Some("inuse") {
+    if current_branch(root)?.as_deref() != Some("inuse") {
         return Err("Checkpoint commits are only enabled on the inuse branch.".to_string());
     }
 
-    let mut staged_any = false;
+    private_vault::sync_if_needed(root)?;
+    let mut staged_any = stage_private_archive(root)?;
     for path in paths {
-        for normalized in checkpoint_paths_for(&root, &path)? {
-            stage_checkpoint_path(&root, &normalized)?;
+        for normalized in checkpoint_paths_for(root, &path)? {
+            stage_checkpoint_path(root, &normalized)?;
             staged_any = true;
         }
     }
 
-    if !staged_any || run_git_status(&root, &["diff", "--cached", "--quiet"])?.success {
-        return inspect_git_info(&root, "No checkpoint changes to commit.");
+    if !staged_any || run_git_status(root, &["diff", "--cached", "--quiet"])?.success {
+        return inspect_git_info(root, "No checkpoint changes to commit.");
     }
 
     let message = format!("NotesProject checkpoint: {}", checkpoint_timestamp());
     run_git_checked(
-        &root,
+        root,
         &["commit", "-m", &message],
         "Could not create checkpoint commit. Check Git user.name/user.email.",
     )?;
-    inspect_git_info(&root, "Checkpoint committed.")
+    inspect_git_info(root, "Checkpoint committed.")
 }
 
 #[tauri::command]
-fn checkpoint_vault(state: tauri::State<AppState>) -> Result<GitInfo, String> {
+async fn checkpoint_vault(state: tauri::State<'_, AppState>) -> Result<GitInfo, String> {
+    ensure_private_vault_ready(&state)?;
     let root = current_root(&state)?;
-    if !is_git_repo(&root)? {
+    tauri::async_runtime::spawn_blocking(move || checkpoint_vault_at(&root))
+        .await
+        .map_err(|err| format!("Checkpoint worker failed: {err}"))?
+}
+
+fn checkpoint_vault_at(root: &Path) -> Result<GitInfo, String> {
+    if !is_git_repo(root)? {
         return Ok(not_repo_git_info());
     }
 
-    run_git_checked(&root, &["add", "."], "Could not stage vault changes.")?;
-    if run_git_status(&root, &["diff", "--cached", "--quiet"])?.success {
-        return inspect_git_info(&root, "No checkpoint changes to commit.");
+    private_vault::sync_if_needed(root)?;
+    run_git_checked(root, &["add", "."], "Could not stage vault changes.")?;
+    stage_private_archive(root)?;
+    if run_git_status(root, &["diff", "--cached", "--quiet"])?.success {
+        return inspect_git_info(root, "No checkpoint changes to commit.");
     }
 
     run_git_checked(
-        &root,
+        root,
         &["commit", "-m", "auto"],
         "Could not create checkpoint commit. Check Git user.name/user.email.",
     )?;
-    inspect_git_info(&root, "Checkpoint committed.")
+    inspect_git_info(root, "Checkpoint committed.")
 }
 
 #[tauri::command]
@@ -465,7 +553,7 @@ fn dirty_git_files(state: tauri::State<AppState>) -> Result<Vec<DirtyGitFile>, S
 #[tauri::command]
 fn list_tree(state: tauri::State<AppState>) -> Result<Vec<TreeEntry>, String> {
     let root = current_root(&state)?;
-    read_directory(&root, &root)
+    read_directory(&root, &root, private_vault_is_ready(&state)?)
 }
 
 #[tauri::command]
@@ -502,6 +590,7 @@ fn save_calendar_events(
 
 #[tauri::command]
 fn read_note(state: tauri::State<AppState>, path: String) -> Result<NoteContent, String> {
+    ensure_private_path_ready(&state, &path)?;
     let root = current_root(&state)?;
     let resolved = resolve_document_path(&root, &path)?;
     let abs = resolved.abs;
@@ -529,6 +618,7 @@ fn save_note(
     path: String,
     body: String,
 ) -> Result<NoteContent, String> {
+    ensure_private_path_ready(&state, &path)?;
     let root = current_root(&state)?;
     let resolved = resolve_document_path_for_write(&root, &path)?;
     let abs = resolved.abs;
@@ -549,6 +639,7 @@ fn save_note_if_unchanged(
     body: String,
     expected_body: String,
 ) -> Result<SaveNoteResult, String> {
+    ensure_private_path_ready(&state, &path)?;
     let root = current_root(&state)?;
     let resolved = resolve_document_path_for_write(&root, &path)?;
     let abs = resolved.abs;
@@ -577,6 +668,7 @@ fn compile_typst_preview(
     body: String,
     format: Option<TypstPreviewFormat>,
 ) -> Result<TypstPreview, String> {
+    ensure_private_path_ready(&state, &path)?;
     let format = format.unwrap_or(TypstPreviewFormat::Svg);
     let root = current_root(&state)?;
     let normalized = normalize_relative_input(&path)?;
@@ -650,6 +742,7 @@ fn export_pdf(
     path: String,
     body: String,
 ) -> Result<PdfExportResult, String> {
+    ensure_private_path_ready(&state, &path)?;
     let root = current_root(&state)?;
     let normalized = normalize_relative_input(&path)?;
     let source_abs = resolve_safe(&root, &normalized)?;
@@ -678,6 +771,7 @@ fn read_track_state(
     state: tauri::State<AppState>,
     path: String,
 ) -> Result<Option<TrackState>, String> {
+    ensure_private_path_ready(&state, &path)?;
     let root = current_root(&state)?;
     let note_abs = resolve_safe(&root, &path)?;
     if !is_markdown_file(&note_abs) {
@@ -700,6 +794,7 @@ fn save_track_state(
     path: String,
     mut track_state: TrackState,
 ) -> Result<(), String> {
+    ensure_private_path_ready(&state, &path)?;
     let root = current_root(&state)?;
     let note_abs = resolve_safe(&root, &path)?;
     if !is_markdown_file(&note_abs) {
@@ -719,6 +814,7 @@ fn save_track_state(
 
 #[tauri::command]
 fn delete_track_state(state: tauri::State<AppState>, path: String) -> Result<(), String> {
+    ensure_private_path_ready(&state, &path)?;
     let root = current_root(&state)?;
     let sidecar = track_sidecar_path(&root, &path)?;
     if sidecar.exists() {
@@ -733,6 +829,7 @@ fn write_track_merge_candidate(
     path: String,
     body: String,
 ) -> Result<NoteContent, String> {
+    ensure_private_path_ready(&state, &path)?;
     let root = current_root(&state)?;
     let abs = resolve_safe(&root, &path)?;
     if !is_markdown_file(&abs) {
@@ -756,6 +853,7 @@ fn create_note(
     path: String,
     body: Option<String>,
 ) -> Result<CreateNoteResult, String> {
+    ensure_private_path_ready(&state, &path)?;
     let root = current_root(&state)?;
     let candidate = with_default_note_extension(document_path_candidate(&root, &path)?);
     let resolved = resolve_document_candidate_for_write(&root, candidate)?;
@@ -790,6 +888,8 @@ fn rename_note(
     old_path: String,
     new_path: String,
 ) -> Result<NoteContent, String> {
+    ensure_private_path_ready(&state, &old_path)?;
+    ensure_private_path_ready(&state, &new_path)?;
     let root = current_root(&state)?;
     let old_abs = resolve_safe(&root, &old_path)?;
     if !is_note_file(&old_abs) {
@@ -811,6 +911,7 @@ fn rename_note(
 
 #[tauri::command]
 fn delete_note(state: tauri::State<AppState>, path: String) -> Result<(), String> {
+    ensure_private_path_ready(&state, &path)?;
     let root = current_root(&state)?;
     let abs = resolve_safe(&root, &path)?;
     if !is_note_file(&abs) {
@@ -822,11 +923,20 @@ fn delete_note(state: tauri::State<AppState>, path: String) -> Result<(), String
 }
 
 #[tauri::command]
-fn create_folder(state: tauri::State<AppState>, path: String) -> Result<(), String> {
+fn create_folder(state: tauri::State<AppState>, path: String) -> Result<String, String> {
+    ensure_private_path_ready(&state, &path)?;
     let root = current_root(&state)?;
     let normalized = normalize_folder_path(&path)?;
     let abs = resolve_safe(&root, &normalized)?;
-    fs::create_dir_all(abs).map_err(|err| format!("Could not create folder: {err}"))
+    if abs.exists() {
+        return Err(if abs.is_dir() {
+            "A folder already exists at that path.".to_string()
+        } else {
+            "A file already exists at that path.".to_string()
+        });
+    }
+    fs::create_dir_all(abs).map_err(|err| format!("Could not create folder: {err}"))?;
+    Ok(normalized)
 }
 
 #[tauri::command]
@@ -835,6 +945,8 @@ fn rename_folder(
     old_path: String,
     new_path: String,
 ) -> Result<(), String> {
+    ensure_private_path_ready(&state, &old_path)?;
+    ensure_private_path_ready(&state, &new_path)?;
     let root = current_root(&state)?;
     let old_abs = resolve_safe(&root, &old_path)?;
     let normalized_new = normalize_folder_path(&new_path)?;
@@ -859,6 +971,7 @@ fn rename_folder(
 
 #[tauri::command]
 fn delete_folder(state: tauri::State<AppState>, path: String) -> Result<(), String> {
+    ensure_private_path_ready(&state, &path)?;
     let root = current_root(&state)?;
     let normalized = normalize_folder_path(&path)?;
     let abs = resolve_safe(&root, &normalized)?;
@@ -886,15 +999,17 @@ fn search_content(
     }
 
     let root = current_root(&state)?;
+    let private_ready = private_vault_is_ready(&state)?;
     let files = match paths {
         Some(paths) if !paths.is_empty() => paths
             .into_iter()
+            .filter(|path| private_ready || !private_vault::is_plaintext_relative_path(path))
             .map(|path| resolve_safe(&root, &path))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .filter(|path| is_note_file(path))
             .collect::<Vec<_>>(),
-        _ => collect_note_files(&root)?,
+        _ => collect_note_files(&root, private_ready)?,
     };
 
     let mut matches = Vec::new();
@@ -931,13 +1046,15 @@ fn get_backlinks(
     path: String,
     limit: Option<usize>,
 ) -> Result<Vec<BacklinkMatch>, String> {
+    ensure_private_path_ready(&state, &path)?;
     let root = current_root(&state)?;
+    let private_ready = private_vault_is_ready(&state)?;
     let target_abs = resolve_safe(&root, &path)?;
     if !is_markdown_file(&target_abs) {
         return Err("Backlinks are only supported for Markdown files.".to_string());
     }
     let target_rel = to_posix_relative(&root, &target_abs)?;
-    let files = collect_markdown_files(&root)?;
+    let files = collect_markdown_files(&root, private_ready)?;
     let note_paths = files
         .iter()
         .map(|file| to_posix_relative(&root, file))
@@ -997,6 +1114,30 @@ fn current_root(state: &tauri::State<AppState>) -> Result<PathBuf, String> {
         .ok_or_else(|| "Open a vault first.".to_string())
 }
 
+fn private_vault_is_ready(state: &tauri::State<AppState>) -> Result<bool, String> {
+    state
+        .private_vault_ready
+        .lock()
+        .map(|ready| *ready)
+        .map_err(|_| "Private-vault state is locked.".to_string())
+}
+
+fn ensure_private_vault_ready(state: &tauri::State<AppState>) -> Result<(), String> {
+    if private_vault_is_ready(state)? {
+        Ok(())
+    } else {
+        Err("The private .h folder is still being prepared.".to_string())
+    }
+}
+
+fn ensure_private_path_ready(state: &tauri::State<AppState>, path: &str) -> Result<(), String> {
+    if private_vault::is_plaintext_relative_path(path) {
+        ensure_private_vault_ready(state)
+    } else {
+        Ok(())
+    }
+}
+
 fn resolve_safe(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let rel_path = Path::new(rel);
     let mut clean = PathBuf::new();
@@ -1028,7 +1169,10 @@ fn resolve_document_path(root: &Path, path: &str) -> Result<ResolvedDocumentPath
     })
 }
 
-fn resolve_document_path_for_write(root: &Path, path: &str) -> Result<ResolvedDocumentPath, String> {
+fn resolve_document_path_for_write(
+    root: &Path,
+    path: &str,
+) -> Result<ResolvedDocumentPath, String> {
     let candidate = document_path_candidate(root, path)?;
     resolve_document_candidate_for_write(root, candidate)
 }
@@ -1129,6 +1273,9 @@ fn normalize_relative_input(path: &str) -> Result<String, String> {
 
 fn checkpoint_paths_for(root: &Path, rel: &str) -> Result<Vec<String>, String> {
     let normalized = normalize_relative_input(rel)?;
+    if private_vault::is_plaintext_relative_path(&normalized) {
+        return Ok(Vec::new());
+    }
     let mut paths = vec![normalized.clone()];
     if is_markdown_relative_path(&normalized) {
         let sidecar = to_posix_relative(root, &track_sidecar_path(root, &normalized)?)?;
@@ -1151,6 +1298,18 @@ fn stage_checkpoint_path(root: &Path, rel: &str) -> Result<(), String> {
         )?;
     }
     Ok(())
+}
+
+fn stage_private_archive(root: &Path) -> Result<bool, String> {
+    if !root.join(".h.zip").is_file() {
+        return Ok(false);
+    }
+    run_git_checked(
+        root,
+        &["add", "-f", "--", ".h.zip"],
+        "Could not stage encrypted private archive.",
+    )?;
+    Ok(true)
 }
 
 fn merge_candidate_path(path: &str) -> Result<String, String> {
@@ -1477,22 +1636,89 @@ fn delete_path(path: &Path, context: &str) -> Result<(), String> {
     }
 }
 
-fn read_directory(root: &Path, dir: &Path) -> Result<Vec<TreeEntry>, String> {
+fn read_directory(
+    root: &Path,
+    dir: &Path,
+    include_private: bool,
+) -> Result<Vec<TreeEntry>, String> {
     if dir != root {
         return Err("Only root tree listing is supported.".to_string());
     }
-    build_tree_from_files(root, collect_note_files(root)?)
+    build_tree(
+        root,
+        collect_note_files(root, include_private)?,
+        collect_folders(root, include_private)?,
+    )
 }
 
-fn collect_note_files(root: &Path) -> Result<Vec<PathBuf>, String> {
-    collect_files(root, is_note_file)
+fn collect_note_files(root: &Path, include_private: bool) -> Result<Vec<PathBuf>, String> {
+    collect_files(root, is_note_file, include_private)
 }
 
-fn collect_markdown_files(root: &Path) -> Result<Vec<PathBuf>, String> {
-    collect_files(root, is_markdown_file)
+fn collect_markdown_files(root: &Path, include_private: bool) -> Result<Vec<PathBuf>, String> {
+    collect_files(root, is_markdown_file, include_private)
 }
 
-fn collect_files(root: &Path, include: fn(&Path) -> bool) -> Result<Vec<PathBuf>, String> {
+fn collect_folders(root: &Path, include_private: bool) -> Result<Vec<PathBuf>, String> {
+    let mut folders = Vec::new();
+    let walker = WalkBuilder::new(root)
+        .hidden(true)
+        .parents(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .filter_entry(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .map(|name| !should_skip_name(name))
+                .unwrap_or(true)
+        })
+        .build();
+
+    for entry in walker {
+        let entry = entry.map_err(|err| format!("Could not walk vault: {err}"))?;
+        let path = entry.path();
+        if path != root
+            && entry
+                .file_type()
+                .map(|file_type| file_type.is_dir())
+                .unwrap_or(false)
+        {
+            folders.push(path.to_path_buf());
+        }
+    }
+    let private_root = root.join(".h");
+    if include_private && private_root.is_dir() {
+        let walker = WalkBuilder::new(&private_root)
+            .hidden(false)
+            .parents(false)
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false)
+            .build();
+        for entry in walker {
+            let entry =
+                entry.map_err(|err| format!("Could not walk private vault folder: {err}"))?;
+            if entry
+                .file_type()
+                .map(|file_type| file_type.is_dir())
+                .unwrap_or(false)
+            {
+                folders.push(entry.path().to_path_buf());
+            }
+        }
+    }
+    folders.sort();
+    folders.dedup();
+    Ok(folders)
+}
+
+fn collect_files(
+    root: &Path,
+    include: fn(&Path) -> bool,
+    include_private: bool,
+) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     let walker = WalkBuilder::new(root)
         .hidden(true)
@@ -1521,7 +1747,31 @@ fn collect_files(root: &Path, include: fn(&Path) -> bool) -> Result<Vec<PathBuf>
             files.push(path.to_path_buf());
         }
     }
+    let private_root = root.join(".h");
+    if include_private && private_root.is_dir() {
+        let walker = WalkBuilder::new(&private_root)
+            .hidden(false)
+            .parents(false)
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false)
+            .build();
+        for entry in walker {
+            let entry =
+                entry.map_err(|err| format!("Could not walk private vault folder: {err}"))?;
+            let path = entry.path();
+            if entry
+                .file_type()
+                .map(|file_type| file_type.is_file())
+                .unwrap_or(false)
+                && include(path)
+            {
+                files.push(path.to_path_buf());
+            }
+        }
+    }
     files.sort();
+    files.dedup();
     Ok(files)
 }
 
@@ -1531,8 +1781,19 @@ struct TreeNode {
     dirs: BTreeMap<String, TreeNode>,
 }
 
-fn build_tree_from_files(root: &Path, files: Vec<PathBuf>) -> Result<Vec<TreeEntry>, String> {
+fn build_tree(
+    root: &Path,
+    files: Vec<PathBuf>,
+    folders: Vec<PathBuf>,
+) -> Result<Vec<TreeEntry>, String> {
     let mut tree = TreeNode::default();
+    for folder in folders {
+        let rel = to_posix_relative(root, &folder)?;
+        let mut node = &mut tree;
+        for part in rel.split('/').filter(|part| !part.is_empty()) {
+            node = node.dirs.entry(part.to_string()).or_default();
+        }
+    }
     for file in files {
         let rel = to_posix_relative(root, &file)?;
         let parts = rel.split('/').collect::<Vec<_>>();
@@ -1566,9 +1827,6 @@ fn tree_node_entries(prefix: &str, node: TreeNode) -> Vec<TreeEntry> {
             format!("{prefix}/{name}")
         };
         let children = tree_node_entries(&path, child);
-        if children.is_empty() {
-            continue;
-        }
         out.push(TreeEntry {
             path,
             name,
@@ -2435,11 +2693,80 @@ fn write_profile_file(path: &Path, profile: &AppProfile) -> Result<(), String> {
         .map_err(|err| format!("Could not write profile.json: {err}"))
 }
 
+#[cfg(test)]
+mod private_checkpoint_tests {
+    use super::*;
+
+    fn test_root(name: &str) -> PathBuf {
+        let root = env::temp_dir().join(format!(
+            "notesproject-main-test-{name}-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn private_notes_are_hidden_from_collection_until_ready() {
+        let root = test_root("private-pending");
+        fs::write(root.join("public.md"), "public").unwrap();
+        fs::create_dir(root.join(".h")).unwrap();
+        fs::write(root.join(".h/secret.md"), "secret").unwrap();
+
+        let pending = collect_note_files(&root, false).unwrap();
+        assert_eq!(pending, vec![root.join("public.md")]);
+
+        let ready = collect_note_files(&root, true).unwrap();
+        assert!(ready.contains(&root.join("public.md")));
+        assert!(ready.contains(&root.join(".h/secret.md")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn private_vault_archive_is_force_staged_even_when_dotfiles_are_ignored() {
+        let root = test_root("private-stage");
+        let initialized = Command::new("git")
+            .current_dir(&root)
+            .arg("init")
+            .output()
+            .unwrap();
+        assert!(initialized.status.success());
+        fs::write(root.join(".gitignore"), ".*\n").unwrap();
+        fs::write(root.join(".h.zip"), b"encrypted archive placeholder").unwrap();
+
+        assert!(
+            run_git_status(&root, &["status", "--short", "--", ".h.zip"])
+                .unwrap()
+                .stdout
+                .trim()
+                .is_empty()
+        );
+        assert!(stage_private_archive(&root).unwrap());
+        assert_eq!(
+            run_git_checked(
+                &root,
+                &["diff", "--cached", "--name-only", "--", ".h.zip"],
+                "Could not inspect staged archive."
+            )
+            .unwrap()
+            .stdout
+            .trim(),
+            ".h.zip"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 fn main() {
+    if let Some(code) = private_vault::maybe_run_cli() {
+        std::process::exit(code);
+    }
     tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             open_vault,
+            prepare_private_vault,
             load_profile,
             save_profile,
             watch_vault,

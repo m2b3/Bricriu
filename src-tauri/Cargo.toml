@@ -24,6 +24,7 @@ typst-html = "0.14.2"
 typst-pdf = "0.14.2"
 typst-svg = "0.14.2"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+zip = { version = "8.6.0", default-features = false, features = ["aes-crypto", "deflate"] }
 
 [patch.crates-io]
 typst-library = { path = "../vendor/typst-library-0.14.2" }
