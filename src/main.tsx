@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { availableMonitors, getCurrentWindow, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import {
   Annotation,
   Compartment,
@@ -242,11 +243,14 @@ const CANVAS_MARKDOWN_DISPLAY_KEY = 'notesproject:canvas-markdown-display'
 const CANVAS_DOCUMENT_DISPLAY_KEY = 'notesproject:canvas-document-display'
 const SIDEBAR_WIDTH_KEY = 'notesproject:sidebar-width'
 const EDITOR_SPLIT_RATIO_KEY = 'notesproject:editor-split-ratio'
+const PREVIEW_SPLIT_RATIO_KEY = 'notesproject:preview-split-ratio'
 const SIDEBAR_MIN_WIDTH = 220
 const SIDEBAR_MAX_WIDTH = 560
 const EDITOR_MIN_WIDTH = 360
 const EDITOR_SPLIT_MIN_RATIO = 0.2
 const EDITOR_SPLIT_MAX_RATIO = 0.8
+const PREVIEW_SPLIT_MIN_RATIO = 0.2
+const PREVIEW_SPLIT_MAX_RATIO = 0.8
 const PRIVATE_VAULT_PASSWORD_REQUIRED = 'PRIVATE_VAULT_PASSWORD_REQUIRED:'
 
 type AppProfile = {
@@ -363,11 +367,14 @@ function App(): JSX.Element {
   const [editorSelectAllRequest, setEditorSelectAllRequest] = useState(0)
   const [editorBulletListRequest, setEditorBulletListRequest] = useState(0)
   const [editorNumberedListRequest, setEditorNumberedListRequest] = useState(0)
+  const [editorLinkifyRequest, setEditorLinkifyRequest] = useState(0)
   const [editorTextCountRequest, setEditorTextCountRequest] = useState(0)
   const [textCountResult, setTextCountResult] = useState<TextCountResult | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(readStoredSidebarWidth)
   const [editorSplitRatio, setEditorSplitRatio] = useState(readStoredEditorSplitRatio)
+  const [previewSplitRatio, setPreviewSplitRatio] = useState(readStoredPreviewSplitRatio)
   const appShellRef = useRef<HTMLElement | null>(null)
+  const workspaceRef = useRef<HTMLDivElement | null>(null)
   const mainPaneSlotRef = useRef<HTMLDivElement | null>(null)
   const splitPaneSlotRef = useRef<HTMLDivElement | null>(null)
   const newNoteInputRef = useRef<HTMLInputElement | null>(null)
@@ -1112,6 +1119,20 @@ function App(): JSX.Element {
       contentUsesFileFilter
     })
   }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, pinnedPaths, privatePending, profile.persistRecentFiles, recentPaths, splitOpen, splitTab, tabs, vault])
+
+  const openExternalLink = useCallback((rawUrl: string) => {
+    try {
+      const url = new URL(rawUrl)
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new Error('Only HTTP and HTTPS links are supported.')
+      }
+      void openUrl(url.href).catch((err) => {
+        setError(`Could not open link: ${String(err)}`)
+      })
+    } catch (err) {
+      setError(`Could not open link: ${String(err)}`)
+    }
+  }, [])
 
   const openNote = useCallback(async (destination: string, offset: number | null = null) => {
     const { path, heading } = splitWikiDestination(destination)
@@ -2190,6 +2211,13 @@ function App(): JSX.Element {
     [recentPaths, tabs]
   )
   const activeIsTypst = !!activeTab && isTypstPath(activeTab.path)
+  const previewVisible = showPreview && !!activeTab && !(activeTab.outOfVault && activeIsTypst)
+  const backlinksVisible = showBacklinks && !!activeTab
+  const auxiliaryPaneCount = Number(previewVisible) + Number(backlinksVisible)
+  const editorAreaRatio = previewVisible ? previewSplitRatio : 1
+  const auxiliaryPaneRatio = auxiliaryPaneCount > 0
+    ? (1 - editorAreaRatio) / auxiliaryPaneCount
+    : 0
 
   useEffect(() => {
     if (!showPreview || !activeTab || activeTab.outOfVault || !isTypstPath(activeTab.path)) return
@@ -2326,6 +2354,39 @@ function App(): JSX.Element {
     setEditorSplitRatio(clampedRatio)
     writeStoredEditorSplitRatio(clampedRatio)
   }, [editorSplitRatio])
+
+  const resizePreviewSplitTo = useCallback((clientX: number) => {
+    const workspaceRect = workspaceRef.current?.getBoundingClientRect()
+    if (!workspaceRect || workspaceRect.width <= 0) return
+    const nextRatio = clamp(
+      (clientX - workspaceRect.left) / workspaceRect.width,
+      PREVIEW_SPLIT_MIN_RATIO,
+      PREVIEW_SPLIT_MAX_RATIO
+    )
+    setPreviewSplitRatio(nextRatio)
+    writeStoredPreviewSplitRatio(nextRatio)
+  }, [])
+
+  const startPreviewSplitResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    document.body.classList.add('is-resizing-preview-split')
+    resizePreviewSplitTo(event.clientX)
+  }, [resizePreviewSplitTo])
+
+  const handlePreviewSplitResizeKey = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 0.1 : 0.04
+    let nextRatio: number | null = null
+    if (event.key === 'ArrowLeft') nextRatio = previewSplitRatio - step
+    if (event.key === 'ArrowRight') nextRatio = previewSplitRatio + step
+    if (event.key === 'Home') nextRatio = PREVIEW_SPLIT_MIN_RATIO
+    if (event.key === 'End') nextRatio = PREVIEW_SPLIT_MAX_RATIO
+    if (nextRatio == null) return
+    event.preventDefault()
+    const clampedRatio = clamp(nextRatio, PREVIEW_SPLIT_MIN_RATIO, PREVIEW_SPLIT_MAX_RATIO)
+    setPreviewSplitRatio(clampedRatio)
+    writeStoredPreviewSplitRatio(clampedRatio)
+  }, [previewSplitRatio])
 
   return (
     <>
@@ -2562,6 +2623,7 @@ function App(): JSX.Element {
             onDeleteCurrent={() => {
               if (activeTab) void deleteNoteAction(activeTab.path)
             }}
+            onLinkifyUrls={() => setEditorLinkifyRequest((request) => request + 1)}
             onOpenRecent={(path) => void openNote(path)}
             onSetCanvasDocumentDisplay={updateCanvasDocumentDisplayMode}
             onSetTypstPreviewFormat={setTypstPreviewFormat}
@@ -2722,13 +2784,16 @@ function App(): JSX.Element {
           </React.Suspense>
         )}
         <div
+          ref={workspaceRef}
           className={`${splitOpen || ((showPreview || showBacklinks) && activeTab) ? 'workspace split' : 'workspace'}${splitOpen ? ' editor-split' : ''}${workspaceMode === 'calendar' ? ' is-hidden-workspace' : ''}`}
           aria-hidden={workspaceMode === 'calendar' ? 'true' : undefined}
         >
           <div
             ref={mainPaneSlotRef}
             className={focusedPane === 'main' ? 'editor-pane-slot active' : 'editor-pane-slot'}
-            style={splitOpen ? { flex: `${editorSplitRatio} 1 0` } : undefined}
+            style={splitOpen || previewVisible
+              ? { flex: `${(splitOpen ? editorSplitRatio : 1) * editorAreaRatio} 1 0` }
+              : undefined}
             onMouseDown={() => setFocusedPane('main')}
           >
             {splitOpen && (
@@ -2775,10 +2840,12 @@ function App(): JSX.Element {
                   selectAllRequest={editorSelectAllRequest}
                   bulletListRequest={editorBulletListRequest}
                   numberedListRequest={editorNumberedListRequest}
+                  linkifyRequest={editorLinkifyRequest}
                   textCountRequest={editorTextCountRequest}
                   onJumpHandled={() => setJumpOffset(null)}
                   onTextCount={setTextCountResult}
                   onChange={updateTabBody}
+                  onOpenExternalLink={openExternalLink}
                   onOpenWikiLink={(path) => void openNote(path)}
                   onLoadWikiCompletionBody={loadWikiCompletionBody}
                 />
@@ -2818,7 +2885,7 @@ function App(): JSX.Element {
             <div
               ref={splitPaneSlotRef}
               className={focusedPane === 'split' ? 'editor-pane-slot active' : 'editor-pane-slot'}
-              style={{ flex: `${1 - editorSplitRatio} 1 0` }}
+              style={{ flex: `${(1 - editorSplitRatio) * editorAreaRatio} 1 0` }}
               onMouseDown={() => setFocusedPane('split')}
             >
               <div className="pane-toolbar">
@@ -2879,37 +2946,76 @@ function App(): JSX.Element {
                     selectAllRequest={editorSelectAllRequest}
                     bulletListRequest={editorBulletListRequest}
                     numberedListRequest={editorNumberedListRequest}
+                    linkifyRequest={editorLinkifyRequest}
                     textCountRequest={editorTextCountRequest}
                     onJumpHandled={() => setJumpOffset(null)}
                     onTextCount={setTextCountResult}
                     onChange={updateTabBody}
+                    onOpenExternalLink={openExternalLink}
                     onOpenWikiLink={(path) => void openNote(path)}
                     onLoadWikiCompletionBody={loadWikiCompletionBody}
                   />
               )}
             </div>
           )}
-          {showPreview && activeTab && !(activeTab.outOfVault && activeIsTypst) && (
-            activeIsTypst ? (
-              <TypstPreviewPane preview={typstPreview?.tabId === activeTab.id ? typstPreview : null} />
-            ) : (
-              <React.Suspense fallback={<EditorLoading label="Loading Preview..." />}>
-                <MarkdownPreview
-                  body={activeTab.body}
-                  version={activeTab.bodyVersion}
-                  notePaths={allFilePaths}
-                  onOpenWikiLink={(path) => void openNote(path)}
-                />
-              </React.Suspense>
-            )
-          )}
-          {showBacklinks && activeTab && (
-            <BacklinksPanel
-              activePath={activeTab.path}
-              backlinks={backlinks}
-              loading={loadingBacklinks}
-              onOpen={(match) => void openNote(match.path, match.offset)}
+          {previewVisible && (
+            <div
+              className="preview-split-resizer"
+              role="separator"
+              aria-label="Resize document and preview"
+              aria-orientation="vertical"
+              aria-valuemin={Math.round(PREVIEW_SPLIT_MIN_RATIO * 100)}
+              aria-valuemax={Math.round(PREVIEW_SPLIT_MAX_RATIO * 100)}
+              aria-valuenow={Math.round(previewSplitRatio * 100)}
+              tabIndex={0}
+              onPointerDown={startPreviewSplitResize}
+              onPointerMove={(event) => {
+                if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
+                resizePreviewSplitTo(event.clientX)
+              }}
+              onPointerUp={(event) => {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId)
+                }
+                document.body.classList.remove('is-resizing-preview-split')
+              }}
+              onPointerCancel={(event) => {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                  event.currentTarget.releasePointerCapture(event.pointerId)
+                }
+                document.body.classList.remove('is-resizing-preview-split')
+              }}
+              onKeyDown={handlePreviewSplitResizeKey}
             />
+          )}
+          {previewVisible && activeTab && (
+            <div className="auxiliary-pane-slot" style={{ flex: `${auxiliaryPaneRatio} 1 0` }}>
+              {activeIsTypst ? (
+                <TypstPreviewPane preview={typstPreview?.tabId === activeTab.id ? typstPreview : null} />
+              ) : (
+                <React.Suspense fallback={<EditorLoading label="Loading Preview..." />}>
+                  <MarkdownPreview
+                    body={activeTab.body}
+                    version={activeTab.bodyVersion}
+                    notePaths={allFilePaths}
+                    onOpenWikiLink={(path) => void openNote(path)}
+                  />
+                </React.Suspense>
+              )}
+            </div>
+          )}
+          {backlinksVisible && activeTab && (
+            <div
+              className="auxiliary-pane-slot"
+              style={previewVisible ? { flex: `${auxiliaryPaneRatio} 1 0` } : undefined}
+            >
+              <BacklinksPanel
+                activePath={activeTab.path}
+                backlinks={backlinks}
+                loading={loadingBacklinks}
+                onOpen={(match) => void openNote(match.path, match.offset)}
+              />
+            </div>
           )}
         </div>
       </section>
@@ -3165,6 +3271,7 @@ function AppMenuBar({
   vaultOpen,
   onCheckpoint,
   onDeleteCurrent,
+  onLinkifyUrls,
   onOpenRecent,
   onSetCanvasDocumentDisplay,
   onSetTypstPreviewFormat,
@@ -3189,6 +3296,7 @@ function AppMenuBar({
   vaultOpen: boolean
   onCheckpoint: () => void
   onDeleteCurrent: () => void
+  onLinkifyUrls: () => void
   onOpenRecent: (path: string) => void
   onSetCanvasDocumentDisplay: (mode: CanvasDocumentDisplayMode) => void
   onSetTypstPreviewFormat: React.Dispatch<React.SetStateAction<TypstPreviewFormat>>
@@ -3201,8 +3309,9 @@ function AppMenuBar({
   pathKey: (path: string) => string
 }): JSX.Element {
   const activeIsMarkdown = !!activeTab && isMarkdownPath(activeTab.path)
+  const activeCanLinkify = activeIsMarkdown && activeTab?.mode === 'markdown'
   const activeOutOfVault = activeTab?.outOfVault === true
-  const [openMenu, setOpenMenu] = useState<'file' | 'view' | 'options' | null>(null)
+  const [openMenu, setOpenMenu] = useState<'file' | 'edit' | 'view' | 'options' | null>(null)
   const menuRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
@@ -3225,7 +3334,7 @@ function AppMenuBar({
     }
   }, [openMenu])
 
-  const toggleMenu = (menu: 'file' | 'view' | 'options') => {
+  const toggleMenu = (menu: 'file' | 'edit' | 'view' | 'options') => {
     setOpenMenu((current) => (current === menu ? null : menu))
   }
 
@@ -3305,6 +3414,25 @@ function AppMenuBar({
         </div>
       </details>
 
+      <details className="app-menu" open={openMenu === 'edit'}>
+        <summary onClick={(event) => {
+          event.preventDefault()
+          toggleMenu('edit')
+        }}>Edit</summary>
+        <div className="app-menu-popover">
+          <button
+            type="button"
+            onClick={() => {
+              setOpenMenu(null)
+              onLinkifyUrls()
+            }}
+            disabled={!activeCanLinkify || busy}
+          >
+            Toggle URL links in selection (Ctrl+L)
+          </button>
+        </div>
+      </details>
+
       <details className="app-menu" open={openMenu === 'view'}>
         <summary onClick={(event) => {
           event.preventDefault()
@@ -3375,10 +3503,12 @@ function MarkdownEditor({
   selectAllRequest,
   bulletListRequest,
   numberedListRequest,
+  linkifyRequest,
   textCountRequest,
   onJumpHandled,
   onTextCount,
   onChange,
+  onOpenExternalLink,
   onOpenWikiLink,
   onLoadWikiCompletionBody
 }: {
@@ -3396,10 +3526,12 @@ function MarkdownEditor({
   selectAllRequest: number
   bulletListRequest: number
   numberedListRequest: number
+  linkifyRequest: number
   textCountRequest: number
   onJumpHandled: () => void
   onTextCount: (result: TextCountResult) => void
   onChange: (path: string, body: string) => void
+  onOpenExternalLink: (url: string) => void
   onOpenWikiLink: (path: string) => void
   onLoadWikiCompletionBody: (path: string) => Promise<string | null>
 }): JSX.Element {
@@ -3429,12 +3561,14 @@ function MarkdownEditor({
   const notePathsRef = useRef(notePaths)
   const canvasMarkdownDisplayModeRef = useRef(canvasMarkdownDisplayMode)
   const searchHighlightRef = useRef<SearchHighlight | null>(searchHighlight)
+  const onOpenExternalLinkRef = useRef(onOpenExternalLink)
   const onOpenWikiLinkRef = useRef(onOpenWikiLink)
   const onLoadWikiCompletionBodyRef = useRef(onLoadWikiCompletionBody)
   const handledFocusRequestRef = useRef(focusRequest)
   const handledSelectAllRequestRef = useRef(selectAllRequest)
   const handledBulletListRequestRef = useRef(bulletListRequest)
   const handledNumberedListRequestRef = useRef(numberedListRequest)
+  const handledLinkifyRequestRef = useRef(linkifyRequest)
   const handledTextCountRequestRef = useRef(textCountRequest)
   const [colorMenu, setColorMenu] = useState<ColorMenuState | null>(null)
 
@@ -3463,6 +3597,7 @@ function MarkdownEditor({
         notePathsRef,
         canvasMarkdownDisplayModeRef,
         searchHighlightRef,
+        onOpenExternalLinkRef,
         onOpenWikiLinkRef,
         onLoadWikiCompletionBodyRef
       ))
@@ -3473,6 +3608,10 @@ function MarkdownEditor({
     searchHighlightRef.current = searchHighlight
     viewRef.current?.dispatch({})
   }, [searchHighlight])
+
+  useEffect(() => {
+    onOpenExternalLinkRef.current = onOpenExternalLink
+  }, [onOpenExternalLink])
 
   useEffect(() => {
     onOpenWikiLinkRef.current = onOpenWikiLink
@@ -3575,8 +3714,21 @@ function MarkdownEditor({
       lineNumbers(),
       highlightActiveLine(),
       syntaxHighlighting(notesHighlightStyle, { fallback: true }),
-      markdownTools.of(noteMarkdownTools(notePathsRef, canvasMarkdownDisplayModeRef, searchHighlightRef, onOpenWikiLinkRef, onLoadWikiCompletionBodyRef)),
+      markdownTools.of(noteMarkdownTools(
+        notePathsRef,
+        canvasMarkdownDisplayModeRef,
+        searchHighlightRef,
+        onOpenExternalLinkRef,
+        onOpenWikiLinkRef,
+        onLoadWikiCompletionBodyRef
+      )),
       EditorView.lineWrapping,
+      EditorView.contentAttributes.of({
+        spellcheck: 'true',
+        writingsuggestions: 'true',
+        autocorrect: 'on',
+        autocapitalize: 'sentences'
+      }),
       EditorView.theme({
         '&': {
           height: '100%',
@@ -3619,6 +3771,11 @@ function MarkdownEditor({
         {
           key: 'Ctrl-Space',
           run: startCompletion
+        },
+        {
+          key: 'Mod-l',
+          run: (view) => !!pathRef.current && isMarkdownPath(pathRef.current) && toggleHttpLink(view),
+          preventDefault: true
         },
         { key: 'Ctrl-b', run: toggleMarkdownBold, preventDefault: true },
         { key: 'Ctrl-i', run: toggleMarkdownItalic, preventDefault: true },
@@ -3817,6 +3974,15 @@ function MarkdownEditor({
 
   useEffect(() => {
     const view = viewRef.current
+    if (linkifyRequest === handledLinkifyRequestRef.current) return
+    handledLinkifyRequestRef.current = linkifyRequest
+    if (disabled || !isActivePane || linkifyRequest === 0 || !view || !filePath || !isMarkdownPath(filePath)) return
+    toggleHttpLink(view)
+    view.focus()
+  }, [disabled, filePath, isActivePane, linkifyRequest])
+
+  useEffect(() => {
+    const view = viewRef.current
     if (textCountRequest === handledTextCountRequestRef.current) return
     handledTextCountRequestRef.current = textCountRequest
     if (disabled || !isActivePane || textCountRequest === 0 || !view) return
@@ -3896,6 +4062,7 @@ function noteMarkdownTools(
   notePathsRef: React.MutableRefObject<string[]>,
   canvasMarkdownDisplayModeRef: React.MutableRefObject<CanvasMarkdownDisplayMode>,
   searchHighlightRef: React.MutableRefObject<SearchHighlight | null>,
+  onOpenExternalLinkRef: React.MutableRefObject<(url: string) => void>,
   onOpenWikiLinkRef: React.MutableRefObject<(path: string) => void>,
   onLoadWikiCompletionBodyRef: React.MutableRefObject<(path: string) => Promise<string | null>>
 ): Extension {
@@ -3956,9 +4123,18 @@ function noteMarkdownTools(
       mousedown(event, view) {
         if (!(event.ctrlKey || event.metaKey)) return false
         const target = event.target as HTMLElement | null
-        if (!target?.closest('.cm-wiki-link')) return false
         const pos = view.posAtCoords({ x: event.clientX, y: event.clientY })
         if (pos == null) return false
+
+        if (target?.closest('.cm-external-link')) {
+          const url = externalUrlAt(view.state, pos)
+          if (!url) return false
+          event.preventDefault()
+          onOpenExternalLinkRef.current(url)
+          return true
+        }
+
+        if (!target?.closest('.cm-wiki-link')) return false
         const link = wikiLinkAt(view.state, pos, notePathsRef.current)
         if (!link) return false
         event.preventDefault()
@@ -4020,6 +4196,10 @@ function buildNoteDecorations(
   const canvasBlockRanges = canvasMarkdownDisplayMode === 'summary'
     ? findCanvasBlockRanges(doc.toString(), view.visibleRanges)
     : []
+  const markdownExternalLinks = findMarkdownExternalLinks(fullText)
+  const rawExternalLinks = findRawHttpUrls(fullText).filter((url) => (
+    !markdownExternalLinks.some((link) => url.from >= link.from && url.to <= link.to)
+  ))
 
   if (!showRawMarkdown) {
     for (const colorSpan of findColorSpans(fullText)) {
@@ -4070,6 +4250,36 @@ function buildNoteDecorations(
       if (rangesOverlapAny(escape.from, escape.to, canvasBlockRanges)) continue
       ranges.push({ from: escape.from, to: escape.from + 1, decoration: Decoration.replace({}) })
     }
+  }
+
+  for (const link of markdownExternalLinks) {
+    if (rangesOverlapAny(link.from, link.to, canvasBlockRanges)) continue
+    if (!view.visibleRanges.some((range) => link.from <= range.to && link.to >= range.from)) continue
+    if (!showRawMarkdown) {
+      ranges.push({ from: link.from, to: link.textFrom, decoration: Decoration.replace({}) })
+      ranges.push({ from: link.textTo, to: link.to, decoration: Decoration.replace({}) })
+    }
+    ranges.push({
+      from: showRawMarkdown ? link.from : link.textFrom,
+      to: showRawMarkdown ? link.to : link.textTo,
+      decoration: Decoration.mark({
+        class: 'cm-external-link',
+        attributes: { title: `Ctrl+click to open ${link.url}` }
+      })
+    })
+  }
+
+  for (const url of rawExternalLinks) {
+    if (rangesOverlapAny(url.from, url.to, canvasBlockRanges)) continue
+    if (!view.visibleRanges.some((range) => url.from <= range.to && url.to >= range.from)) continue
+    ranges.push({
+      from: url.from,
+      to: url.to,
+      decoration: Decoration.mark({
+        class: 'cm-external-link',
+        attributes: { title: `Ctrl+click to open ${url.url}` }
+      })
+    })
   }
 
   for (const { from, to } of view.visibleRanges) {
@@ -4370,6 +4580,210 @@ type ConcealedMarkdownSpan = {
   textTo: number
 }
 
+type ExternalUrlSpan = {
+  from: number
+  to: number
+  url: string
+}
+
+type MarkdownExternalLinkSpan = ExternalUrlSpan & {
+  textFrom: number
+  textTo: number
+}
+
+function findMarkdownExternalLinks(text: string): MarkdownExternalLinkSpan[] {
+  const links: MarkdownExternalLinkSpan[] = []
+  const opener = /\[([^\]\n]+)\]\(/g
+  let match: RegExpExecArray | null
+
+  while ((match = opener.exec(text))) {
+    const from = match.index
+    const textFrom = from + 1
+    const textTo = textFrom + match[1].length
+    const destinationFrom = from + match[0].length
+    let depth = 1
+    let escaped = false
+    let cursor = destinationFrom
+
+    for (; cursor < text.length; cursor += 1) {
+      const char = text[cursor]
+      if (char === '\n' || char === '\r') break
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (char === '\\') {
+        escaped = true
+        continue
+      }
+      if (char === '(') depth += 1
+      if (char === ')') {
+        depth -= 1
+        if (depth === 0) break
+      }
+    }
+
+    if (depth !== 0) continue
+    const destination = text.slice(destinationFrom, cursor).trim()
+    if (/\s/.test(destination) || !isHttpUrl(destination)) {
+      opener.lastIndex = cursor + 1
+      continue
+    }
+    links.push({
+      from,
+      to: cursor + 1,
+      textFrom,
+      textTo,
+      url: destination
+    })
+    opener.lastIndex = cursor + 1
+  }
+
+  return links
+}
+
+function findRawHttpUrls(text: string): ExternalUrlSpan[] {
+  const urls: ExternalUrlSpan[] = []
+  for (const match of text.matchAll(/https?:\/\/[^\s<>"'`\[\]]+/gi)) {
+    const from = match.index ?? 0
+    const url = trimHttpUrlTail(match[0])
+    if (!url || !isHttpUrl(url)) continue
+    urls.push({ from, to: from + url.length, url })
+  }
+  return urls
+}
+
+function trimHttpUrlTail(raw: string): string {
+  let url = raw.replace(/[.,;:!?]+$/g, '')
+  for (const [open, close] of [['(', ')'], ['{', '}']] as const) {
+    while (url.endsWith(close) && countCharacter(url, close) > countCharacter(url, open)) {
+      url = url.slice(0, -1)
+    }
+  }
+  return url
+}
+
+function countCharacter(value: string, character: string): number {
+  let count = 0
+  for (const current of value) {
+    if (current === character) count += 1
+  }
+  return count
+}
+
+function isHttpUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw)
+    return (url.protocol === 'http:' || url.protocol === 'https:') && url.hostname.length > 0
+  } catch {
+    return false
+  }
+}
+
+function externalUrlAt(state: EditorState, position: number): string | null {
+  const text = state.doc.toString()
+  const markdownLinks = findMarkdownExternalLinks(text)
+  const markdownLink = markdownLinks.find((link) => position >= link.from && position <= link.to)
+  if (markdownLink) return markdownLink.url
+
+  const rawUrl = findRawHttpUrls(text).find((url) => (
+    position >= url.from &&
+    position <= url.to &&
+    !markdownLinks.some((link) => url.from >= link.from && url.to <= link.to)
+  ))
+  return rawUrl?.url ?? null
+}
+
+function linkifyHttpUrls(view: EditorView): boolean {
+  const text = view.state.doc.toString()
+  const markdownLinks = findMarkdownExternalLinks(text)
+  const rawUrls = findRawHttpUrls(text).filter((url) => (
+    !markdownLinks.some((link) => url.from >= link.from && url.to <= link.to) &&
+    !(text[url.from - 1] === '<' && text[url.to] === '>')
+  ))
+  const targets = rawUrls.filter((url) => view.state.selection.ranges.some((range) => (
+    range.empty
+      ? range.head >= url.from && range.head <= url.to
+      : url.from >= range.from && url.to <= range.to
+  )))
+  if (targets.length === 0) return false
+
+  view.dispatch({
+    changes: targets.map((url) => ({
+      from: url.from,
+      to: url.to,
+      insert: `[${url.url}](${url.url})`
+    })),
+    userEvent: 'input'
+  })
+  return true
+}
+
+function toggleHttpLink(view: EditorView): boolean {
+  const range = view.state.selection.main
+  if (view.state.selection.ranges.some((selection) => !selection.empty)) {
+    return toggleSelectedHttpLinks(view)
+  }
+
+  const text = view.state.doc.toString()
+  const link = findMarkdownExternalLinks(text).find((candidate) => (
+    range.head >= candidate.from && range.head <= candidate.to
+  ))
+  if (!link) return linkifyHttpUrls(view)
+
+  const label = text.slice(link.textFrom, link.textTo)
+  const labelOffset = clamp(range.head - link.textFrom, 0, label.length)
+  view.dispatch({
+    changes: { from: link.from, to: link.to, insert: label },
+    selection: EditorSelection.cursor(link.from + labelOffset),
+    userEvent: 'input'
+  })
+  return true
+}
+
+function toggleSelectedHttpLinks(view: EditorView): boolean {
+  const text = view.state.doc.toString()
+  const selections = view.state.selection.ranges.filter((range) => !range.empty)
+  if (selections.length === 0) return false
+
+  const markdownLinks = findMarkdownExternalLinks(text)
+  const linkedCandidates = markdownLinks
+    .filter((link) => selections.some((range) => (
+      (link.textFrom >= range.from && link.textTo <= range.to) ||
+      (link.from >= range.from && link.to <= range.to)
+    )))
+    .map((link) => ({
+      kind: 'linked' as const,
+      from: link.from,
+      to: link.to,
+      insert: text.slice(link.textFrom, link.textTo)
+    }))
+  const bareCandidates = findRawHttpUrls(text)
+    .filter((url) => (
+      !markdownLinks.some((link) => url.from >= link.from && url.to <= link.to) &&
+      !(text[url.from - 1] === '<' && text[url.to] === '>') &&
+      selections.some((range) => url.from >= range.from && url.to <= range.to)
+    ))
+    .map((url) => ({
+      kind: 'bare' as const,
+      from: url.from,
+      to: url.to,
+      insert: `[${url.url}](${url.url})`
+    }))
+  const candidates = [...linkedCandidates, ...bareCandidates]
+    .sort((left, right) => left.from - right.from)
+  const first = candidates[0]
+  if (!first) return false
+
+  view.dispatch({
+    changes: candidates
+      .filter((candidate) => candidate.kind === first.kind)
+      .map(({ from, to, insert }) => ({ from, to, insert })),
+    userEvent: 'input'
+  })
+  return true
+}
+
 function copyExpandedConcealedMarkdownSelection(
   event: ClipboardEvent,
   view: EditorView,
@@ -4491,6 +4905,12 @@ function findConcealedMarkdownSpans(view: EditorView): ConcealedMarkdownSpan[] {
       textTo: span.textTo
     })),
     ...findMarkdownEmphasisSpans(view).map((span) => ({
+      from: span.from,
+      to: span.to,
+      textFrom: span.textFrom,
+      textTo: span.textTo
+    })),
+    ...findMarkdownExternalLinks(text).map((span) => ({
       from: span.from,
       to: span.to,
       textFrom: span.textFrom,
@@ -6107,6 +6527,24 @@ function readStoredEditorSplitRatio(): number {
 function writeStoredEditorSplitRatio(ratio: number): void {
   try {
     localStorage.setItem(EDITOR_SPLIT_RATIO_KEY, String(clamp(ratio, EDITOR_SPLIT_MIN_RATIO, EDITOR_SPLIT_MAX_RATIO)))
+  } catch {
+    // Ignore storage failures; the in-memory ratio still applies.
+  }
+}
+
+function readStoredPreviewSplitRatio(): number {
+  try {
+    const raw = localStorage.getItem(PREVIEW_SPLIT_RATIO_KEY)
+    if (!raw) return 0.5
+    return clamp(Number(raw), PREVIEW_SPLIT_MIN_RATIO, PREVIEW_SPLIT_MAX_RATIO)
+  } catch {
+    return 0.5
+  }
+}
+
+function writeStoredPreviewSplitRatio(ratio: number): void {
+  try {
+    localStorage.setItem(PREVIEW_SPLIT_RATIO_KEY, String(clamp(ratio, PREVIEW_SPLIT_MIN_RATIO, PREVIEW_SPLIT_MAX_RATIO)))
   } catch {
     // Ignore storage failures; the in-memory ratio still applies.
   }

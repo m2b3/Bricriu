@@ -104,6 +104,8 @@ body.is-resizing-sidebar,
 body.is-resizing-sidebar *,
 body.is-resizing-editor-split,
 body.is-resizing-editor-split *,
+body.is-resizing-preview-split,
+body.is-resizing-preview-split *,
 body.is-resizing-calendar,
 body.is-resizing-calendar * {
   cursor: col-resize !important;
@@ -1362,6 +1364,19 @@ input:focus {
   min-width: 0;
 }
 
+.workspace.split .auxiliary-pane-slot {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 50%;
+}
+
+.workspace.split .auxiliary-pane-slot > .preview-pane,
+.workspace.split .auxiliary-pane-slot > .backlinks-pane {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 .workspace.editor-split .editor-pane-slot {
   flex-basis: 0;
 }
@@ -1414,6 +1429,41 @@ input:focus {
 }
 
 .editor-split-resizer:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: -2px;
+}
+
+.preview-split-resizer {
+  position: relative;
+  z-index: 6;
+  width: 7px;
+  min-width: 7px;
+  flex: 0 0 7px;
+  border-inline: 1px solid var(--line);
+  background: var(--panel-2);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.preview-split-resizer::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 30px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  content: '';
+  opacity: 0;
+  transform: translate(-50%, -50%);
+}
+
+.preview-split-resizer:hover::after,
+.preview-split-resizer:focus-visible::after {
+  opacity: 1;
+}
+
+.preview-split-resizer:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
   outline-offset: -2px;
 }
@@ -1658,6 +1708,18 @@ input:focus {
 
 .cm-wiki-link:hover {
   background: color-mix(in srgb, var(--accent-2) 10%, transparent);
+}
+
+.cm-external-link {
+  color: #23528c;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, #23528c 45%, transparent);
+  text-underline-offset: 2px;
+}
+
+.cm-external-link:hover {
+  background: color-mix(in srgb, var(--accent-2) 10%, transparent);
+  text-decoration-color: currentColor;
 }
 
 .cm-wiki-missing {
@@ -2993,6 +3055,16 @@ input:focus {
 
   .workspace.split .editor-split-resizer {
     display: none;
+  }
+
+  .workspace.split .preview-split-resizer {
+    display: none;
+  }
+
+  .workspace.split .editor-pane-slot,
+  .workspace.split .auxiliary-pane-slot {
+    min-height: 50%;
+    flex: 1 1 50% !important;
   }
 
   .workspace.split .editor-host {
