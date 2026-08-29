@@ -1564,6 +1564,15 @@ input:focus {
   color: var(--muted);
 }
 
+.cm-editor .cm-spelling-error {
+  background-image: none !important;
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-color: #c43d35;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
 .cm-editor .cm-selectionLayer {
   clip-path: inset(0 28px 0 28px);
   z-index: 3;

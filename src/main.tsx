@@ -3550,6 +3550,7 @@ function MarkdownEditor({
   const editableRef = useRef<Compartment | null>(null)
   const languageRef = useRef<Compartment | null>(null)
   const markdownToolsRef = useRef<Compartment | null>(null)
+  const spellcheckRef = useRef<Compartment | null>(null)
   const pathRef = useRef<string | null>(null)
   const changeIdRef = useRef<string | null>(changeId)
   const statesRef = useRef<Map<string, EditorState>>(new Map())
@@ -3702,9 +3703,11 @@ function MarkdownEditor({
     const editable = new Compartment()
     const language = new Compartment()
     const markdownTools = new Compartment()
+    const spellcheck = new Compartment()
     editableRef.current = editable
     languageRef.current = language
     markdownToolsRef.current = markdownTools
+    spellcheckRef.current = spellcheck
 
     const extensions: Extension[] = [
       language.of(markdown()),
@@ -3722,12 +3725,13 @@ function MarkdownEditor({
         onOpenWikiLinkRef,
         onLoadWikiCompletionBodyRef
       )),
+      spellcheck.of([]),
       EditorView.lineWrapping,
       EditorView.contentAttributes.of({
-        spellcheck: 'true',
-        writingsuggestions: 'true',
-        autocorrect: 'on',
-        autocapitalize: 'sentences'
+        spellcheck: 'false',
+        writingsuggestions: 'false',
+        autocorrect: 'off',
+        autocapitalize: 'off'
       }),
       EditorView.theme({
         '&': {
@@ -3815,6 +3819,7 @@ function MarkdownEditor({
       editableRef.current = null
       languageRef.current = null
       markdownToolsRef.current = null
+      spellcheckRef.current = null
       baseExtensionsRef.current = null
     }
   }, [])
@@ -3923,6 +3928,31 @@ function MarkdownEditor({
     applyEditable(view, editableRef.current, !disabled)
     view.scrollDOM.scrollTop = 0
   }, [activePath, body, disabled, filePath])
+
+  useEffect(() => {
+    const view = viewRef.current
+    const spellcheck = spellcheckRef.current
+    if (!view || !spellcheck) return
+    let cancelled = false
+
+    if (!filePath || !isMarkdownPath(filePath)) {
+      view.dispatch({ effects: spellcheck.reconfigure([]) })
+      return
+    }
+
+    void import('./spellcheck/markdownSpellcheck')
+      .then(({ createMarkdownSpellcheckExtension }) => {
+        if (cancelled || viewRef.current !== view || !pathRef.current || !isMarkdownPath(pathRef.current)) return
+        view.dispatch({ effects: spellcheck.reconfigure(createMarkdownSpellcheckExtension()) })
+      })
+      .catch((error: unknown) => {
+        console.warn('Spellcheck could not be loaded.', error)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [activePath, filePath])
 
   useEffect(() => {
     const view = viewRef.current
