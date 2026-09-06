@@ -1,6 +1,7 @@
 import { ClipboardEvent, useCallback, useMemo } from 'react'
 import katex from 'katex'
 import MarkdownIt from 'markdown-it'
+import { isExplicitDocumentPath, resolveWikiDocumentPath } from '../wikiPaths'
 import 'katex/dist/katex.min.css'
 
 const markdownRenderer = MarkdownIt({
@@ -14,14 +15,16 @@ export function MarkdownPreview({
   body,
   version,
   notePaths,
+  sourcePath,
   onOpenWikiLink
 }: {
   body: string
   version: number
   notePaths: string[]
+  sourcePath: string | null
   onOpenWikiLink: (path: string) => void
 }): JSX.Element {
-  const html = useMemo(() => renderMarkdownPreview(body, notePaths), [body, notePaths])
+  const html = useMemo(() => renderMarkdownPreview(body, notePaths, sourcePath), [body, notePaths, sourcePath])
   const handleCopy = useCallback((event: ClipboardEvent<HTMLElement>) => {
     const selection = window.getSelection()
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return
@@ -167,9 +170,9 @@ function listItemsMarkdown(node: HTMLElement, ordered: boolean): string {
     .join('\n')
 }
 
-function renderMarkdownPreview(markdown: string, notePaths: string[]): string {
+export function renderMarkdownPreview(markdown: string, notePaths: string[], sourcePath: string | null = null): string {
   const snippets: string[] = []
-  const prepared = preprocessPreviewMarkdown(markdown, notePaths, snippets)
+  const prepared = preprocessPreviewMarkdown(markdown, notePaths, sourcePath, snippets)
   return markdownRenderer.render(prepared)
     .replace(/<p>@@NZHTML(\d+)@@<\/p>/g, (_match, index: string) => snippets[Number(index)] ?? '')
     .replace(/@@NZHTML(\d+)@@/g, (_match, index: string) => snippets[Number(index)] ?? '')
@@ -186,26 +189,44 @@ function pushPreviewBlockHtml(out: string[], html: string, snippets: string[]): 
   out.push('')
 }
 
-function preprocessPreviewMarkdown(markdown: string, notePaths: string[], snippets: string[]): string {
+function preprocessPreviewMarkdown(markdown: string, notePaths: string[], sourcePath: string | null, snippets: string[]): string {
   const lines = markdown.replace(/\r\n/g, '\n').split('\n')
   const out: string[] = []
-  let inDisplayMath = false
-  let displayMath: string[] = []
+  let displayMath: DisplayMathBlock | null = null
+  let codeFence: CodeFence | null = null
 
   for (const line of lines) {
-    if (line.trim() === '$$') {
-      if (inDisplayMath) {
-        pushPreviewBlockHtml(out, renderDisplayMath(displayMath.join('\n')), snippets)
-        displayMath = []
-        inDisplayMath = false
-      } else {
-        inDisplayMath = true
+    if (displayMath) {
+      displayMath.lines.push(line)
+      if (displayMath.isClosingLine(line)) {
+        pushPreviewBlockHtml(out, renderDisplayMath(displayMath.source()), snippets)
+        displayMath = null
       }
       continue
     }
 
-    if (inDisplayMath) {
-      displayMath.push(line)
+    if (codeFence) {
+      out.push(line)
+      if (isClosingCodeFence(line, codeFence)) codeFence = null
+      continue
+    }
+
+    const openingFence = parseOpeningCodeFence(line)
+    if (openingFence) {
+      codeFence = openingFence
+      out.push(line)
+      continue
+    }
+
+    const singleLineMath = parseSingleLineDisplayMath(line)
+    if (singleLineMath != null) {
+      pushPreviewBlockHtml(out, renderDisplayMath(singleLineMath), snippets)
+      continue
+    }
+
+    const openingMath = parseOpeningDisplayMath(line)
+    if (openingMath) {
+      displayMath = openingMath
       continue
     }
 
@@ -215,7 +236,7 @@ function preprocessPreviewMarkdown(markdown: string, notePaths: string[], snippe
       const title = escapeHtml(callout[1].toUpperCase())
       const rest = callout[2].trim()
       out.push(htmlPlaceholder(`<div class="preview-callout preview-callout-${kind}"><div class="preview-callout-title">${title}</div>`, snippets))
-      if (rest) out.push(renderInlinePreviewSyntax(rest, notePaths, snippets))
+      if (rest) out.push(renderInlinePreviewSyntax(rest, notePaths, sourcePath, snippets))
       continue
     }
 
@@ -224,13 +245,10 @@ function preprocessPreviewMarkdown(markdown: string, notePaths: string[], snippe
       continue
     }
 
-    out.push(renderInlinePreviewSyntax(line, notePaths, snippets))
+    out.push(renderInlinePreviewSyntax(line, notePaths, sourcePath, snippets))
   }
 
-  if (inDisplayMath) {
-    out.push('$$')
-    out.push(...displayMath)
-  }
+  if (displayMath) out.push(...displayMath.originalLines)
 
   const closed: string[] = []
   let calloutOpen = false
@@ -254,28 +272,201 @@ function preprocessPreviewMarkdown(markdown: string, notePaths: string[], snippe
   return closed.join('\n')
 }
 
+type CodeFence = {
+  marker: '`' | '~'
+  length: number
+}
+
+type DisplayMathBlock = {
+  lines: string[]
+  originalLines: string[]
+  isClosingLine: (line: string) => boolean
+  source: () => string
+}
+
+const DISPLAY_MATH_ENVIRONMENTS = new Set([
+  'equation',
+  'equation*',
+  'align',
+  'align*',
+  'alignat',
+  'alignat*',
+  'gather',
+  'gather*'
+])
+
+function parseOpeningCodeFence(line: string): CodeFence | null {
+  const match = line.match(/^ {0,3}(`{3,}|~{3,})/)
+  if (!match) return null
+  return {
+    marker: match[1][0] as '`' | '~',
+    length: match[1].length
+  }
+}
+
+function isClosingCodeFence(line: string, fence: CodeFence): boolean {
+  const match = line.match(/^ {0,3}(`{3,}|~{3,})\s*$/)
+  return !!match && match[1][0] === fence.marker && match[1].length >= fence.length
+}
+
+function parseSingleLineDisplayMath(line: string): string | null {
+  const trimmed = line.trim()
+  if (trimmed.startsWith('$$') && trimmed.endsWith('$$') && trimmed.length > 4) {
+    return trimmed.slice(2, -2).trim()
+  }
+  if (trimmed.startsWith('\\[') && trimmed.endsWith('\\]') && trimmed.length > 4) {
+    return trimmed.slice(2, -2).trim()
+  }
+  return null
+}
+
+function parseOpeningDisplayMath(line: string): DisplayMathBlock | null {
+  const trimmed = line.trim()
+  if (trimmed === '$$' || trimmed === '\\[') {
+    const closingMarker = trimmed === '$$' ? '$$' : '\\]'
+    const lines = [line]
+    return {
+      lines,
+      originalLines: lines,
+      isClosingLine: (candidate) => candidate.trim() === closingMarker,
+      source: () => lines.slice(1, -1).join('\n')
+    }
+  }
+
+  const environment = trimmed.match(/^\\begin\{([^{}]+)\}$/)?.[1]
+  if (!environment || !DISPLAY_MATH_ENVIRONMENTS.has(environment)) return null
+  const lines = [line]
+  return {
+    lines,
+    originalLines: lines,
+    isClosingLine: (candidate) => candidate.trim() === `\\end{${environment}}`,
+    source: () => lines.join('\n')
+  }
+}
+
 function isCalloutOpenPlaceholder(line: string | undefined, snippets: string[]): boolean {
   const match = line?.match(/^@@NZHTML(\d+)@@$/)
   if (!match) return false
   return (snippets[Number(match[1])] ?? '').startsWith('<div class="preview-callout')
 }
 
-function renderInlinePreviewSyntax(line: string, notePaths: string[], snippets: string[]): string {
-  const withWiki = line.replace(
-    /\[\[([^\]\n|#]+)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g,
-    (match: string, rawLabel: string, rawAnchor: string | undefined, rawAlias: string | undefined) => {
-      const label = rawLabel.trim()
-      const target = resolveWikiPath(label, notePaths)
-      const text = wikiDisplayText(label, rawAnchor, rawAlias)
-      const wikiMarkdown = escapeHtml(match)
-      if (!target) return htmlPlaceholder(`<span class="preview-wiki missing" data-wiki-markdown="${wikiMarkdown}">${text}</span>`, snippets)
-      return htmlPlaceholder(`<a class="preview-wiki" href="notesproject-wiki:${encodeURIComponent(formatWikiDestination(target, rawAnchor))}" data-wiki-markdown="${wikiMarkdown}">${text}</a>`, snippets)
-    }
-  )
-
-  return withWiki.replace(/(^|[^\\$])\$([^\n$]+?)\$/g, (_match, before: string, source: string) => {
-    return `${before}${htmlPlaceholder(renderInlineMath(source.trim()), snippets)}`
+function renderInlinePreviewSyntax(line: string, notePaths: string[], sourcePath: string | null, snippets: string[]): string {
+  return mapOutsideInlineCode(line, (source) => {
+    const withWiki = source.replace(
+      /\[\[([^\]\n|#]+)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g,
+      (match: string, rawLabel: string, rawAnchor: string | undefined, rawAlias: string | undefined) => {
+        const label = rawLabel.trim()
+        const target = resolveWikiPath(label, notePaths, sourcePath)
+        const text = wikiDisplayText(label, rawAnchor, rawAlias)
+        const wikiMarkdown = escapeHtml(match)
+        if (!target) return htmlPlaceholder(`<span class="preview-wiki missing" data-wiki-markdown="${wikiMarkdown}">${text}</span>`, snippets)
+        return htmlPlaceholder(`<a class="preview-wiki" href="notesproject-wiki:${encodeURIComponent(formatWikiDestination(target, rawAnchor))}" data-wiki-markdown="${wikiMarkdown}">${text}</a>`, snippets)
+      }
+    )
+    return replaceInlineMath(withWiki, snippets)
   })
+}
+
+function mapOutsideInlineCode(source: string, transform: (text: string) => string): string {
+  let result = ''
+  let plainStart = 0
+  let index = 0
+
+  while (index < source.length) {
+    if (source[index] !== '`') {
+      index += 1
+      continue
+    }
+
+    const markerStart = index
+    while (source[index] === '`') index += 1
+    const marker = source.slice(markerStart, index)
+    const closingIndex = source.indexOf(marker, index)
+    if (closingIndex < 0) continue
+
+    result += transform(source.slice(plainStart, markerStart))
+    const codeEnd = closingIndex + marker.length
+    result += source.slice(markerStart, codeEnd)
+    index = codeEnd
+    plainStart = codeEnd
+  }
+
+  return result + transform(source.slice(plainStart))
+}
+
+function replaceInlineMath(source: string, snippets: string[]): string {
+  let result = ''
+  let plainStart = 0
+  let index = 0
+
+  while (index < source.length) {
+    let contentStart = -1
+    let closingStart = -1
+    let closingLength = 0
+
+    if (source[index] === '$' && source[index + 1] !== '$' && !isEscaped(source, index)) {
+      contentStart = index + 1
+      closingStart = findClosingDollar(source, contentStart)
+      closingLength = 1
+    } else if (
+      source[index] === '\\' &&
+      source[index + 1] === '(' &&
+      !isEscaped(source, index)
+    ) {
+      contentStart = index + 2
+      closingStart = findClosingBackslashParen(source, contentStart)
+      closingLength = 2
+    }
+
+    if (contentStart < 0 || closingStart < 0) {
+      index += 1
+      continue
+    }
+
+    const math = source.slice(contentStart, closingStart).trim()
+    if (!math) {
+      index = closingStart + closingLength
+      continue
+    }
+
+    result += source.slice(plainStart, index)
+    result += htmlPlaceholder(renderInlineMath(math), snippets)
+    index = closingStart + closingLength
+    plainStart = index
+  }
+
+  return result + source.slice(plainStart)
+}
+
+function findClosingDollar(source: string, from: number): number {
+  for (let index = from; index < source.length; index += 1) {
+    if (
+      source[index] === '$' &&
+      source[index - 1] !== '$' &&
+      source[index + 1] !== '$' &&
+      !isEscaped(source, index)
+    ) {
+      return index
+    }
+  }
+  return -1
+}
+
+function findClosingBackslashParen(source: string, from: number): number {
+  for (let index = from; index < source.length - 1; index += 1) {
+    if (source[index] === '\\' && source[index + 1] === ')' && !isEscaped(source, index)) {
+      return index
+    }
+  }
+  return -1
+}
+
+function isEscaped(source: string, index: number): boolean {
+  let slashCount = 0
+  for (let cursor = index - 1; cursor >= 0 && source[cursor] === '\\'; cursor -= 1) {
+    slashCount += 1
+  }
+  return slashCount % 2 === 1
 }
 
 function renderInlineMath(source: string): string {
@@ -304,43 +495,8 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;')
 }
 
-function resolveWikiPath(label: string, notePaths: string[]): string | null {
-  const normalized = normalizeWikiLabel(label)
-  if (!normalized) return null
-  const exact = notePaths.find((path) => normalizeWikiLabel(path) === normalized)
-  if (exact) return exact
-  const withExtension = notePaths.find((path) => normalizeWikiLabel(stripMarkdownExtension(path)) === normalized)
-  if (withExtension) return withExtension
-  const byLabel = notePaths.find((path) => normalizeWikiLabel(wikiLabel(path)) === normalized)
-  if (byLabel) return byLabel
-  return isExplicitDocumentPath(label) ? label.replace(/\\/g, '/') : null
-}
-
-function wikiLabel(path: string): string {
-  return stripMarkdownExtension(basename(path))
-}
-
-function stripMarkdownExtension(path: string): string {
-  return path.replace(/\.(md|markdown)$/i, '')
-}
-
-function isDocumentPath(path: string): boolean {
-  return /\.(md|markdown|typ)$/i.test(path)
-}
-
-function isExplicitDocumentPath(path: string): boolean {
-  const normalized = path.trim().replace(/\\/g, '/')
-  return isDocumentPath(normalized) && (
-    normalized.startsWith('../') ||
-    normalized.startsWith('./') ||
-    normalized.startsWith('/') ||
-    /^[A-Za-z]:\//.test(normalized) ||
-    normalized.includes('/')
-  )
-}
-
-function normalizeWikiLabel(label: string): string {
-  return stripMarkdownExtension(label).replace(/\\/g, '/').trim().toLowerCase()
+function resolveWikiPath(label: string, notePaths: string[], sourcePath: string | null = null): string | null {
+  return resolveWikiDocumentPath(label, notePaths, sourcePath)
 }
 
 function wikiDisplayText(label: string, rawAnchor: string | undefined, rawAlias: string | undefined): string {
@@ -362,9 +518,4 @@ function splitWikiDestination(destination: string): { path: string; heading: str
     path: destination.slice(0, hashIndex),
     heading: heading || null
   }
-}
-
-function basename(path: string): string {
-  const normalized = path.replace(/\\/g, '/')
-  return normalized.split('/').filter(Boolean).pop() ?? path
 }

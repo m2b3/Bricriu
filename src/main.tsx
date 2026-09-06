@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { availableMonitors, getCurrentWindow, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window'
+import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import {
   Annotation,
@@ -32,7 +33,8 @@ import {
   history,
   historyKeymap,
   indentWithTab,
-  redo
+  redo,
+  undo
 } from '@codemirror/commands'
 import { markdown } from '@codemirror/lang-markdown'
 import {
@@ -44,6 +46,7 @@ import { tags } from '@lezer/highlight'
 import { searchKeymap } from '@codemirror/search'
 import { renderCanvasMarkdown } from './canvas/canvasMarkdown'
 import { markdownToTiptap } from './track/markdown'
+import { resolveWikiDocumentPath } from './wikiPaths'
 import type { CalendarEvent } from './calendar/CalendarView'
 import type { TrackState } from './track/types'
 import './styles.css'
@@ -1203,6 +1206,31 @@ function App(): JSX.Element {
     }
   }, [isTabDirty, latestTabBody, rememberRecentPath, selectMainTab, tabs])
 
+  const openDocumentDialog = useCallback(async () => {
+    if (!vault) {
+      setError('Open a vault before opening a file.')
+      return
+    }
+    if (busy) return
+
+    setError(null)
+    try {
+      const selected = await openFileDialog({
+        title: 'Open note',
+        directory: false,
+        multiple: false,
+        defaultPath: activeTab?.outOfVault ? activeTab.path : vault.root,
+        filters: [{
+          name: 'Markdown and Typst',
+          extensions: ['md', 'markdown', 'typ']
+        }]
+      })
+      if (typeof selected === 'string') await openNote(selected)
+    } catch (err) {
+      setError(`Could not open file dialog: ${String(err)}`)
+    }
+  }, [activeTab?.outOfVault, activeTab?.path, busy, openNote, vault])
+
   const openTrackNote = useCallback(async (path: string) => {
     setWorkspaceMode('notes')
     if (tabs.some((tab) => samePath(tab.path, path) && tab.outOfVault)) {
@@ -2038,6 +2066,12 @@ function App(): JSX.Element {
       if (!(event.ctrlKey || event.metaKey)) return
       const key = event.key.toLowerCase()
 
+      if (key === 'o') {
+        event.preventDefault()
+        void openDocumentDialog()
+        return
+      }
+
       if (key === 's') {
         event.preventDefault()
         void saveActive()
@@ -2095,7 +2129,7 @@ function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTab, closeSplitPane, closeTab, focusedPane, mainTab, openNewNoteDialog, printActiveDocument, saveActive, selectMainTab, splitOpen, tabs, vault])
+  }, [activeTab, closeSplitPane, closeTab, focusedPane, mainTab, openDocumentDialog, openNewNoteDialog, printActiveDocument, saveActive, selectMainTab, splitOpen, tabs, vault])
 
   useEffect(() => {
     setSearchRevealedFolders(new Set())
@@ -2624,6 +2658,7 @@ function App(): JSX.Element {
               if (activeTab) void deleteNoteAction(activeTab.path)
             }}
             onLinkifyUrls={() => setEditorLinkifyRequest((request) => request + 1)}
+            onOpenFile={() => void openDocumentDialog()}
             onOpenRecent={(path) => void openNote(path)}
             onSetCanvasDocumentDisplay={updateCanvasDocumentDisplayMode}
             onSetTypstPreviewFormat={setTypstPreviewFormat}
@@ -2998,6 +3033,7 @@ function App(): JSX.Element {
                     body={activeTab.body}
                     version={activeTab.bodyVersion}
                     notePaths={allFilePaths}
+                    sourcePath={activeTab.path}
                     onOpenWikiLink={(path) => void openNote(path)}
                   />
                 </React.Suspense>
@@ -3037,6 +3073,7 @@ function App(): JSX.Element {
                   body={activePrintBody}
                   version={activeTab.bodyVersion}
                   notePaths={allFilePaths}
+                  sourcePath={activeTab.path}
                   onOpenWikiLink={() => undefined}
                 />
               </React.Suspense>
@@ -3272,6 +3309,7 @@ function AppMenuBar({
   onCheckpoint,
   onDeleteCurrent,
   onLinkifyUrls,
+  onOpenFile,
   onOpenRecent,
   onSetCanvasDocumentDisplay,
   onSetTypstPreviewFormat,
@@ -3297,6 +3335,7 @@ function AppMenuBar({
   onCheckpoint: () => void
   onDeleteCurrent: () => void
   onLinkifyUrls: () => void
+  onOpenFile: () => void
   onOpenRecent: (path: string) => void
   onSetCanvasDocumentDisplay: (mode: CanvasDocumentDisplayMode) => void
   onSetTypstPreviewFormat: React.Dispatch<React.SetStateAction<TypstPreviewFormat>>
@@ -3346,6 +3385,17 @@ function AppMenuBar({
           toggleMenu('file')
         }}>File</summary>
         <div className="app-menu-popover">
+          <button
+            type="button"
+            title="Ctrl+O"
+            onClick={() => {
+              setOpenMenu(null)
+              onOpenFile()
+            }}
+            disabled={!vaultOpen || busy}
+          >
+            Open file...
+          </button>
           <label className="app-menu-field">
             <span>Recent</span>
             <select
@@ -3551,7 +3601,7 @@ function MarkdownEditor({
   const languageRef = useRef<Compartment | null>(null)
   const markdownToolsRef = useRef<Compartment | null>(null)
   const spellcheckRef = useRef<Compartment | null>(null)
-  const pathRef = useRef<string | null>(null)
+  const pathRef = useRef<string | null>(activePath)
   const changeIdRef = useRef<string | null>(changeId)
   const statesRef = useRef<Map<string, EditorState>>(new Map())
   const scrollSnapshotsRef = useRef<Map<string, ReturnType<EditorView['scrollSnapshot']>>>(new Map())
@@ -3596,6 +3646,7 @@ function MarkdownEditor({
     view.dispatch({
       effects: markdownTools.reconfigure(noteMarkdownTools(
         notePathsRef,
+        pathRef,
         canvasMarkdownDisplayModeRef,
         searchHighlightRef,
         onOpenExternalLinkRef,
@@ -3719,6 +3770,7 @@ function MarkdownEditor({
       syntaxHighlighting(notesHighlightStyle, { fallback: true }),
       markdownTools.of(noteMarkdownTools(
         notePathsRef,
+        pathRef,
         canvasMarkdownDisplayModeRef,
         searchHighlightRef,
         onOpenExternalLinkRef,
@@ -3786,8 +3838,9 @@ function MarkdownEditor({
         { key: 'Ctrl-Shift-8', run: (view) => formatMarkdownListSelection(view, 'bullet'), preventDefault: true },
         { key: 'Ctrl-Shift-7', run: (view) => formatMarkdownListSelection(view, 'numbered'), preventDefault: true },
         { key: 'Ctrl-Enter', run: calculateMarkdownLine, preventDefault: true },
-        { key: 'Ctrl-y', run: redo, preventDefault: true },
-        { key: 'Ctrl-Shift-z', run: redo, preventDefault: true },
+        { key: 'Mod-z', run: undoAndKeepEditorFocus, preventDefault: true, stopPropagation: true },
+        { key: 'Mod-y', run: redoAndKeepEditorFocus, preventDefault: true, stopPropagation: true },
+        { key: 'Mod-Shift-z', run: redoAndKeepEditorFocus, preventDefault: true, stopPropagation: true },
         indentWithTab,
         ...defaultKeymap,
         ...historyKeymap,
@@ -4090,6 +4143,7 @@ function MarkdownEditor({
 
 function noteMarkdownTools(
   notePathsRef: React.MutableRefObject<string[]>,
+  sourcePathRef: React.MutableRefObject<string | null>,
   canvasMarkdownDisplayModeRef: React.MutableRefObject<CanvasMarkdownDisplayMode>,
   searchHighlightRef: React.MutableRefObject<SearchHighlight | null>,
   onOpenExternalLinkRef: React.MutableRefObject<(url: string) => void>,
@@ -4098,10 +4152,10 @@ function noteMarkdownTools(
 ): Extension {
   const canvasSummaryField = StateField.define<DecorationSet>({
     create(state) {
-      return buildCanvasSummaryDecorations(state, notePathsRef.current, canvasMarkdownDisplayModeRef.current, onOpenWikiLinkRef)
+      return buildCanvasSummaryDecorations(state, notePathsRef.current, sourcePathRef.current, canvasMarkdownDisplayModeRef.current, onOpenWikiLinkRef)
     },
     update(_decorations, transaction) {
-      return buildCanvasSummaryDecorations(transaction.state, notePathsRef.current, canvasMarkdownDisplayModeRef.current, onOpenWikiLinkRef)
+      return buildCanvasSummaryDecorations(transaction.state, notePathsRef.current, sourcePathRef.current, canvasMarkdownDisplayModeRef.current, onOpenWikiLinkRef)
     },
     provide: (field) => EditorView.decorations.from(field)
   })
@@ -4111,12 +4165,12 @@ function noteMarkdownTools(
       decorations: DecorationSet
 
       constructor(view: EditorView) {
-        this.decorations = buildVersionedNoteDecorations(view, notePathsRef.current, canvasMarkdownDisplayModeRef.current, searchHighlightRef.current, onOpenWikiLinkRef.current)
+        this.decorations = buildVersionedNoteDecorations(view, notePathsRef.current, sourcePathRef.current, canvasMarkdownDisplayModeRef.current, searchHighlightRef.current, onOpenWikiLinkRef.current)
       }
 
       update(update: ViewUpdate) {
         if (update.docChanged || update.viewportChanged || update.transactions.length > 0) {
-          this.decorations = buildVersionedNoteDecorations(update.view, notePathsRef.current, canvasMarkdownDisplayModeRef.current, searchHighlightRef.current, onOpenWikiLinkRef.current)
+          this.decorations = buildVersionedNoteDecorations(update.view, notePathsRef.current, sourcePathRef.current, canvasMarkdownDisplayModeRef.current, searchHighlightRef.current, onOpenWikiLinkRef.current)
         }
       }
     },
@@ -4132,7 +4186,7 @@ function noteMarkdownTools(
       { key: 'Tab', run: acceptCompletion }
     ])),
     autocompletion({
-      override: [wikiCompletionSource(notePathsRef, onLoadWikiCompletionBodyRef)],
+      override: [wikiCompletionSource(notePathsRef, sourcePathRef, onLoadWikiCompletionBodyRef)],
       activateOnTyping: true
     }),
     EditorView.updateListener.of((update) => {
@@ -4165,7 +4219,7 @@ function noteMarkdownTools(
         }
 
         if (!target?.closest('.cm-wiki-link')) return false
-        const link = wikiLinkAt(view.state, pos, notePathsRef.current)
+        const link = wikiLinkAt(view.state, pos, notePathsRef.current, sourcePathRef.current)
         if (!link) return false
         event.preventDefault()
         onOpenWikiLinkRef.current(link.destination)
@@ -4176,19 +4230,19 @@ function noteMarkdownTools(
       {
         key: 'Backspace',
         run(view) {
-          return deleteExpandedConcealedMarkdownSelection(view, canvasMarkdownDisplayModeRef.current)
+          return deleteMarkdownSelection(view, canvasMarkdownDisplayModeRef.current)
         }
       },
       {
         key: 'Delete',
         run(view) {
-          return deleteExpandedConcealedMarkdownSelection(view, canvasMarkdownDisplayModeRef.current)
+          return deleteMarkdownSelection(view, canvasMarkdownDisplayModeRef.current)
         }
       },
       {
         key: 'Mod-Enter',
         run(view) {
-          const link = wikiLinkAt(view.state, view.state.selection.main.head, notePathsRef.current)
+          const link = wikiLinkAt(view.state, view.state.selection.main.head, notePathsRef.current, sourcePathRef.current)
           if (!link) return false
           onOpenWikiLinkRef.current(link.destination)
           return true
@@ -4201,18 +4255,20 @@ function noteMarkdownTools(
 function buildVersionedNoteDecorations(
   view: EditorView,
   notePaths: string[],
+  sourcePath: string | null,
   canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode,
   searchHighlight: SearchHighlight | null,
   onOpenWikiLink: (path: string) => void
 ): DecorationSet {
   const version = view.state.field(editorDocumentVersion)
-  const decorations = buildNoteDecorations(view, notePaths, canvasMarkdownDisplayMode, searchHighlight, version, onOpenWikiLink)
+  const decorations = buildNoteDecorations(view, notePaths, sourcePath, canvasMarkdownDisplayMode, searchHighlight, version, onOpenWikiLink)
   return version === view.state.field(editorDocumentVersion) ? decorations : Decoration.none
 }
 
 function buildNoteDecorations(
   view: EditorView,
   notePaths: string[],
+  sourcePath: string | null,
   canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode,
   searchHighlight: SearchHighlight | null,
   version: number,
@@ -4354,7 +4410,7 @@ function buildNoteDecorations(
         const linkStart = start + 2
         const linkEnd = end - 2
         const displayRange = wikiLinkDisplayRange(line.from + (match.index ?? 0), match)
-        const target = resolveWikiPath(label, notePaths)
+        const target = resolveWikiPath(label, notePaths, sourcePath)
         if (!showRawMarkdown) {
           ranges.push({ from: start, to: linkStart, decoration: Decoration.replace({}) })
           ranges.push({ from: linkEnd, to: end, decoration: Decoration.replace({}) })
@@ -4429,6 +4485,7 @@ function buildNoteDecorations(
 function buildCanvasSummaryDecorations(
   state: EditorState,
   notePaths: string[],
+  sourcePath: string | null,
   canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode,
   onOpenWikiLinkRef: React.MutableRefObject<(path: string) => void>
 ): DecorationSet {
@@ -4443,7 +4500,7 @@ function buildCanvasSummaryDecorations(
     const from = match.index + match[1].length
     const to = match.index + match[0].length
     builder.add(from, to, Decoration.replace({
-      widget: new CanvasMarkdownSummaryWidget(extractCanvasNodeTexts(match[2]), notePaths, onOpenWikiLinkRef, version),
+      widget: new CanvasMarkdownSummaryWidget(extractCanvasNodeTexts(match[2]), notePaths, sourcePath, onOpenWikiLinkRef, version),
       block: true
     }))
   }
@@ -4497,6 +4554,7 @@ class CanvasMarkdownSummaryWidget extends WidgetType {
   constructor(
     private readonly nodeTexts: string[],
     private readonly notePaths: string[],
+    private readonly sourcePath: string | null,
     private readonly onOpenWikiLinkRef: React.MutableRefObject<(path: string) => void>,
     private readonly version: number
   ) {
@@ -4507,7 +4565,8 @@ class CanvasMarkdownSummaryWidget extends WidgetType {
     return (
       this.version === other.version &&
       this.nodeTexts.join('\n---\n') === other.nodeTexts.join('\n---\n') &&
-      this.notePaths.join('\n') === other.notePaths.join('\n')
+      this.notePaths.join('\n') === other.notePaths.join('\n') &&
+      this.sourcePath === other.sourcePath
     )
   }
 
@@ -4532,7 +4591,7 @@ class CanvasMarkdownSummaryWidget extends WidgetType {
       for (const text of this.nodeTexts) {
         const node = document.createElement('div')
         node.className = 'cm-canvas-summary-node'
-        node.innerHTML = renderCanvasMarkdown(text || 'Empty block', this.notePaths)
+        node.innerHTML = renderCanvasMarkdown(text || 'Empty block', this.notePaths, this.sourcePath)
         content.appendChild(node)
       }
     }
@@ -4845,21 +4904,26 @@ function cutExpandedConcealedMarkdownSelection(
     .map((range) => view.state.doc.sliceString(range.from, range.to))
     .join('\n'))
   event.preventDefault()
-  deleteConcealedMarkdownRanges(view, expandedRanges)
+  deleteMarkdownRanges(view, expandedRanges)
   return true
 }
 
-function deleteExpandedConcealedMarkdownSelection(
+function deleteMarkdownSelection(
   view: EditorView,
   canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode
 ): boolean {
-  const expandedRanges = expandedConcealedMarkdownSelectionRanges(view, canvasMarkdownDisplayMode)
-  if (!expandedRanges) return false
-  deleteConcealedMarkdownRanges(view, expandedRanges)
+  const selectedRanges = view.state.selection.ranges
+    .filter((range) => !range.empty)
+    .map((range) => ({ from: range.from, to: range.to }))
+  if (selectedRanges.length === 0) return false
+
+  const ranges = expandedConcealedMarkdownSelectionRanges(view, canvasMarkdownDisplayMode)
+    ?? selectedRanges
+  deleteMarkdownRanges(view, ranges)
   return true
 }
 
-function deleteConcealedMarkdownRanges(
+function deleteMarkdownRanges(
   view: EditorView,
   ranges: Array<{ from: number; to: number }>
 ): void {
@@ -4979,6 +5043,7 @@ function findWikiLinkSpans(view: EditorView): ConcealedMarkdownSpan[] {
 
 function wikiCompletionSource(
   notePathsRef: React.MutableRefObject<string[]>,
+  sourcePathRef: React.MutableRefObject<string | null>,
   onLoadWikiCompletionBodyRef: React.MutableRefObject<(path: string) => Promise<string | null>>
 ) {
   return async (context: CompletionContext) => {
@@ -4994,7 +5059,7 @@ function wikiCompletionSource(
       const headingQuery = source.slice(hashIndex + 1)
       if (!label || headingQuery.includes('|')) return null
 
-      const target = resolveWikiPath(label, notePaths)
+      const target = resolveWikiPath(label, notePaths, sourcePathRef.current)
       if (!target) return null
 
       const body = await onLoadWikiCompletionBodyRef.current(target)
@@ -5056,14 +5121,15 @@ function collectMarkdownHeadings(markdown: string): Array<{ text: string; level:
 function wikiLinkAt(
   state: EditorState,
   pos: number,
-  notePaths: string[]
+  notePaths: string[],
+  sourcePath: string | null
 ): { destination: string; from: number; to: number } | null {
   const line = state.doc.lineAt(pos)
   for (const match of line.text.matchAll(/\[\[([^\]\n|#]+)(#[^\]\n|]+)?(?:\|[^\]\n]+)?\]\]/g)) {
     const from = line.from + (match.index ?? 0)
     const to = from + match[0].length
     if (pos < from || pos > to) continue
-    const path = resolveWikiPath(match[1].trim(), notePaths)
+    const path = resolveWikiPath(match[1].trim(), notePaths, sourcePath)
     const heading = match[2]?.slice(1).trim()
     return path ? { destination: formatWikiDestination(path, heading), from, to } : null
   }
@@ -5150,16 +5216,8 @@ function stripMarkdownInlineSyntax(value: string): string {
     .trim()
 }
 
-function resolveWikiPath(label: string, notePaths: string[]): string | null {
-  const normalized = normalizeWikiLabel(label)
-  if (!normalized) return null
-  const exact = notePaths.find((path) => normalizeWikiLabel(path) === normalized)
-  if (exact) return exact
-  const withExtension = notePaths.find((path) => normalizeWikiLabel(stripMarkdownExtension(path)) === normalized)
-  if (withExtension) return withExtension
-  const byLabel = notePaths.find((path) => normalizeWikiLabel(wikiLabel(path)) === normalized)
-  if (byLabel) return byLabel
-  return isExplicitDocumentPath(label) ? label.replace(/\\/g, '/') : null
+function resolveWikiPath(label: string, notePaths: string[], sourcePath: string | null = null): string | null {
+  return resolveWikiDocumentPath(label, notePaths, sourcePath)
 }
 
 function wikiSearchText(path: string): string {
@@ -5172,10 +5230,6 @@ function wikiLabel(path: string): string {
 
 function stripMarkdownExtension(path: string): string {
   return path.replace(/\.(md|markdown)$/i, '')
-}
-
-function normalizeWikiLabel(label: string): string {
-  return stripMarkdownExtension(label).replace(/\\/g, '/').trim().toLowerCase()
 }
 
 function findInlineMath(text: string): Array<{ from: number; to: number; source: string }> {
@@ -5446,6 +5500,26 @@ function applyEditable(
   view.dispatch({
     effects: editable.reconfigure(EditorView.editable.of(enabled))
   })
+}
+
+function undoAndKeepEditorFocus(view: EditorView): boolean {
+  return runHistoryCommandAndKeepEditorFocus(view, undo)
+}
+
+function redoAndKeepEditorFocus(view: EditorView): boolean {
+  return runHistoryCommandAndKeepEditorFocus(view, redo)
+}
+
+function runHistoryCommandAndKeepEditorFocus(
+  view: EditorView,
+  command: (target: EditorView) => boolean
+): boolean {
+  command(view)
+  view.focus()
+  window.requestAnimationFrame(() => {
+    if (view.dom.isConnected && !view.hasFocus) view.focus()
+  })
+  return true
 }
 
 function indentMarkdownList(view: EditorView): boolean {
@@ -6309,21 +6383,6 @@ function folderAncestors(path: string): string[] {
 
 function isMarkdownPath(path: string): boolean {
   return /\.(md|markdown)$/i.test(path)
-}
-
-function isDocumentPath(path: string): boolean {
-  return /\.(md|markdown|typ)$/i.test(path)
-}
-
-function isExplicitDocumentPath(path: string): boolean {
-  const normalized = path.trim().replace(/\\/g, '/')
-  return isDocumentPath(normalized) && (
-    normalized.startsWith('../') ||
-    normalized.startsWith('./') ||
-    normalized.startsWith('/') ||
-    /^[A-Za-z]:\//.test(normalized) ||
-    normalized.includes('/')
-  )
 }
 
 function fileIcon(path: string): string {
