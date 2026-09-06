@@ -2432,10 +2432,23 @@ function App(): JSX.Element {
       <aside className="sidebar">
         <header className="vault-header">
           <div className="vault-title">
-            <span className="app-mark">N</span>
+            <img
+              className="app-mark"
+              src="/brand/bricriu-squaremark.png"
+              alt=""
+              aria-hidden="true"
+              draggable={false}
+            />
             <div className="vault-labels">
-              <strong>{vault?.name ?? 'NotesProject'}</strong>
-              <span>{vault?.root ?? 'No vault open'}</span>
+              <img
+                className="app-wordmark"
+                src="/brand/bricriu-wordmark.svg"
+                alt="Bricriu"
+                draggable={false}
+              />
+              <span title={vault?.root}>
+                {vault ? `${vault.name} — ${vault.root}` : 'No vault open'}
+              </span>
             </div>
           </div>
           {vault && (

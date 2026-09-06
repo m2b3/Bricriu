@@ -1,4 +1,4 @@
-# NotesProject Plan
+# Bricriu Plan
 
 ## Core Direction
 

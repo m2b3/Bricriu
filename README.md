@@ -1,243 +1,147 @@
-# NotesProject
+# Bricriu
 
-NotesProject is a local-first desktop notes app for Markdown and Typst files. It opens a folder as a vault, shows the files in a tree, and gives you a fast editor with search, preview, backlinks, autosave, and optional Git checkpoints.
+<p align="center">
+  <img src="public/brand/bricriu-wordmark.svg" alt="Bricriu" width="420">
+</p>
 
-The app is built with Tauri 2, React, TypeScript, Rust, and CodeMirror 6. Your notes remain ordinary files on disk.
+Bricriu is a local-first desktop editor for a folder of plain Markdown notes. Open a folder as a vault, browse and search it, edit several files at once, preview Markdown, and save everything back as ordinary files that remain usable without Bricriu.
 
-## What It Does
+**Open-source acknowledgements:** Bricriu is possible because of [Tauri](https://tauri.app/), [Rust](https://www.rust-lang.org/), [React](https://react.dev/), [CodeMirror](https://codemirror.net/), [Vite](https://vite.dev/), [Typst](https://typst.app/), [Tiptap](https://tiptap.dev/) and [ProseMirror](https://prosemirror.net/), [React Flow](https://reactflow.dev/), [FullCalendar](https://fullcalendar.io/), [markdown-it](https://github.com/markdown-it/markdown-it), [KaTeX](https://katex.org/), [nspell](https://github.com/wooorm/nspell), and the broader JavaScript and Rust ecosystems. The wordmark is rendered in Dominic Stanley's OFL-licensed [Segotia](https://github.com/insert-smiley/Irishfontclub-segotia); the squaremark is an unmodified rendering in Séamas Ó Brógáin's [Gadelica](https://www.gaelchlo.com/clonna2.html). The generated [third-party inventory](THIRD_PARTY_NOTICES.md) provides the fuller attribution and attributes every package in the current JavaScript and Rust dependency graphs, including transitive, build, optional, and platform-specific dependencies.
 
-- Opens any local folder as a notes vault.
-- Reads and writes plain Markdown files (`.md`, `.markdown`) and Typst files (`.typ`).
-- Shows a folder/file tree with create, rename, and delete actions.
-- Supports multiple open tabs.
-- Provides a CodeMirror editor with Markdown and Typst syntax support.
-- Saves manually with `Ctrl+S` or the Save button.
-- Autosaves dirty notes after a configurable delay.
-- Searches note content across the current vault.
-- Filters the file tree by filename or path.
-- Renders a split Markdown preview pane.
-- Renders KaTeX math previews for inline and block math.
-- Highlights and opens Obsidian-style wiki links such as `[[Project Ideas]]`.
-- Shows backlinks for notes linked with wiki links.
-- Watches the vault for external file changes.
-- Restores the last vault, open tabs, active tab, expanded folders, and search settings.
-- Provides a Markdown track-changes mode backed by sidecar state files.
-- Uses a Git `inuse` branch and checkpoint commits when the vault is a Git repository.
+> [!CAUTION]
+> **Back up your notes before trying this app.** Keep the vault in Git and commit regularly, or use another independent, versioned backup. Autosave, app-created Git checkpoints, and the experimental encrypted-private-folder feature are not backups. This pre-release software is provided as-is; to the maximum extent permitted by law, its author and contributors accept no responsibility for lost, overwritten, corrupted, exposed, or otherwise damaged notes or data.
 
-## Current Status
+> [!WARNING]
+> Only the ordinary Markdown workflow has received even modest real-world testing: approximately six months of use by **one person** in a Windows-oriented development environment. That is not broad or professional QA. Typst, Track Changes, Canvas, Calendar, Git automation, private-folder encryption, packaging, and all macOS/Linux behavior should be treated as **very experimental**.
 
-This is an early desktop MVP. The core workflow is usable, but the project is still intentionally small and in active development. Expect rough edges around packaging, icons, track-changes workflows, and Typst preview behavior.
+<!-- Before the first public release, add a sanitized image at docs/images/bricriu.png and uncomment:
+![Bricriu showing a demo Markdown vault](docs/images/bricriu.png)
+Never capture a real personal vault for the repository screenshot. -->
 
-## Requirements
+## Features
 
-- Node.js and npm.
-- Rust and Cargo.
-- Platform dependencies required by Tauri 2 for your operating system.
-- Git, if you want vault checkpointing.
-- Typst CLI, optionally, for Typst preview fallback paths.
+The Markdown-centered workflow includes:
 
-## Install For Development
+- Folder-based vaults with no proprietary note database.
+- A nested file tree with filename filtering, pinned notes, and create, rename, and delete actions.
+- Fast non-indexed content search with file-filter scoping and jump-to-match highlighting.
+- Multiple tabs, a resizable two-file split view, recent files, and session/window restoration.
+- A CodeMirror 6 Markdown editor with manual save, delayed autosave, undo/redo, Canadian-English spellcheck, word/character counts, list helpers, and URL linkification.
+- Filesystem watching, external-change warnings, and save-conflict checks.
+- Wiki links (`[[Note]]`), link completion, backlinks, callouts, and inline/block KaTeX math.
+- A split Markdown preview with escaped raw HTML, printing, and PDF workflows.
 
-Clone the repository and install JavaScript dependencies:
+Experimental features include:
 
-```powershell
-git clone <repo-url>
-cd notesproject
+- Typst editing plus embedded SVG/HTML preview and PDF export.
+- Markdown Track Changes with snapshots, review, accept/reject, and sidecar state.
+- A YAML-backed visual Canvas stored inside Markdown files.
+- A vault-local Calendar with recurring events.
+- Git checkpoint commits on an app-managed `inuse` branch.
+- Password-protected AES-256 ZIP archives for an optional `.h/` private area.
+
+Bricriu currently recognizes `.md`, `.markdown`, and `.typ` files. **Only `.md` and `.markdown` files are in the somewhat-tested path.** Other file types in a vault are not general-purpose editable documents.
+
+## Status and scope
+
+This is personal pre-release software at version `0.1.0`, not a polished or audited product. It was vibe-coded with OpenAI Codex and then used and tested for roughly six months by one user. The source has evolved through real use, but its bus factor, device coverage, test population, accessibility review, security review, and packaging coverage are all minimal.
+
+The design is deliberately local-first:
+
+- Notes stay in the folder you choose.
+- No account, cloud sync service, or proprietary storage format is required.
+- Rust owns filesystem, search, watcher, Git, encryption, and document-compilation work.
+- React and TypeScript own the interface and editor behavior.
+- Paths crossing the frontend/backend boundary are normally vault-relative and backend operations resolve them under the vault root.
+
+Opening an individual document through **File → Open file** is an explicit exception: the app can edit a supported file outside the vault, but disables vault-only features for it.
+
+## Name
+
+Bricriu (approximately **BRICK-roo**) is named for the eloquent troublemaker and instigator of the Irish Ulster Cycle. The project borrows the name with respect for that tradition and does not claim ownership of the mythological figure. See [bricriu.md](bricriu.md) for the naming and preliminary trademark notes.
+
+## Install
+
+No signed, notarized, broadly tested release installers are published yet. For now, build from source using the [installation and build guide](install.md).
+
+| Platform | Current advice |
+| --- | --- |
+| Windows 10/11 | The development and limited single-user testing path. Requires Node.js, Rust, Microsoft C++ Build Tools, and WebView2 to build. A future unsigned installer may trigger Windows warnings. |
+| macOS | **Untested.** Build on macOS with Xcode Command Line Tools. Packaging, icons, signing, notarization, and runtime behavior still need validation. |
+| Linux | **Untested.** Install the Tauri prerequisites for your distribution and build on Linux. WebKit/system-package requirements and generated packages still need validation. |
+
+Quick development start after installing the platform prerequisites:
+
+```sh
 npm install
-```
-
-Run the desktop app in development mode:
-
-```powershell
 npm run tauri:dev
 ```
 
-This starts Vite and then launches the Tauri desktop shell. The first run can take a while because Rust dependencies need to be downloaded and compiled.
+Useful checks and builds:
 
-## Build
-
-Build the frontend:
-
-```powershell
+```sh
 npm run build
-```
-
-Check the Rust backend:
-
-```powershell
-cargo check --manifest-path src-tauri\Cargo.toml
-```
-
-Build a packaged Tauri app:
-
-```powershell
+cargo check --manifest-path src-tauri/Cargo.toml
 npm run tauri:build
 ```
 
-For a debug desktop bundle:
+The first Rust build is large and slow. Build distributable desktop packages on each target operating system rather than expecting normal cross-platform bundles from one machine.
 
-```powershell
-npm run tauri -- build --debug
-```
+Optional external tools:
 
-Build outputs are produced by Tauri under `src-tauri/target/`.
+- [Git](https://git-scm.com/) is required only for Git checkpoint features.
+- Typst preview and Typst PDF export use the embedded compiler path.
+- Direct Markdown **Export PDF** requires both [Pandoc](https://pandoc.org/) and the [Typst CLI](https://github.com/typst/typst) on `PATH`. Printing the preview uses the system print dialog instead.
 
-## How To Use
+## Start safely
 
-Start the app and enter a folder path in the left pane. That folder becomes the vault root. NotesProject only works on paths inside the opened vault.
+1. Create a disposable folder with a few copied Markdown files; do not begin with your only copy of an important vault.
+2. Run Bricriu and open that folder as the vault.
+3. Verify edit, manual save, autosave, rename, delete, external-change, and recovery behavior on your machine.
+4. Only then try a real vault that is independently backed up and, preferably, committed to Git.
 
-Use the left pane to:
+The app writes note edits directly to disk. Depending on the features used, it may also create or modify:
 
-- create notes and folders
-- rename or delete files and folders
-- filter files by name
-- search note content
-- open Markdown files in normal editor mode
-- open Markdown files in Track mode
+- `.notesproject/` for app sidecars and Typst preview output;
+- `.vault-calendar/events.json` for Calendar data;
+- `.h.zip`, `.h/`, `.horig/`, local Git excludes, and Git hooks for private notes;
+- Git branches, staged paths, and commits for checkpoints;
+- `profile.json` and WebView local storage for preferences and session state.
 
-Use the editor pane to:
+For compatibility with development versions that predate the Bricriu name, internal storage keys and the `.notesproject/` metadata directory retain their original names. They are implementation details, not a second product name.
 
-- edit Markdown or Typst source
-- save with `Ctrl+S`
-- switch tabs with `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+PageUp`, or `Ctrl+PageDown`
-- close the current tab with `Ctrl+W`
-- toggle Markdown preview
-- toggle backlinks
+Read the [user guide](USER_GUIDE.md) before enabling Git automation or private notes.
 
-## Markdown Features
+## Technology
 
-Wiki links:
+- **Desktop shell:** Tauri 2
+- **Frontend:** React 18, TypeScript, Vite
+- **Text editor:** CodeMirror 6
+- **Native backend:** Rust
+- **Markdown:** markdown-it, KaTeX, CodeMirror Markdown language support
+- **Rich review mode:** Tiptap and ProseMirror
+- **Canvas:** React Flow and YAML
+- **Calendar:** FullCalendar
+- **Typst:** embedded Typst crates plus vendored CodeMirror Typst language support
+- **Search/watch/storage:** Rust `grep-*`, `ignore`, `regex`, `notify`, `serde`, and `zip` crates
 
-```md
-[[Project Ideas]]
-[[folder/Project Ideas]]
-[[Project Ideas|custom label]]
-[[Project Ideas#section]]
-```
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the complete dependency inventory and declared licenses.
 
-Callouts:
+## Documentation
 
-```md
-> [!NOTE]
-> This is a note.
+- [Installation and build](install.md)
+- [User guide](USER_GUIDE.md)
+- [Security policy and security boundaries](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- [Release checklist](RELEASING.md)
+- [Third-party software inventory](THIRD_PARTY_NOTICES.md)
 
-> [!WARNING]
-> This is important.
-```
+## Contributing
 
-Math:
-
-```md
-Inline math: $x^2 + y^2 = z^2$
-
-$$
-E = mc^2
-$$
-```
-
-The preview pane renders Markdown, wiki links, callouts, and KaTeX math. Raw HTML in notes is escaped.
-
-## Typst Files
-
-Typst files (`.typ`) open in the editor with Typst syntax support. The app includes preview plumbing for SVG and HTML output through the Rust backend. If embedded preview fails, the backend can fall back to invoking the `typst` executable when it is available on `PATH`.
-
-## Git Checkpoints
-
-When the opened vault is a Git repository, NotesProject uses an `inuse` branch for active editing:
-
-- If the vault is already on `inuse`, the app keeps using it.
-- If the vault is clean and `inuse` exists, the app switches to it.
-- If the vault is clean and `inuse` does not exist, the app creates it.
-- If the vault is dirty on another branch, the app asks before checkpointing and switching.
-
-Autosave writes files to disk. Checkpoints are Git commits created separately, either manually or periodically for touched files.
-
-## Private `.h` Notes
-
-A vault can have an encrypted private area:
-
-1. Create a `.h/` folder in the vault and put private Markdown or Typst files in it.
-2. Open the vault in NotesProject and enter a password in the masked unlock dialog.
-3. NotesProject leaves a new `.h/` untouched on open. The first checkpoint or commit creates its AES-256 encrypted `.h.zip` and `.horig/` baseline. If `.h.zip` already exists, opening the vault decrypts it.
-4. Commit `.h.zip`. The plaintext `.h/` and comparison baseline `.horig/` are added to the repository's local `.git/info/exclude`.
-
-`.h/` is relative to the folder opened as the vault, not necessarily the Git worktree root. For example, if `repo/notes` is the vault inside the parent `repo` Git repository, use `repo/notes/.h`; Git tracks the encrypted archive as `notes/.h.zip`.
-
-Passwords are stored as plaintext in the local, git-ignored `private-vaults.json` settings file. `defaultPassword` applies when a vault has no path-specific entry; entries under `vaults` are keyed by canonical vault path and take precedence. Do not share that file, and back up the password separately: the archive cannot be recovered without it.
-
-```json
-{
-  "defaultPassword": "change-this-local-password",
-  "vaults": {
-    "c:/path/to/vault": {
-      "password": "optional-vault-specific-password"
-    }
-  }
-}
-```
-
-Before every NotesProject checkpoint, `.h/` is compared byte-for-byte with `.horig/`. If they differ, a new encrypted archive atomically replaces `.h.zip` and the baseline is refreshed. Local `pre-commit` and `pre-push` hooks provide the same check for command-line Git. Existing hooks are preserved and run first. A pre-push that discovers new private changes refreshes the archive and stops the push so `.h.zip` can be committed.
-
-Git hooks can be bypassed with `--no-verify`. If the repository already configures `core.hooksPath`, NotesProject does not modify that custom location and reports a warning; add equivalent synchronization there before relying on command-line commits or pushes.
-
-On open, NotesProject shows the ordinary vault first and safely extracts an existing `.h.zip` on a background worker. Until that finishes, `.h/` is omitted from the tree and content search, private-note access is rejected, and checkpoints are paused. Restored public tabs open immediately; restored `.h/` tabs are added when the private folder is ready. A new `.h/` with no archive is not zipped or extracted until the first checkpoint or commit. If a crash left `.h/` ahead of `.horig/`, it archives those changes before extracting, rather than silently overwriting them. Password-protected ZIPs whose contents are rooted either directly in the archive or under `.h/` are accepted; archives rewritten by NotesProject use AES-256.
-
-Security boundaries:
-
-- `.h/`, `.horig/`, the password file, editor memory, filesystem caches, backups, and swap are plaintext while in use.
-- ZIP entry names are visible without the password even though file contents are encrypted.
-- A weak password remains vulnerable to offline guessing.
-- This protects the committed archive; it is not full-disk encryption or a hardened secret manager.
-
-## Configuration
-
-Runtime profile settings are stored in `profile.json`:
-
-```json
-{
-  "autosaveDelayMs": 5000,
-  "checkpointIntervalMs": 180000,
-  "typstPreviewDebounceMs": 250,
-  "closeMarkdownBeforeTrack": true
-}
-```
-
-The backend normalizes these values into safe ranges when loading the profile.
-
-## Project Structure
-
-```text
-src/
-  main.tsx              React app, editor UI, preview, tabs, search UI
-  styles.css            Application styles
-  track/                Track-changes editor support
-
-src-tauri/
-  src/main.rs           Tauri commands, filesystem access, search, Git, Typst
-  src/private_vault.rs  Encrypted .h lifecycle and Git-hook support
-  tauri.conf.json       Tauri app configuration
-  Cargo.toml            Rust dependencies
-
-vendor/
-  codemirror-lang-typst Local Typst CodeMirror language package
-```
-
-The `zennotes/` folder, if present, is reference material only. This app does not use Electron or the reference project's architecture.
-
-## Safety Model
-
-The frontend and backend exchange vault-relative paths. The Rust backend resolves note paths under the opened vault root and rejects paths that escape the vault. File operations are limited to note and folder actions inside the selected vault.
-
-## Known Limits
-
-- Search is intentionally non-indexed.
-- Backlinks currently detect wiki links, not normal Markdown links.
-- Missing wiki links are not created automatically.
-- The production frontend bundle currently includes CodeMirror directly and may exceed Vite's default chunk-size warning.
-- The app icon is a placeholder.
-- Track Changes is Markdown-only.
-- Typst preview behavior is still evolving.
+Bug reports and focused fixes are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) first. In particular, do not submit real notes, vault paths, passwords, decrypted `.h/` contents, or other personal data in issues, screenshots, logs, fixtures, or pull requests.
 
 ## License
 
-No license file is currently included. Add one before publishing if you want others to use, modify, or redistribute the project.
+Bricriu is free software licensed under the [GNU Affero General Public License, version 3 or later](LICENSE) (`AGPL-3.0-or-later`). You may use it commercially, copy it, and modify it, subject to the license's conditions. In particular, covered modified versions must remain under the AGPL, and users who interact with a modified version over a network must be offered its Corresponding Source.
+
+Third-party components remain under their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -211,17 +211,12 @@ body.is-resizing-calendar * {
 }
 
 .app-mark {
-  display: inline-flex;
-  width: 30px;
-  height: 30px;
+  display: block;
+  width: 36px;
+  height: 36px;
   flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid #1c5944;
-  border-radius: 7px;
-  background: var(--accent);
-  color: white;
-  font-weight: 700;
+  object-fit: contain;
+  user-select: none;
 }
 
 .vault-labels {
@@ -232,7 +227,7 @@ body.is-resizing-calendar * {
   gap: 2px;
 }
 
-.vault-labels strong,
+.app-wordmark,
 .vault-labels span,
 .note-path,
 .tree-name,
@@ -243,8 +238,14 @@ body.is-resizing-calendar * {
   white-space: nowrap;
 }
 
-.vault-labels strong {
-  font-size: 14px;
+.app-wordmark {
+  display: block;
+  width: 104px;
+  max-width: 100%;
+  height: 20px;
+  object-fit: contain;
+  object-position: left center;
+  user-select: none;
 }
 
 .vault-labels span {

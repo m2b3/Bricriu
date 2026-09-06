@@ -1,4 +1,4 @@
-# Typst Integration TODO For notesproject
+# Typst Integration TODO for Bricriu
 
 ## MVP TODO
 
@@ -103,7 +103,7 @@ export PNG
 
 9. Track in-memory overlays for all open dirty Typst tabs, not only the active preview target. This would let an unsaved `.typ` file imported by another open `.typ` file participate in preview without requiring a save first.
 
-## notesproject Integration Plan
+## Bricriu Integration Plan
 
 ### Phase 1: File Support
 
@@ -113,7 +113,7 @@ export PNG
 
 3. Add safe Rust read/save support for Typst files without weakening Markdown-only behavior where it matters.
 
-4. Keep all frontend/backend paths vault-relative, matching the existing notesproject rule.
+4. Keep all frontend/backend paths vault-relative, matching the existing Bricriu rule.
 
 ### Phase 2: Editor Mode
 

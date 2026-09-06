@@ -2,6 +2,7 @@
   "name": "notesproject",
   "private": true,
   "version": "0.1.0",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +10,8 @@
     "tauri:dev": "tauri dev",
     "build": "tsc && vite build",
     "build:analyze": "set ANALYZE=true&& npm run build",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "notices": "node scripts/generate-third-party-notices.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.2",

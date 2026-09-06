@@ -198,7 +198,7 @@ pub fn maybe_run_cli() -> Option<i32> {
     let args = env::args().collect::<Vec<_>>();
     let marker = args.iter().position(|arg| arg == "--private-vault-sync")?;
     if args.len() <= marker + 3 {
-        eprintln!("NotesProject private-vault hook received invalid arguments.");
+        eprintln!("Bricriu private-vault hook received invalid arguments.");
         return Some(2);
     }
 
@@ -207,12 +207,12 @@ pub fn maybe_run_cli() -> Option<i32> {
     let hook = &args[marker + 3];
     match sync_if_needed_with_settings(&root, &settings) {
         Ok(changed) if hook == "pre-push" && changed => {
-            eprintln!("NotesProject refreshed .h.zip. Commit the updated archive before pushing.");
+            eprintln!("Bricriu refreshed .h.zip. Commit the updated archive before pushing.");
             Some(3)
         }
         Ok(_) => Some(0),
         Err(err) => {
-            eprintln!("NotesProject private-vault sync failed: {err}");
+            eprintln!("Bricriu private-vault sync failed: {err}");
             Some(2)
         }
     }
@@ -449,7 +449,8 @@ fn extract_encrypted_archive(
 
     if !marker_found && !encrypted_payload_found {
         return Err(
-            "Private archive has no encrypted files and no NotesProject marker.".to_string(),
+            "Private archive has no encrypted files and no recognized private-vault marker."
+                .to_string(),
         );
     }
     Ok(())
@@ -796,7 +797,7 @@ fn install_git_hooks(root: &Path, settings_path: &Path) -> Result<(), String> {
             .is_empty()
     {
         return Err(
-            "Git core.hooksPath is already configured; NotesProject left it untouched, so command-line commits and pushes need equivalent private-vault hooks there."
+            "Git core.hooksPath is already configured; Bricriu left it untouched, so command-line commits and pushes need equivalent private-vault hooks there."
                 .to_string(),
         );
     }
@@ -806,7 +807,7 @@ fn install_git_hooks(root: &Path, settings_path: &Path) -> Result<(), String> {
     fs::create_dir_all(&hooks)
         .map_err(|err| format!("Could not create Git hooks folder: {err}"))?;
     let executable = env::current_exe()
-        .map_err(|err| format!("Could not locate NotesProject executable: {err}"))?;
+        .map_err(|err| format!("Could not locate the Bricriu executable: {err}"))?;
     install_hook(
         &hooks,
         "pre-commit",
@@ -841,7 +842,7 @@ fn install_hook(
         if !existing.contains(HOOK_MARKER) {
             if backup.exists() {
                 return Err(format!(
-                    "Could not install the {name} hook because both it and its NotesProject backup already exist."
+                    "Could not install the {name} hook because both it and its compatibility backup already exist."
                 ));
             }
             fs::rename(&hook, &backup)

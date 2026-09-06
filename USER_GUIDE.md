@@ -1,49 +1,75 @@
-# NotesProject User Guide
+# Bricriu User Guide
 
-## Open A Vault
+> [!CAUTION]
+> Use a disposable test vault first. Keep important notes in an independent versioned backup and commit them regularly if the vault uses Git. File deletion, autosave, Git automation, and private-note encryption can all change data on disk.
 
-Enter a folder path in the left pane and press **Open**.
+The ordinary Markdown editor is the only workflow with approximately six months of single-user testing. Every feature explicitly marked **experimental** below, plus all macOS and Linux behavior, has much less assurance.
 
-The vault is the root folder for your notes. The app shows Markdown files from this folder and its subfolders.
+## Open a vault
 
-## Files And Folders
+A vault is an ordinary folder containing notes. Enter its path and select **Open**, or use the folder dialog beside the path field. Bricriu recursively shows supported files beneath that folder:
 
-- **New note** creates a Markdown file.
-- **New folder** creates a folder.
-- Hover a file or folder in the tree to rename or delete it.
-- Click a Markdown file to open it in the editor.
+- `.md` and `.markdown` — the primary, somewhat-tested path;
+- `.typ` — experimental Typst support.
 
-## Tabs
+Hidden folders are normally omitted. Search can reveal that a matching note exists under a hidden folder, after which the interface can explicitly reveal that folder. The special private `.h/` folder has separate behavior described below.
 
-- Multiple notes can be open at once.
-- Click a tab to switch files.
-- Close the current tab with `Ctrl+W`.
-- Switch tabs with `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+PageUp`, or `Ctrl+PageDown`.
+**File → Open file** can open a supported individual file outside the current vault. The app labels it **Outside vault** and disables vault-only behavior such as checkpoints, backlinks, and private-vault handling for that file.
 
-## Editing
+## Files and folders
 
-The editor is a CodeMirror Markdown editor. Your files stay as plain `.md` files.
+- **New note** creates a Markdown file by default. Supplying `.typ` creates an experimental Typst document.
+- **New folder** creates a folder within the vault.
+- Tree-row actions pin, open in Track mode, rename, or delete a note; folder rows can be renamed or deleted.
+- Pinned notes remain near the top of the sidebar.
+- The file tree and backend guard vault-relative operations against `..` path traversal.
 
-- Save with **Save** or `Ctrl+S`.
-- Undo/redo uses CodeMirror history and is preserved while the tab remains open.
-- Saving does not clear editor undo.
-- Dirty tabs show a modified marker.
+Treat delete as permanent unless you have independently confirmed recovery through Git, backups, or operating-system facilities. Test rename and delete behavior on copied files before using it on a real vault.
+
+## Tabs, panes, and recent files
+
+- Open notes appear in tabs; a modified marker identifies dirty tabs.
+- **Split** opens a resizable second editor pane. **Move right** moves the main tab into it.
+- `Ctrl+W` / `Cmd+W` closes the focused split pane or current tab.
+- Switch main tabs with `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+PageUp`, `Ctrl+PageDown`, `Ctrl+[`, or `Ctrl+]` (use `Cmd` where the platform maps it).
+- **File → Recent** reopens recently closed files. **Persist recent files** controls whether that history survives an app restart.
+
+## Editing Markdown
+
+The Text view is a CodeMirror 6 source editor. Markdown remains visible and the saved file stays plain text.
+
+- Save with **Save** or `Ctrl+S` / `Cmd+S`.
+- Create a note with `Ctrl+N` / `Cmd+N`.
+- Open a file with `Ctrl+O` / `Cmd+O`.
+- Undo/redo uses CodeMirror history and remains available while the tab is open.
+- **Count** reports words and characters for the selection or full document.
+- **Bullets** and **Numbers** turn selected lines into Markdown lists.
+- `Ctrl+L` / `Cmd+L` toggles Markdown links around URLs in the selection.
+- Canadian-English spellcheck underlines unknown words and offers suggestions or a personal dictionary entry.
+
+Saving uses the file's last-known modification information to detect likely external conflicts. A conflict is shown for review rather than silently replacing the newer disk version. This protection is useful but should not be treated as infallible backup or merge logic.
+
+## Autosave and external changes
+
+Dirty notes autosave after a configurable delay; the default is five seconds. Autosave writes directly to disk but does not clear the editor's in-memory undo history.
+
+The vault watcher refreshes the tree and marks open notes changed or deleted when another program modifies them. Review these warnings carefully. Concurrent editing from two programs remains a risk even with conflict checks.
+
+On close, Bricriu asks about dirty tabs, attempts to save them, and—when applicable—attempts a Git checkpoint before exiting. Do not assume a successful window close is an independent backup.
 
 ## Search
 
-There are two search boxes in the left pane.
+The sidebar has two separate searches:
 
-- **File name** filters the visible file tree.
-- **Content** searches note text inside the current vault.
-- **Search filtered files only** makes content search search only files currently matching the file-name filter.
+- **File name** filters visible paths in the current tree.
+- **Content** scans supported note text in the current vault.
+- **Search filtered files only** limits content search to files currently matching the path filter.
 
-Content search is non-indexed and uses embedded ripgrep-style matching. Simple terms work as literal text searches.
+Content search is deliberately non-indexed and is limited to a bounded result set. Clicking a result opens the note at the matching text and highlights visible occurrences.
 
-Clicking a content-search result opens the note at the match. The editor highlights visible occurrences of the active search term, with the clicked match emphasized.
+## Wiki links and backlinks
 
-## Wiki Links
-
-Use Obsidian-style wiki links:
+Supported Obsidian-style wiki-link forms include:
 
 ```md
 [[Project Ideas]]
@@ -52,17 +78,18 @@ Use Obsidian-style wiki links:
 [[Project Ideas#section]]
 ```
 
-Current behavior:
-
-- Wiki links are highlighted in the editor.
+- Wiki links are highlighted in the Markdown editor.
 - `Ctrl+click` opens a matching note.
 - `Ctrl+Enter` opens the wiki link under the cursor.
-- Type `[[` and part of a filename to get filename suggestions.
-- Matching works against Markdown filenames with or without `.md`.
+- Typing `[[` plus part of a filename offers note-name completion.
+- Wiki links in Preview are clickable.
+- **View → Backlinks** lists Markdown notes that wiki-link to the current note.
 
-## Callouts
+Missing wiki-link targets are not created automatically. Backlinks detect wiki links, not ordinary Markdown links.
 
-Use callout lines like:
+## Callouts and math
+
+Common callout types are highlighted and rendered in Preview:
 
 ```md
 > [!NOTE]
@@ -70,133 +97,119 @@ Use callout lines like:
 
 > [!WARNING]
 > This is important.
-
-> [!TIP]
-> A useful hint.
 ```
 
-The editor highlights common callout types, including `NOTE`, `INFO`, `TIP`, `SUCCESS`, `WARNING`, `CAUTION`, `IMPORTANT`, `DANGER`, `ERROR`, and `FAILURE`.
-
-## Math With KaTeX
-
-Inline math:
+KaTeX renders common inline and block math:
 
 ```md
-The equation $x^2 + y^2 = z^2$ is rendered beside the source.
-```
+Inline: $x^2 + y^2 = z^2$
 
-Block math:
-
-```md
 $$
 E = mc^2
 $$
 ```
 
-The source text remains editable Markdown. KaTeX previews are shown as editor widgets.
+KaTeX is not a complete TeX distribution and does not support every LaTeX package or construct.
 
-## Preview Pane
+## Preview, print, and PDF
 
-Use **Preview** in the editor header to toggle split view.
+Use **View → Preview** to toggle the resizable rendered pane. It renders Markdown, wiki links, callouts, and KaTeX math. Raw HTML from notes is escaped rather than executed.
 
-The preview pane renders:
+- **File → Print preview / PDF** prints the rendered preview through the system print dialog, which may offer a save-to-PDF destination.
+- `Ctrl+P` / `Cmd+P` prints Preview; add `Shift` to print raw Markdown.
+- **File → Export PDF** on a Markdown file invokes Pandoc with Typst as the PDF engine. Both `pandoc` and `typst` must be installed and available on `PATH`.
 
-- normal Markdown
-- wiki links
-- callouts
-- inline KaTeX math
-- block KaTeX math
+Always inspect an exported document before relying on it; print and PDF behavior varies by platform and is experimental.
 
-Click a wiki link in the preview to open the matching note.
+## Git checkpoints (experimental)
 
-Raw HTML inside notes is escaped in the preview.
-
-## Backlinks
-
-Use **Backlinks** in the editor header to toggle the backlinks panel.
-
-The panel shows notes that link to the current note with wiki links, for example:
-
-```md
-[[Current Note]]
-[[Current Note.md]]
-[[folder/Current Note]]
-```
-
-Each result shows the source note, line number, and matching line text. Click a result to open the source note at that link.
-
-## Autosave
-
-Dirty notes autosave after a delay. The default is:
-
-```json
-{
-  "autosaveDelayMs": 5000
-}
-```
-
-Autosave writes the file to disk but does not clear CodeMirror undo.
-
-## Git Checkpoints
-
-If the vault is a Git repository, the app uses an `inuse` branch for active work.
+If the vault is inside a Git worktree and Git is available, Bricriu uses an `inuse` branch for active editing.
 
 On open:
 
-- If already on `inuse`, it stays there.
-- If clean and `inuse` exists, it switches to `inuse`.
-- If clean and `inuse` does not exist, it creates `inuse`.
-- If dirty on another branch, it asks before creating a checkpoint and switching.
+- If already on `inuse`, the app remains there.
+- If the worktree is clean and `inuse` exists, it switches to that branch.
+- If the worktree is clean and `inuse` does not exist, it creates the branch.
+- If another branch is dirty, the app asks before checkpointing and switching.
 
-Checkpoint behavior:
+Autosave writes files; checkpoints are separate Git commits. A manual **Checkpoint** action is available, and the default periodic interval is three minutes when touched files exist. Close handling also attempts to save and checkpoint.
 
-- Autosave writes files.
-- Checkpoints create Git commits later.
-- Manual checkpoint is available with **Checkpoint**.
-- Periodic checkpoint default is 3 minutes when changed files exist.
-- On app close, dirty tabs are saved and touched files are checkpointed before exit.
+> [!WARNING]
+> The app can switch branches, stage paths, install or modify hooks for private notes, and create commits. Inspect the repository with command-line Git, keep a remote or separate backup, and do not enable this first in a complex worktree. Checkpoints are convenience history, not a backup strategy.
 
-## Private Notes
+## Private `.h/` notes (highly experimental)
 
-To create a private part of a vault:
+This feature protects a committed archive; it is not full-disk encryption, a hardened secret manager, or a substitute for a tested backup.
 
-1. Create `.h/` in the vault.
-2. Add private notes beneath it.
-3. Open the vault and enter a password when prompted.
-4. Use **Checkpoint** or commit. That first checkpoint or commit creates `.h.zip` and the `.horig/` baseline.
-5. Commit the generated `.h.zip`, but never force-add `.h/` or `.horig/`.
+1. Create `.h/` directly in the opened vault and add private notes beneath it.
+2. Open the vault and enter a password when prompted.
+3. The first checkpoint or commit creates an AES-256 encrypted `.h.zip` and a plaintext `.horig/` comparison baseline.
+4. Commit `.h.zip`. Never force-add `.h/` or `.horig/`.
 
-Place `.h/` directly inside the folder opened as the vault. If that vault is a subfolder of a larger Git repository, NotesProject automatically uses repository-relative ignore, archive, and hook paths.
+If the vault is a subfolder of a larger Git repository, paths are adjusted relative to that worktree. Bricriu adds plaintext paths to the repository's local `.git/info/exclude` and may install local pre-commit/pre-push hook integration. Existing hooks are preserved and run first. If `core.hooksPath` is already customized, the app reports a warning instead of modifying that location.
 
-NotesProject stores passwords in its git-ignored `private-vaults.json` file. Its `defaultPassword` is used unless `vaults` contains an entry for the canonical vault path. The private folder remains visible in the NotesProject tree so it can be edited normally. Its plaintext and `.horig/` baseline are placed in the vault repository's local Git exclude file.
+On open, public notes appear first while an existing `.h.zip` is decrypted in a background worker. Private files remain out of the tree and content search until preparation completes, and checkpoints wait. Before later checkpoints or integrated command-line commits, `.h/` is compared byte-for-byte with `.horig/`; changes cause `.h.zip` to be replaced and the baseline refreshed. A pre-push that discovers an uncommitted archive update stops the push.
 
-Opening shows ordinary notes first and decrypts an existing `.h.zip` into `.h/` and `.horig/` on a background worker. Private notes stay out of the tree and content search until they are ready; checkpoints wait as well. Restored private tabs appear after decryption. If `.h/` is new and no archive exists yet, opening leaves it untouched; the first checkpoint or commit creates the archive and baseline. Before later app checkpoints or command-line commits, NotesProject compares the two directories and refreshes `.h.zip` when needed. A command-line push is stopped if it finds an uncommitted archive update.
+Important boundaries:
 
-Keep a separate password backup. Deleted passwords cannot be recovered. File names in the ZIP remain visible, and the working folders are plaintext while the vault is open.
+- Passwords are stored as plaintext in the local, Git-ignored `private-vaults.json` file.
+- `.h/`, `.horig/`, editor memory, caches, backups, and swap can contain plaintext while in use.
+- ZIP entry names remain visible without the password.
+- Weak passwords remain vulnerable to offline guessing.
+- Losing the password means the encrypted archive cannot be recovered.
+- Git hooks can be bypassed, fail, or be replaced; independently verify the archive before deleting plaintext or sharing a repository.
 
-Defaults are stored in `profile.json`:
+Keep a separate secure password backup and test both encryption and restoration using disposable data before considering this feature.
+
+## Typst (highly experimental)
+
+`.typ` files open with vendored Typst syntax support. Preview can render embedded SVG or HTML, and PDF export uses the embedded Typst compiler. Compilation may create preview output below `.notesproject/typst-preview/` in the vault.
+
+Typst packages, fonts, SVG/HTML parity, error reporting, export fidelity, and all platform behavior require more testing. Do not assume Markdown-specific features such as wiki links, Track Changes, backlinks, or Canvas apply to Typst.
+
+## Track Changes (highly experimental)
+
+Use the track action on a Markdown tree row to open the rich Track Changes editor. It supports snapshots, review, and accepting or rejecting detected block changes. State is stored as sidecar JSON below `.notesproject/track/`, and merge candidates may be written beside a note with `.track-merge` in the filename.
+
+Track mode converts between Markdown and a ProseMirror/Tiptap document model. Round trips may not preserve every Markdown construct exactly. Keep source control and test with copied notes containing the syntax you care about before using it.
+
+## Canvas (highly experimental)
+
+Canvas interprets a fenced `canvas` YAML block inside a Markdown document as nodes, edges, positions, sizes, colors, and viewport state. Moving or editing nodes rewrites that YAML in the note. The rest of the Markdown document can appear as a node or panel.
+
+Because Canvas directly rewrites source, review the Markdown diff after every experiment and keep recoverable history.
+
+## Calendar (highly experimental)
+
+Calendar stores events and recurrence settings in `.vault-calendar/events.json` inside the vault. It is not derived from note dates, is not a CalDAV client, and does not synchronize with an external calendar service. Back up or commit the calendar JSON if the data matters.
+
+## Session and preference storage
+
+The app uses WebView local storage to remember workspace state such as the last vault, tabs, active file, split layout, expanded folders, pins, filters, recent files, window placement, and panel sizes. `profile.json` stores timing and history settings, including:
 
 ```json
 {
   "autosaveDelayMs": 5000,
-  "checkpointIntervalMs": 180000
+  "checkpointIntervalMs": 180000,
+  "gitStatusPollIntervalMs": 300000,
+  "typstPreviewDebounceMs": 250,
+  "closeMarkdownBeforeTrack": true,
+  "persistRecentFiles": true
 }
 ```
 
-## Session Restore
+The backend normalizes timing values into bounded ranges. Delete local state only after recording anything you need to restore manually.
 
-The app remembers:
+For compatibility with earlier development versions, these settings and the `.notesproject/` vault metadata directory retain their original internal namespace.
 
-- last vault
-- open tabs
-- active tab
-- expanded folders
-- filename filter
-- whether content search uses the file filter
+## Known limits
 
-## Current Limits
-
-- Wiki links open existing matching files; automatic creation of missing links is not implemented yet.
-- Backlinks currently detect wiki links, not ordinary Markdown links.
-- Math preview is for common KaTeX syntax, not every LaTeX package.
-- Search has no persistent index by design.
+- Only Markdown has modest single-user, Windows-oriented real-world testing.
+- Search scans files and has no persistent content index.
+- Wiki-link resolution and backlinks are intentionally narrower than a full knowledge-base application.
+- The app has no built-in cloud sync or backup.
+- Packaging, signing, installer upgrades, and clean uninstallation are not release-tested.
+- macOS and Linux are untested.
+- Accessibility, internationalization, and high-DPI/multi-monitor combinations need broader review.
+- The application icon is a generated Windows-oriented placeholder.
+- Track Changes, Canvas, Calendar, Typst, Git automation, and private notes remain highly experimental.

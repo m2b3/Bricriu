@@ -1,84 +1,39 @@
-# Install and Build
+# Installation and Build Guide
 
-This guide is for a new developer starting from a machine that does not already have Node.js, npm, Rust, or the native build tools needed by Tauri.
+Bricriu does not yet publish signed, notarized, broadly tested binaries. The source-build instructions below are therefore the supported way to try it today.
 
-The project is a Tauri 2 desktop app with a React/Vite frontend and a Rust backend. You need both the JavaScript toolchain and the Rust toolchain before it will compile.
+> [!CAUTION]
+> Start with copied, disposable notes and keep an independent backup. Installing or successfully building the app does not make it production-safe.
 
-## 1. Install System Prerequisites
+## Prebuilt releases (future)
 
-### Windows
+When release assets exist on GitHub, ordinary users should download the artifact for their operating system and CPU rather than install the development toolchain. A release must clearly state which platforms were actually built and tested.
 
-Install these first:
+- **Windows:** use the Windows installer produced by Tauri. Until the project is code-signed, Windows may show an unknown-publisher or reputation warning. Verify that the file came from the repository's own Releases page before running it.
+- **macOS:** use a macOS artifact built on macOS for the correct architecture. The project is not currently signed or notarized, so no public macOS artifact should be represented as production-ready.
+- **Linux:** use the package matching the distribution when one is provided. Linux packaging and runtime compatibility have not been tested.
 
-1. **Node.js LTS**
-   - Download and install the LTS version from <https://nodejs.org/>.
-   - The installer includes `npm`.
+Node.js, Rust, and compiler toolchains are build requirements; they should not normally be needed just to run a packaged app. Git, Pandoc, and the Typst CLI remain optional runtime tools for particular features described below.
 
-2. **Rust**
-   - Download and run `rustup-init.exe` from <https://rustup.rs/>.
-   - Choose the default installation options.
-   - Restart PowerShell after installation so `cargo` is on your `PATH`.
+## Platform support
 
-3. **Microsoft C++ Build Tools**
-   - Install **Visual Studio Build Tools** from <https://visualstudio.microsoft.com/visual-cpp-build-tools/>.
-   - In the installer, select **Desktop development with C++**.
-   - Make sure the Windows SDK and MSVC compiler are included.
+| Platform | Test status | Source-build prerequisites |
+| --- | --- | --- |
+| Windows 10/11 | Limited six-month, single-user, Windows-oriented use | Node.js LTS, Rust MSVC toolchain, Visual Studio C++ Build Tools, Windows SDK, WebView2 |
+| macOS | **Untested** | Node.js LTS, Rust, Xcode Command Line Tools |
+| Linux | **Untested** | Node.js LTS, Rust, and the current Tauri/WebKit system packages for the distribution |
 
-4. **Microsoft Edge WebView2 Runtime**
-   - Most Windows 10/11 machines already have it.
-   - If Tauri reports that WebView2 is missing, install the Evergreen Runtime from <https://developer.microsoft.com/microsoft-edge/webview2/>.
+Tauri's native prerequisites change by platform and distribution. Check the [official Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) in addition to this guide.
 
-These are the standard Windows prerequisites for Tauri 2.
+## Windows prerequisites
 
-### macOS
+1. Install the current [Node.js LTS](https://nodejs.org/), which includes npm.
+2. Install Rust using [rustup](https://rustup.rs/). Use the default stable MSVC toolchain.
+3. Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/). Select **Desktop development with C++**, including MSVC and a Windows SDK.
+4. Ensure the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) is installed. It is already present on most current Windows 10/11 systems.
+5. Open a new PowerShell window so the updated `PATH` is loaded.
 
-Install:
-
-1. **Xcode Command Line Tools**
-
-   ```sh
-   xcode-select --install
-   ```
-
-2. **Node.js LTS**
-   - Download from <https://nodejs.org/>, or install with your preferred package manager.
-
-3. **Rust**
-
-   ```sh
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   ```
-
-Restart your terminal after installing Rust.
-
-Mac development should work with the normal Tauri prerequisites installed. Use the macOS/Linux command variants shown below with forward slashes.
-
-Packaging a real macOS `.app` bundle should be done on macOS. Tauri desktop builds are platform-native, so a Windows machine should not be treated as the normal way to produce a Mac app bundle.
-
-The current Tauri config uses `src-tauri/icons/icon.ico`, which is Windows-oriented. Development mode may still work, but macOS packaging may require adding proper macOS icon assets such as `.icns` later.
-
-### Linux
-
-Install:
-
-1. **Node.js LTS**
-   - Download from <https://nodejs.org/>, or install with your distribution/package manager.
-
-2. **Rust**
-
-   ```sh
-   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   ```
-
-3. **Tauri Linux system packages**
-   - Linux package names vary by distribution.
-   - Follow the official Tauri 2 Linux prerequisites for your distro: <https://v2.tauri.app/start/prerequisites/>.
-
-Restart your terminal after installing Rust.
-
-## 2. Verify the Tools
-
-Open a new terminal in the project folder and run:
+Verify the tools:
 
 ```powershell
 node --version
@@ -87,104 +42,114 @@ rustc --version
 cargo --version
 ```
 
-Each command should print a version number. If any command is not found, restart the terminal and check that the relevant installer completed successfully.
+## macOS prerequisites (untested)
 
-## 3. Install Project Dependencies
+Install Xcode Command Line Tools:
 
-From the repository root:
-
-```powershell
-npm install
+```sh
+xcode-select --install
 ```
 
-This installs the frontend dependencies and the local Tauri CLI declared in `package.json`.
+Install the current Node.js LTS and Rust through their official installers or a trusted package manager, then verify `node`, `npm`, `rustc`, and `cargo` in a new terminal.
 
-## 4. Check the Frontend Build
+Build macOS bundles on macOS. The current repository has only a Windows-oriented `.ico` application icon and has not been validated for macOS signing, notarization, Intel, or Apple silicon. Expect release-engineering work before distributing a `.app` or `.dmg`.
 
-```powershell
+## Linux prerequisites (untested)
+
+Install the current Node.js LTS and Rust, then install the packages listed for your distribution in the [Tauri 2 Linux prerequisites](https://v2.tauri.app/start/prerequisites/). These typically include a C toolchain and WebKit/GTK-related development libraries, but package names vary and the official list should be treated as authoritative.
+
+Build Linux packages on the Linux distribution or compatible build environment you intend to support. No Linux distribution, display server, desktop environment, architecture, or package format has been validated for Bricriu yet.
+
+## Build from source
+
+From a cloned copy of the repository:
+
+```sh
+npm ci
 npm run build
+cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-This runs TypeScript and builds the Vite frontend into `dist/`.
-
-The build may warn that the JavaScript chunk is over 500 kB because CodeMirror is bundled directly. That warning is expected for now.
-
-## 5. Check the Rust Backend
+On Windows, the backslash form also works:
 
 ```powershell
 cargo check --manifest-path src-tauri\Cargo.toml
 ```
 
-The first Rust build can take a long time because Cargo downloads and compiles many crates into `src-tauri/target/`.
+The first Cargo operation may download and compile hundreds of crates and can take a long time. Later builds normally reuse `src-tauri/target/`.
 
-On macOS/Linux, use forward slashes:
-
-```sh
-cargo check --manifest-path src-tauri/Cargo.toml
-```
-
-On macOS/Linux, the matching frontend and Tauri commands are:
+Run the desktop app in development mode:
 
 ```sh
-npm install
-npm run build
 npm run tauri:dev
 ```
 
-## 6. Run the App in Development
+This command starts Vite and the desktop shell and remains running until the app closes.
 
-```powershell
-npm run tauri:dev
+Build release bundles for the current operating system:
+
+```sh
+npm run tauri:build
 ```
 
-This starts Vite and opens the Tauri desktop app. The command stays running while the app is open.
-
-## 7. Build a Debug Desktop App
-
-```powershell
-npm run tauri -- build --debug
-```
-
-The debug build output is created under `src-tauri/target/debug/`.
-
-On macOS/Linux:
+Build a debug bundle:
 
 ```sh
 npm run tauri -- build --debug
 ```
 
-Build the desktop package on the same operating system you are targeting. For example, build the macOS app on macOS.
+Tauri writes bundle output below `src-tauri/target/release/bundle/` or the corresponding debug target directory. Do not publish an artifact merely because it compiled; test installation, launch, editing copied notes, saving, upgrading, and uninstalling on a clean machine first.
+
+## Optional runtime tools
+
+The basic Markdown editor does not require these tools:
+
+- **Git:** required for app-created checkpoint branches and commits. Install [Git](https://git-scm.com/) and make sure `git --version` works. Opening a non-Git vault is supported.
+- **Pandoc and Typst CLI:** both are required by direct Markdown **Export PDF**. Ensure `pandoc --version` and `typst --version` work. The normal preview print dialog is a separate path.
+- **Typst CLI:** not required for the primary embedded Typst preview/export path, but keeping a compatible CLI available can help with external Typst workflows.
+
+## Verify before using real notes
+
+1. Open a disposable test vault.
+2. Create, edit, manually save, rename, and delete copied notes.
+3. Confirm autosave and external-change handling.
+4. Close and reopen the app; check restored tabs and file contents.
+5. If using Git checkpoints, inspect the created branch and commits with Git outside the app.
+6. Restore a deleted test file from your independent backup so you know the recovery path works.
 
 ## Troubleshooting
 
-### `cargo` or `rustc` is not recognized
+### `cargo`, `rustc`, `node`, or `npm` is not found
 
-Restart the terminal. If it still fails, reinstall Rust from <https://rustup.rs/> and make sure the installer updates your `PATH`.
+Open a new terminal after installation. If the command is still missing, repair the relevant installation and its `PATH` entry.
 
-### Visual Studio or linker errors on Windows
+### Windows linker or compiler errors
 
-Install or modify **Visual Studio Build Tools** and ensure **Desktop development with C++** is selected. Tauri needs the MSVC compiler and Windows SDK.
+Modify Visual Studio Build Tools and confirm that **Desktop development with C++**, MSVC, and a Windows SDK are installed. Rust should be using an `*-pc-windows-msvc` host toolchain.
 
 ### WebView2 errors on Windows
 
-Install the Microsoft Edge WebView2 Evergreen Runtime from <https://developer.microsoft.com/microsoft-edge/webview2/>.
+Install or repair the WebView2 Evergreen Runtime, then restart the app.
 
-### `npm install` fails
+### Linux WebKit/GTK build errors
 
-Make sure you installed the Node.js LTS version, then retry:
+Revisit the official Tauri prerequisite list for the exact distribution and version. Similar distributions often use different development-package names.
 
-```powershell
-npm install
-```
+### `npm ci` reports a lockfile mismatch
 
-### The first build is slow
+For release builds, fix and commit the mismatch rather than silently ignoring it. During dependency development, `npm install` may intentionally update `package-lock.json`; review that diff before committing.
 
-That is normal. The first Tauri/Rust build downloads and compiles many dependencies. Later builds are much faster because Cargo reuses compiled artifacts.
+### The frontend build warns about large chunks
 
-## References
+CodeMirror and the experimental editors add bundle weight. The existing Vite chunk warning is known; it is not itself a build failure.
 
-- Tauri 2 prerequisites: <https://v2.tauri.app/start/prerequisites/>
-- Node.js downloads: <https://nodejs.org/>
-- Rust installer: <https://rustup.rs/>
-- Visual Studio Build Tools: <https://visualstudio.microsoft.com/visual-cpp-build-tools/>
-- WebView2 Runtime: <https://developer.microsoft.com/microsoft-edge/webview2/>
+### Markdown PDF export fails
+
+Check both `pandoc --version` and `typst --version`. Bricriu invokes Pandoc with Typst as the PDF engine for this command.
+
+## Build references
+
+- [Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/)
+- [Tauri distribution guidance](https://v2.tauri.app/distribute/)
+- [Node.js downloads](https://nodejs.org/)
+- [Rust installer](https://rustup.rs/)

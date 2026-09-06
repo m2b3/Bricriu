@@ -424,7 +424,7 @@ fn checkpoint_and_switch_inuse_at(root: &Path) -> Result<GitInfo, String> {
     let has_staged = !run_git_status(root, &["diff", "--cached", "--quiet"])?.success;
     if has_staged {
         let message = format!(
-            "NotesProject checkpoint before inuse: {}",
+            "Bricriu checkpoint before inuse: {}",
             checkpoint_timestamp()
         );
         run_git_checked(
@@ -471,7 +471,7 @@ fn checkpoint_inuse_at(root: &Path, paths: Vec<String>) -> Result<GitInfo, Strin
         return inspect_git_info(root, "No checkpoint changes to commit.");
     }
 
-    let message = format!("NotesProject checkpoint: {}", checkpoint_timestamp());
+    let message = format!("Bricriu checkpoint: {}", checkpoint_timestamp());
     run_git_checked(
         root,
         &["commit", "-m", &message],
