@@ -56,7 +56,9 @@ The design is deliberately local-first:
 
 Opening an individual document through **File → Open file** is an explicit exception: the app can edit a supported file outside the vault, but disables vault-only features for it.
 
-## Name
+## Why Bricriu?
+
+We like trickster myths. We tried Anansi, Kokopelli, Loki, Puck, and Laverna, but they were all taken. So we used this one :)
 
 Bricriu (approximately **BRICK-roo**) is named for the eloquent troublemaker and instigator of the Irish Ulster Cycle. The project borrows the name with respect for that tradition and does not claim ownership of the mythological figure. See [bricriu.md](bricriu.md) for the naming and preliminary trademark notes.
 
