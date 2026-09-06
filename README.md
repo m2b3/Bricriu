@@ -132,6 +132,7 @@ See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the complete dependency
 - [Installation and build](install.md)
 - [User guide](USER_GUIDE.md)
 - [Security policy and security boundaries](SECURITY.md)
+- [Warranty disclaimer and limitation of liability](DISCLAIMER.md)
 - [Contributing](CONTRIBUTING.md)
 - [Release checklist](RELEASING.md)
 - [Third-party software inventory](THIRD_PARTY_NOTICES.md)
@@ -143,5 +144,7 @@ Bug reports and focused fixes are welcome. Please read [CONTRIBUTING.md](CONTRIB
 ## License
 
 Bricriu is free software licensed under the [GNU Affero General Public License, version 3 or later](LICENSE) (`AGPL-3.0-or-later`). You may use it commercially, copy it, and modify it, subject to the license's conditions. In particular, covered modified versions must remain under the AGPL, and users who interact with a modified version over a network must be offered its Corresponding Source.
+
+**No warranty; limitation of liability:** Bricriu is experimental software supplied **“as is,” without warranty of any kind**. To the maximum extent permitted by applicable law, its copyright holders and contributors are not liable for claims or damages arising from its use or inability to be used, including lost, corrupted, overwritten, exposed, or inaccurately rendered data. Read the full [warranty and liability notice](DISCLAIMER.md) and Sections 15–17 of the [AGPL](LICENSE).
 
 Third-party components remain under their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
