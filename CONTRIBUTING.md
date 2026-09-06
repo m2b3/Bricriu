@@ -40,8 +40,8 @@ The first Rust build is heavy. A large Vite chunk warning is currently expected 
 - Prefer Rust for filesystem, search, watcher, Git, encryption, and compilation behavior.
 - Prefer TypeScript/React for interface and editor behavior.
 - Keep the Markdown workflow dependable before expanding experimental features.
-- Do not add Electron dependencies or port the Electron/Go architecture from reference material.
-- Do not modify `zennotes/` or other reference-only material unless the change specifically targets documentation about it.
+- Do not add Electron dependencies or replace the Tauri/Rust architecture without an explicitly approved architectural change.
+- Do not copy third-party source code into the project without reviewing licence compatibility and preserving all required notices.
 - Avoid proprietary storage for ordinary notes; saved Markdown should remain useful in other editors.
 - Add tests for path safety, data conversion, and destructive behavior where practical.
 

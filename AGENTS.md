@@ -4,10 +4,10 @@
 
 This workspace contains a new Tauri + React + CodeMirror Markdown notes app at the repository root.
 
-Reference-only repo:
+Historical design notes:
 
-- `zennotes/` is an Electron reference project. Do not port its Electron/Go architecture into this app.
-- `lessonsFromZen.md` contains distilled implementation notes from that repo.
+- `lessonsFromZen.md` records high-level observations from the third-party ZenNotes project.
+- The ZenNotes source tree is not part of this branch and is not a Bricriu dependency.
 
 ## Current App Shape
 
@@ -79,8 +79,8 @@ npm run tauri -- build --debug
 
 - Keep paths vault-relative across the frontend/backend boundary.
 - Backend path inputs must be resolved safely under the vault root.
-- Keep `zennotes/` untouched unless explicitly asked.
 - Do not add Electron dependencies.
+- Do not import third-party source code without reviewing its licence and preserving required notices.
 - Prefer Rust for filesystem/search behavior and TypeScript for UI/editor behavior.
 - Keep the MVP narrow: file tree, fast search, editor, save.
 

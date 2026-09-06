@@ -1,12 +1,14 @@
 # Lessons from ZenNotes
 
-Reference repo studied: `zennotes/`
+Reference project studied: [ZenNotes](https://github.com/ZenNotes/zennotes), copyright (c) 2026 Adib Hanna and ZenNotes contributors, licensed under the MIT License.
 
-Goal for our app: keep the useful note/editor/search ideas, but do not copy the Electron architecture. Target architecture remains Tauri + Rust backend + TypeScript/CodeMirror frontend.
+This document records general architectural and product observations. The ZenNotes source tree is not included in this branch and is not a Bricriu dependency. The examples below are Bricriu design sketches rather than imported ZenNotes source code.
+
+Goal for Bricriu: learn from useful note, editor, and search ideas while implementing them independently. The target architecture remains a Tauri and Rust backend with a TypeScript and CodeMirror frontend, rather than ZenNotes' Electron and Go architecture.
 
 ## High-Level Takeaways
 
-- ZenNotes confirms that CodeMirror 6 is the right editor layer for Markdown-first notes. It keeps source Markdown honest, supports fast editing, and can be extended with Markdown syntax, search, completions, live preview decorations, folding, Vim mode, and custom widgets.
+- Studying ZenNotes reinforced the choice of CodeMirror 6 as the editor layer for Markdown-first notes. It keeps source Markdown honest, supports fast editing, and can be extended with Markdown syntax, search, completions, live preview decorations, folding, Vim mode, and custom widgets.
 - The Electron shell should not be carried forward. Its useful boundaries are still relevant: renderer owns UI/editor state, native side owns filesystem, search, watchers, and vault safety.
 - For our MVP, avoid ZenNotes' feature breadth. Start with a plain two-pane app: left vault tree/search, right CodeMirror editor.
 - Search should be a Rust-native responsibility from day one. ZenNotes has to bridge from Electron/Node to `rg`/`fzf`/builtin search; in Tauri we can implement the same idea directly and cleaner.
@@ -77,7 +79,7 @@ For our MVP left pane:
 
 ## Rust/Tauri Backend Lessons
 
-ZenNotes has strong vault safety patterns that should be copied conceptually:
+ZenNotes highlights general vault-safety principles worth implementing independently:
 
 - All user-facing file paths should be vault-relative.
 - Every backend command that receives a path must resolve it against the vault root and reject path traversal.
@@ -163,7 +165,7 @@ type ContentMatch = {
 
 ZenNotes has richer concepts like inbox/archive/trash/quick folders, assets, comments, panes, tabs, tags, backlinks, tasks, and remote workspaces. These are not MVP requirements.
 
-## Things Not to Copy Yet
+## Features Outside the Initial Scope
 
 - Electron main/preload/renderer bridge.
 - Go server/web stack.
@@ -175,7 +177,7 @@ ZenNotes has richer concepts like inbox/archive/trash/quick folders, assets, com
 - Remote workspace support.
 - Large settings system.
 
-These may be useful references later, but copying them now would bury the simple viewer/editor.
+These may be useful references later, but implementing them now would bury the simple viewer/editor.
 
 ## Recommended MVP Build Plan
 
