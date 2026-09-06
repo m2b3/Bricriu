@@ -4,9 +4,11 @@
   <img src="public/brand/bricriu-wordmark.svg" alt="Bricriu" width="420">
 </p>
 
-Bricriu is a local-first desktop editor for a folder of plain Markdown notes. Open a folder as a vault, browse and search it, edit several files at once, preview Markdown, and save everything back as ordinary files that remain usable without Bricriu.
+Bricriu is a local-first desktop workspace for Markdown notes—and more. Open a folder as a vault, browse and search it, edit several files at once, and save your work as ordinary files that remain usable without Bricriu. Alongside its Markdown-centered workflow, Bricriu is experimenting with Typst documents, visual canvases, a vault calendar, and rich-text editing and review.
 
 **Open-source acknowledgements:** Bricriu is possible because of [Tauri](https://tauri.app/), [Rust](https://www.rust-lang.org/), [React](https://react.dev/), [CodeMirror](https://codemirror.net/), [Vite](https://vite.dev/), [Typst](https://typst.app/), [Tiptap](https://tiptap.dev/) and [ProseMirror](https://prosemirror.net/), [React Flow](https://reactflow.dev/), [FullCalendar](https://fullcalendar.io/), [markdown-it](https://github.com/markdown-it/markdown-it), [KaTeX](https://katex.org/), [nspell](https://github.com/wooorm/nspell), and the broader JavaScript and Rust ecosystems. The wordmark is rendered in Dominic Stanley's OFL-licensed [Segotia](https://github.com/insert-smiley/Irishfontclub-segotia); the squaremark is an unmodified rendering in Séamas Ó Brógáin's [Gadelica](https://www.gaelchlo.com/clonna2.html). The generated [third-party inventory](THIRD_PARTY_NOTICES.md) provides the fuller attribution and attributes every package in the current JavaScript and Rust dependency graphs, including transitive, build, optional, and platform-specific dependencies.
+
+It was vibe-coded with OpenAI Codex and then used and tested for roughly six months by one user. The source has evolved through real use, but its bus factor, device coverage, test population, accessibility review, security review, and packaging coverage are all minimal.
 
 > [!CAUTION]
 > **Back up your notes before trying this app.** Keep the vault in Git and commit regularly, or use another independent, versioned backup. Autosave, app-created Git checkpoints, and the experimental encrypted-private-folder feature are not backups. This pre-release software is provided as-is; to the maximum extent permitted by law, its author and contributors accept no responsibility for lost, overwritten, corrupted, exposed, or otherwise damaged notes or data.
@@ -31,10 +33,10 @@ The Markdown-centered workflow includes:
 - Wiki links (`[[Note]]`), link completion, backlinks, callouts, and inline/block KaTeX math.
 - A split Markdown preview with escaped raw HTML, printing, and PDF workflows.
 
-Experimental features include:
+Experimental features extend the workspace beyond the core Markdown editor:
 
 - Typst editing plus embedded SVG/HTML preview and PDF export.
-- Markdown Track Changes with snapshots, review, accept/reject, and sidecar state.
+- A Tiptap/ProseMirror rich-text editor and review mode, currently backed by Markdown files, with Track Changes snapshots, accept/reject tools, and sidecar state.
 - A YAML-backed visual Canvas stored inside Markdown files.
 - A vault-local Calendar with recurring events.
 - Git checkpoint commits on an app-managed `inuse` branch.
@@ -44,7 +46,7 @@ Bricriu currently recognizes `.md`, `.markdown`, and `.typ` files. **Only `.md` 
 
 ## Status and scope
 
-This is personal pre-release software at version `0.1.0`, not a polished or audited product. It was vibe-coded with OpenAI Codex and then used and tested for roughly six months by one user. The source has evolved through real use, but its bus factor, device coverage, test population, accessibility review, security review, and packaging coverage are all minimal.
+This is personal pre-release software at version `0.1.0`, not a polished or audited product.
 
 The design is deliberately local-first:
 
