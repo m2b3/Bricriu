@@ -32,6 +32,7 @@ Treat delete as permanent unless you have independently confirmed recovery throu
 - **Split** opens a resizable second editor pane. **Move right** moves the main tab into it.
 - `Ctrl+W` / `Cmd+W` closes the focused split pane or current tab.
 - Switch main tabs with `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+PageUp`, `Ctrl+PageDown`, `Ctrl+[`, or `Ctrl+]` (use `Cmd` where the platform maps it).
+- Use the top-bar Back/Forward buttons or `Alt+Left` / `Alt+Right` to move through the focused pane's document history. Closed documents are reopened from disk when revisited.
 - **File → Recent** reopens recently closed files. **Persist recent files** controls whether that history survives an app restart.
 
 ## Appearance

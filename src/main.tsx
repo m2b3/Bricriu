@@ -199,6 +199,18 @@ type OpenTab = {
   outOfVault?: boolean
 }
 
+type NavigationEntry = {
+  path: string
+  mode: EditorMode
+}
+
+type PaneNavigationHistory = {
+  entries: NavigationEntry[]
+  index: number
+}
+
+type NavigationHistories = Record<EditorPane, PaneNavigationHistory>
+
 type SaveConflictResult = {
   saved: false
   conflictPath?: string
@@ -280,6 +292,7 @@ const DEFAULT_PROFILE: AppProfile = {
 }
 
 const MAX_RECENT_FILES = 20
+const MAX_NAVIGATION_HISTORY = 100
 
 let currentPathsCaseSensitive = true
 
@@ -334,6 +347,7 @@ function App(): JSX.Element {
   const [splitOpen, setSplitOpen] = useState(false)
   const [splitId, setSplitId] = useState<string | null>(null)
   const [focusedPane, setFocusedPane] = useState<EditorPane>('main')
+  const [navigationHistories, setNavigationHistories] = useState<NavigationHistories>(createEmptyNavigationHistories)
   const [fileQuery, setFileQuery] = useState('')
   const [contentQuery, setContentQuery] = useState('')
   const [newNoteOpen, setNewNoteOpen] = useState(false)
@@ -412,6 +426,11 @@ function App(): JSX.Element {
   const deferredPrivateRestoreRef = useRef<DeferredPrivateRestore | null>(null)
   const closingRef = useRef(false)
   const activeTabHintRef = useRef<{ path: string; mode: EditorMode } | null>(null)
+  const navigationHistoriesRef = useRef<NavigationHistories>(navigationHistories)
+  const pendingNavigationTargetsRef = useRef<Record<EditorPane, NavigationEntry | null>>({
+    main: null,
+    split: null
+  })
 
   const latestTabBody = useCallback((tab: OpenTab) => (
     latestBodiesRef.current.get(tab.id) ?? tab.body
@@ -500,6 +519,48 @@ function App(): JSX.Element {
   const activePrintBody = activeTab ? latestTabBody(activeTab) : ''
   const gitHasDirtyFiles = vault?.git.status === 'dirtyOnInuse' || vault?.git.status === 'needsCheckpoint'
 
+  const rememberPaneNavigation = useCallback((pane: EditorPane, tab: OpenTab) => {
+    const pendingTarget = pendingNavigationTargetsRef.current[pane]
+    if (pendingTarget) {
+      if (!sameNavigationEntry(pendingTarget, tab)) return
+      pendingNavigationTargetsRef.current[pane] = null
+    }
+
+    setNavigationHistories((current) => {
+      const history = current[pane]
+      const entry = { path: tab.path, mode: tab.mode }
+      if (sameNavigationEntry(history.entries[history.index], entry)) return current
+
+      const entries = [...history.entries.slice(0, history.index + 1), entry]
+        .slice(-MAX_NAVIGATION_HISTORY)
+      const next = {
+        ...current,
+        [pane]: { entries, index: entries.length - 1 }
+      }
+      navigationHistoriesRef.current = next
+      return next
+    })
+  }, [])
+
+  useEffect(() => {
+    const empty = createEmptyNavigationHistories()
+    navigationHistoriesRef.current = empty
+    pendingNavigationTargetsRef.current = { main: null, split: null }
+    setNavigationHistories(empty)
+  }, [vault?.root])
+
+  useEffect(() => {
+    navigationHistoriesRef.current = navigationHistories
+  }, [navigationHistories])
+
+  useEffect(() => {
+    if (mainTab) rememberPaneNavigation('main', mainTab)
+  }, [mainTab?.mode, mainTab?.path, rememberPaneNavigation, vault?.root])
+
+  useEffect(() => {
+    if (splitOpen && splitTab) rememberPaneNavigation('split', splitTab)
+  }, [rememberPaneNavigation, splitOpen, splitTab?.mode, splitTab?.path, vault?.root])
+
   useEffect(() => {
     if (activeTab) activeTabHintRef.current = { path: activeTab.path, mode: activeTab.mode }
     if (mainTab && mainTab.id !== activeId) setActiveId(mainTab.id)
@@ -550,6 +611,27 @@ function App(): JSX.Element {
     setActiveId(id)
     setFocusedPane('main')
   }, [splitId])
+
+  const selectTabInPane = useCallback((id: string, pane: EditorPane) => {
+    if (pane === 'main') {
+      if (id === splitId) {
+        setSplitId(activeId && activeId !== id ? activeId : null)
+      }
+      setActiveId(id)
+      setFocusedPane('main')
+      return
+    }
+
+    if (id === activeId) {
+      const replacement = splitId && splitId !== id
+        ? splitId
+        : tabsRef.current.find((tab) => tab.id !== id)?.id ?? null
+      setActiveId(replacement)
+    }
+    setSplitOpen(true)
+    setSplitId(id)
+    setFocusedPane('split')
+  }, [activeId, splitId])
 
   useEffect(() => {
     if (splitId && splitId === activeId) setSplitId(null)
@@ -1170,15 +1252,19 @@ function App(): JSX.Element {
     }
   }, [])
 
-  const openNote = useCallback(async (destination: string, offset: number | null = null) => {
+  const openNote = useCallback(async (
+    destination: string,
+    offset: number | null = null,
+    targetPane: EditorPane = 'main'
+  ): Promise<boolean> => {
     const { path, heading } = splitWikiDestination(destination)
     setWorkspaceMode('notes')
     const existing = tabs.find((tab) => tab.mode === 'markdown' && samePath(tab.path, path))
     if (existing) {
-      selectMainTab(existing.id)
+      selectTabInPane(existing.id, targetPane)
       setJumpOffset(resolveNoteJumpOffset(latestTabBody(existing), heading, offset))
       rememberRecentPath(existing.path)
-      return
+      return true
     }
     const rawSource = tabs.find((tab) => tab.mode === 'canvas' && samePath(tab.path, path))
     if (rawSource) {
@@ -1200,15 +1286,15 @@ function App(): JSX.Element {
           outOfVault: rawSource.outOfVault
         }
       ])
-      selectMainTab(id)
+      selectTabInPane(id, targetPane)
       setJumpOffset(resolveNoteJumpOffset(body, heading, offset))
       rememberRecentPath(rawSource.path)
-      return
+      return true
     }
     const conflicting = tabs.find((tab) => samePath(tab.path, path) && tab.mode !== 'markdown' && !isRawSourceMode(tab.mode) && isTabDirty(tab))
     if (conflicting) {
       const proceed = window.confirm(`${path} is modified in another mode. Save or close it before opening Markdown mode?`)
-      if (!proceed) return
+      if (!proceed) return false
     }
     setBusy(true)
     setError(null)
@@ -1229,15 +1315,17 @@ function App(): JSX.Element {
           outOfVault: note.outOfVault
         }
       ])
-      selectMainTab(id)
+      selectTabInPane(id, targetPane)
       setJumpOffset(resolveNoteJumpOffset(note.body, heading, offset))
       rememberRecentPath(note.path)
+      return true
     } catch (err) {
       setError(String(err))
+      return false
     } finally {
       setBusy(false)
     }
-  }, [isTabDirty, latestTabBody, rememberRecentPath, selectMainTab, tabs])
+  }, [isTabDirty, latestTabBody, rememberRecentPath, selectTabInPane, tabs])
 
   const openDocumentDialog = useCallback(async () => {
     if (!vault) {
@@ -1264,17 +1352,20 @@ function App(): JSX.Element {
     }
   }, [activeTab?.outOfVault, activeTab?.path, busy, openNote, vault])
 
-  const openTrackNote = useCallback(async (path: string) => {
+  const openTrackNote = useCallback(async (
+    path: string,
+    targetPane: EditorPane = 'main'
+  ): Promise<boolean> => {
     setWorkspaceMode('notes')
     if (tabs.some((tab) => samePath(tab.path, path) && tab.outOfVault)) {
       setError('Track Changes is disabled for files outside the vault.')
-      return
+      return false
     }
     const existing = tabs.find((tab) => tab.mode === 'track' && samePath(tab.path, path))
     if (existing) {
-      selectMainTab(existing.id)
+      selectTabInPane(existing.id, targetPane)
       rememberRecentPath(existing.path)
-      return
+      return true
     }
     const markdownTab = tabs.find((tab) => samePath(tab.path, path) && tab.mode === 'markdown')
     if (markdownTab && profile.closeMarkdownBeforeTrack) {
@@ -1302,7 +1393,7 @@ function App(): JSX.Element {
       const note = await invoke<NoteContent>('read_note', { path })
       if (note.outOfVault) {
         setError('Track Changes is disabled for files outside the vault.')
-        return
+        return false
       }
       const trackState = await loadOrCreateTrackState(note.path, note.body)
       const id = tabId(note.path, 'track')
@@ -1321,26 +1412,31 @@ function App(): JSX.Element {
           outOfVault: note.outOfVault
         }
       ])
-      selectMainTab(id)
+      selectTabInPane(id, targetPane)
       rememberRecentPath(note.path)
+      return true
     } catch (err) {
       setError(String(err))
+      return false
     } finally {
       setBusy(false)
     }
-  }, [activeId, isTabDirty, profile.closeMarkdownBeforeTrack, rememberRecentPath, selectMainTab, splitId, tabs])
+  }, [activeId, isTabDirty, profile.closeMarkdownBeforeTrack, rememberRecentPath, selectTabInPane, splitId, tabs])
 
-  const openCanvasNote = useCallback(async (path: string) => {
+  const openCanvasNote = useCallback(async (
+    path: string,
+    targetPane: EditorPane = 'main'
+  ): Promise<boolean> => {
     setWorkspaceMode('notes')
     if (tabs.some((tab) => samePath(tab.path, path) && tab.outOfVault)) {
       setError('Canvas is disabled for files outside the vault.')
-      return
+      return false
     }
     const existing = tabs.find((tab) => tab.mode === 'canvas' && samePath(tab.path, path))
     if (existing) {
-      selectMainTab(existing.id)
+      selectTabInPane(existing.id, targetPane)
       rememberRecentPath(existing.path)
-      return
+      return true
     }
     const rawSource = tabs.find((tab) => tab.mode === 'markdown' && samePath(tab.path, path))
     if (rawSource) {
@@ -1362,9 +1458,9 @@ function App(): JSX.Element {
           outOfVault: rawSource.outOfVault
         }
       ])
-      selectMainTab(id)
+      selectTabInPane(id, targetPane)
       rememberRecentPath(rawSource.path)
-      return
+      return true
     }
     setBusy(true)
     setError(null)
@@ -1372,7 +1468,7 @@ function App(): JSX.Element {
       const note = await invoke<NoteContent>('read_note', { path })
       if (note.outOfVault) {
         setError('Canvas is disabled for files outside the vault.')
-        return
+        return false
       }
       const id = tabId(note.path, 'canvas')
       setTabs((prev) => [
@@ -1389,14 +1485,58 @@ function App(): JSX.Element {
           outOfVault: note.outOfVault
         }
       ])
-      selectMainTab(id)
+      selectTabInPane(id, targetPane)
       rememberRecentPath(note.path)
+      return true
     } catch (err) {
       setError(String(err))
+      return false
     } finally {
       setBusy(false)
     }
-  }, [rememberRecentPath, selectMainTab, tabs])
+  }, [rememberRecentPath, selectTabInPane, tabs])
+
+  const openNavigationEntry = useCallback((entry: NavigationEntry, pane: EditorPane) => {
+    if (entry.mode === 'track') return openTrackNote(entry.path, pane)
+    if (entry.mode === 'canvas') return openCanvasNote(entry.path, pane)
+    return openNote(entry.path, null, pane)
+  }, [openCanvasNote, openNote, openTrackNote])
+
+  const navigateDocumentHistory = useCallback(async (direction: -1 | 1) => {
+    if (!vault || busy || workspaceMode !== 'notes') return
+    const pane: EditorPane = focusedPane === 'split' && splitOpen ? 'split' : 'main'
+    const histories = navigationHistoriesRef.current
+    const history = histories[pane]
+    const targetIndex = history.index + direction
+    const target = history.entries[targetIndex]
+    if (!target) return
+
+    const next = {
+      ...histories,
+      [pane]: { ...history, index: targetIndex }
+    }
+    navigationHistoriesRef.current = next
+    pendingNavigationTargetsRef.current[pane] = target
+    setNavigationHistories(next)
+
+    const opened = await openNavigationEntry(target, pane)
+    if (opened) return
+
+    pendingNavigationTargetsRef.current[pane] = null
+    setNavigationHistories((current) => {
+      const currentHistory = current[pane]
+      if (
+        currentHistory.index !== targetIndex
+        || !sameNavigationEntry(currentHistory.entries[targetIndex], target)
+      ) return current
+      const reverted = {
+        ...current,
+        [pane]: { ...currentHistory, index: history.index }
+      }
+      navigationHistoriesRef.current = reverted
+      return reverted
+    })
+  }, [busy, focusedPane, openNavigationEntry, splitOpen, vault, workspaceMode])
 
   const openSearchMatch = useCallback((match: ContentMatch) => {
     const query = contentQuery.trim()
@@ -2096,8 +2236,22 @@ function App(): JSX.Element {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) return
       const key = event.key.toLowerCase()
+
+      if (event.altKey && !event.ctrlKey && !event.metaKey) {
+        if (key === 'arrowleft') {
+          event.preventDefault()
+          void navigateDocumentHistory(-1)
+          return
+        }
+        if (key === 'arrowright') {
+          event.preventDefault()
+          void navigateDocumentHistory(1)
+          return
+        }
+      }
+
+      if (!(event.ctrlKey || event.metaKey)) return
 
       if (key === 'o') {
         event.preventDefault()
@@ -2162,7 +2316,7 @@ function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTab, closeSplitPane, closeTab, focusedPane, mainTab, openDocumentDialog, openNewNoteDialog, printActiveDocument, saveActive, selectMainTab, splitOpen, tabs, vault])
+  }, [activeTab, closeSplitPane, closeTab, focusedPane, mainTab, navigateDocumentHistory, openDocumentDialog, openNewNoteDialog, printActiveDocument, saveActive, selectMainTab, splitOpen, tabs, vault])
 
   useEffect(() => {
     setSearchRevealedFolders(new Set())
@@ -2276,6 +2430,19 @@ function App(): JSX.Element {
   const recentClosedPaths = useMemo(
     () => recentPaths.filter((path) => !tabs.some((tab) => samePath(tab.path, path))),
     [recentPaths, tabs]
+  )
+  const navigationPane: EditorPane = focusedPane === 'split' && splitOpen ? 'split' : 'main'
+  const focusedNavigationHistory = navigationHistories[navigationPane]
+  const canNavigateBack = (
+    workspaceMode === 'notes'
+    && !busy
+    && focusedNavigationHistory.index > 0
+  )
+  const canNavigateForward = (
+    workspaceMode === 'notes'
+    && !busy
+    && focusedNavigationHistory.index >= 0
+    && focusedNavigationHistory.index < focusedNavigationHistory.entries.length - 1
   )
   const activeIsTypst = !!activeTab && isTypstPath(activeTab.path)
   const previewVisible = showPreview && !!activeTab && !(activeTab.outOfVault && activeIsTypst)
@@ -2687,37 +2854,61 @@ function App(): JSX.Element {
             setEditorFocusRequest((request) => request + 1)
           }}
         >
-          <AppMenuBar
-            activeTab={activeTab}
-            activeIsTypst={activeIsTypst}
-            busy={busy}
-            canvasDocumentDisplayMode={canvasDocumentDisplayMode}
-            checkpointDisabled={activeOutOfVault || privatePending || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
-            profile={profile}
-            recentClosedPaths={recentClosedPaths}
-            showBacklinks={showBacklinks}
-            showPreview={showPreview}
-            theme={theme}
-            typstPreviewFormat={typstPreviewFormat}
-            vaultOpen={!!vault}
-            onCheckpoint={() => void checkpointNow()}
-            onDeleteCurrent={() => {
-              if (activeTab) void deleteNoteAction(activeTab.path)
-            }}
-            onLinkifyUrls={() => setEditorLinkifyRequest((request) => request + 1)}
-            onOpenFile={() => void openDocumentDialog()}
-            onOpenRecent={(path) => void openNote(path)}
-            onSetCanvasDocumentDisplay={updateCanvasDocumentDisplayMode}
-            onSetTheme={updateTheme}
-            onSetTypstPreviewFormat={setTypstPreviewFormat}
-            onToggleBacklinks={() => setShowBacklinks((current) => !current)}
-            onToggleHistory={(persistRecentFiles) => updateProfile({ ...profile, persistRecentFiles })}
-            onTogglePreview={() => setShowPreview((current) => !current)}
-            onExportPreviewPdf={() => void exportPreviewPdf()}
-            onPrintPreview={() => printActiveDocument('preview')}
-            onPrintRaw={() => printActiveDocument('raw')}
-            pathKey={pathKey}
-          />
+          <div className="editor-header-start">
+            <nav className="document-navigation" aria-label="Document history">
+              <button
+                type="button"
+                className="document-navigation-button"
+                title="Back (Alt+Left)"
+                aria-label="Back to previous document"
+                onClick={() => void navigateDocumentHistory(-1)}
+                disabled={!canNavigateBack}
+              >
+                ←
+              </button>
+              <button
+                type="button"
+                className="document-navigation-button"
+                title="Forward (Alt+Right)"
+                aria-label="Forward to next document"
+                onClick={() => void navigateDocumentHistory(1)}
+                disabled={!canNavigateForward}
+              >
+                →
+              </button>
+            </nav>
+            <AppMenuBar
+              activeTab={activeTab}
+              activeIsTypst={activeIsTypst}
+              busy={busy}
+              canvasDocumentDisplayMode={canvasDocumentDisplayMode}
+              checkpointDisabled={activeOutOfVault || privatePending || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
+              profile={profile}
+              recentClosedPaths={recentClosedPaths}
+              showBacklinks={showBacklinks}
+              showPreview={showPreview}
+              theme={theme}
+              typstPreviewFormat={typstPreviewFormat}
+              vaultOpen={!!vault}
+              onCheckpoint={() => void checkpointNow()}
+              onDeleteCurrent={() => {
+                if (activeTab) void deleteNoteAction(activeTab.path)
+              }}
+              onLinkifyUrls={() => setEditorLinkifyRequest((request) => request + 1)}
+              onOpenFile={() => void openDocumentDialog()}
+              onOpenRecent={(path) => void openNote(path)}
+              onSetCanvasDocumentDisplay={updateCanvasDocumentDisplayMode}
+              onSetTheme={updateTheme}
+              onSetTypstPreviewFormat={setTypstPreviewFormat}
+              onToggleBacklinks={() => setShowBacklinks((current) => !current)}
+              onToggleHistory={(persistRecentFiles) => updateProfile({ ...profile, persistRecentFiles })}
+              onTogglePreview={() => setShowPreview((current) => !current)}
+              onExportPreviewPdf={() => void exportPreviewPdf()}
+              onPrintPreview={() => printActiveDocument('preview')}
+              onPrintRaw={() => printActiveDocument('raw')}
+              pathKey={pathKey}
+            />
+          </div>
           <div className="note-heading">
             <span className="note-path">
               {workspaceMode === 'calendar' ? 'Calendar' : activeTab?.path ?? 'Open a Markdown file'}
@@ -2756,7 +2947,7 @@ function App(): JSX.Element {
               className={activeTab?.mode === 'canvas' ? 'secondary-button active' : 'secondary-button'}
               onClick={() => {
                 setWorkspaceMode('notes')
-                if (activeTab) void openCanvasNote(activeTab.path)
+                if (activeTab) void openCanvasNote(activeTab.path, focusedPane)
               }}
               disabled={workspaceMode === 'calendar' || !activeTab || activeTab.outOfVault || !isMarkdownPath(activeTab.path)}
             >
@@ -2767,7 +2958,7 @@ function App(): JSX.Element {
               className={activeTab?.mode === 'markdown' ? 'secondary-button active' : 'secondary-button'}
               onClick={() => {
                 setWorkspaceMode('notes')
-                if (activeTab) void openNote(activeTab.path)
+                if (activeTab) void openNote(activeTab.path, null, focusedPane)
               }}
               disabled={workspaceMode === 'calendar' || !activeTab || activeTab.outOfVault || !isMarkdownPath(activeTab.path)}
             >
@@ -2904,7 +3095,7 @@ function App(): JSX.Element {
                     documentDisplayMode={canvasDocumentDisplayMode}
                     notePaths={allFilePaths}
                     onChange={updateTabBody}
-                    onOpenWikiLink={(path) => void openNote(path)}
+                    onOpenWikiLink={(path) => void openNote(path, null, 'main')}
                   />
                 </React.Suspense>
               ) : (
@@ -2929,7 +3120,7 @@ function App(): JSX.Element {
                   onTextCount={setTextCountResult}
                   onChange={updateTabBody}
                   onOpenExternalLink={openExternalLink}
-                  onOpenWikiLink={(path) => void openNote(path)}
+                  onOpenWikiLink={(path) => void openNote(path, null, 'main')}
                   onLoadWikiCompletionBody={loadWikiCompletionBody}
                 />
             )}
@@ -3010,7 +3201,7 @@ function App(): JSX.Element {
                       documentDisplayMode={canvasDocumentDisplayMode}
                       notePaths={allFilePaths}
                       onChange={updateTabBody}
-                      onOpenWikiLink={(path) => void openNote(path)}
+                      onOpenWikiLink={(path) => void openNote(path, null, 'split')}
                     />
                   </React.Suspense>
                 ) : (
@@ -3035,7 +3226,7 @@ function App(): JSX.Element {
                     onTextCount={setTextCountResult}
                     onChange={updateTabBody}
                     onOpenExternalLink={openExternalLink}
-                    onOpenWikiLink={(path) => void openNote(path)}
+                    onOpenWikiLink={(path) => void openNote(path, null, 'split')}
                     onLoadWikiCompletionBody={loadWikiCompletionBody}
                   />
               )}
@@ -3091,7 +3282,7 @@ function App(): JSX.Element {
                     version={activeTab.bodyVersion}
                     notePaths={allFilePaths}
                     sourcePath={activeTab.path}
-                    onOpenWikiLink={(path) => void openNote(path)}
+                    onOpenWikiLink={(path) => void openNote(path, null, focusedPane)}
                   />
                 </React.Suspense>
               )}
@@ -3106,7 +3297,7 @@ function App(): JSX.Element {
                 activePath={activeTab.path}
                 backlinks={backlinks}
                 loading={loadingBacklinks}
-                onOpen={(match) => void openNote(match.path, match.offset)}
+                onOpen={(match) => void openNote(match.path, match.offset, focusedPane)}
               />
             </div>
           )}
@@ -6489,6 +6680,20 @@ function isMarkdownPath(path: string): boolean {
 
 function fileIcon(path: string): string {
   return isTypstPath(path) ? 'typ' : 'md'
+}
+
+function createEmptyNavigationHistories(): NavigationHistories {
+  return {
+    main: { entries: [], index: -1 },
+    split: { entries: [], index: -1 }
+  }
+}
+
+function sameNavigationEntry(
+  left: NavigationEntry | undefined,
+  right: NavigationEntry | undefined
+): boolean {
+  return !!left && !!right && left.mode === right.mode && samePath(left.path, right.path)
 }
 
 function selectAdjacentTab(
