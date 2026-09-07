@@ -46,6 +46,7 @@ import { tags } from '@lezer/highlight'
 import { searchKeymap } from '@codemirror/search'
 import katex from 'katex'
 import { renderCanvasMarkdown } from './canvas/canvasMarkdown'
+import { escapeColorSpanText, findColorSpans, isSafeEditorColor } from './markdown/colorMarkup'
 import { markdownToTiptap } from './track/markdown'
 import { resolveWikiDocumentPath } from './wikiPaths'
 import type { CalendarEvent } from './calendar/CalendarView'
@@ -5422,44 +5423,6 @@ function findInlineMath(text: string): Array<{ from: number; to: number; source:
   return results
 }
 
-function findColorSpans(text: string): Array<{ from: number; to: number; textFrom: number; textTo: number; color: string }> {
-  const spans: Array<{ from: number; to: number; textFrom: number; textTo: number; color: string }> = []
-  const trigger = '{color:'
-  let index = 0
-
-  while (index < text.length) {
-    const start = text.indexOf(trigger, index)
-    if (start < 0) break
-    if (isEscaped(text, start)) {
-      index = start + trigger.length
-      continue
-    }
-
-    const colorStart = start + trigger.length
-    const separator = findNextUnescaped(text, '|', colorStart)
-    if (separator < 0) break
-
-    const rawColor = text.slice(colorStart, separator).trim()
-    if (!isSafeEditorColor(rawColor)) {
-      index = start + trigger.length
-      continue
-    }
-
-    const end = findNextUnescaped(text, '}', separator + 1)
-    if (end < 0) break
-    spans.push({
-      from: start,
-      to: end + 1,
-      textFrom: separator + 1,
-      textTo: end,
-      color: rawColor
-    })
-    index = end + 1
-  }
-
-  return spans
-}
-
 function findMarkdownEmphasisSpans(view: EditorView): Array<{ from: number; to: number; textFrom: number; textTo: number; kind: 'strong' | 'emphasis' }> {
   const spans: Array<{ from: number; to: number; textFrom: number; textTo: number; kind: 'strong' | 'emphasis' }> = []
   const tree = syntaxTree(view.state)
@@ -5516,33 +5479,6 @@ function findMarkdownEscapes(view: EditorView): Array<{ from: number; to: number
   return escapes
 }
 
-function findNextUnescaped(text: string, needle: string, from: number): number {
-  for (let index = from; index < text.length; index += 1) {
-    if (text[index] === '\\') {
-      index += 1
-      continue
-    }
-    if (text[index] === needle) return index
-  }
-  return -1
-}
-
-function isEscaped(text: string, index: number): boolean {
-  let slashCount = 0
-  for (let cursor = index - 1; cursor >= 0 && text[cursor] === '\\'; cursor -= 1) {
-    slashCount += 1
-  }
-  return slashCount % 2 === 1
-}
-
-function isSafeEditorColor(color: string): boolean {
-  if (!color || color.length > 80 || /[;"'{}<>]/.test(color)) return false
-  if (typeof CSS !== 'undefined' && typeof CSS.supports === 'function') {
-    return CSS.supports('color', color)
-  }
-  return /^(#[0-9a-f]{3,8}|[a-z]+|rgba?\([^)]+\)|hsla?\([^)]+\))$/i.test(color)
-}
-
 function buildApplyColorChanges(
   text: string,
   ranges: Array<{ from: number; to: number }>,
@@ -5556,10 +5492,7 @@ function buildApplyColorChanges(
     const containingSpan = spans.find((span) => range.from >= span.textFrom && range.to <= span.textTo)
     if (containingSpan) {
       if (recoloredSpanStarts.has(containingSpan.from)) continue
-      const colorStart = containingSpan.from + '{color:'.length
-      const colorEnd = findNextUnescaped(text, '|', colorStart)
-      if (colorEnd < 0) return 'crosses-color-markup'
-      changes.push({ from: colorStart, to: colorEnd, insert: color })
+      changes.push({ from: containingSpan.colorFrom, to: containingSpan.colorTo, insert: color })
       recoloredSpanStarts.add(containingSpan.from)
       continue
     }
@@ -5576,10 +5509,6 @@ function buildApplyColorChanges(
   }
 
   return changes.sort((left, right) => left.from - right.from)
-}
-
-function escapeColorSpanText(text: string): string {
-  return text.replace(/([\\}])/g, '\\$1')
 }
 
 function GitBadge({

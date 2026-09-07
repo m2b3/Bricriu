@@ -1,6 +1,7 @@
 import { ClipboardEvent, useCallback, useMemo } from 'react'
 import { katex as markdownItKatex } from '@mdit/plugin-katex'
 import MarkdownIt from 'markdown-it'
+import { escapeColorSpanText, findColorSpans, type ColorMarkupSpan } from '../markdown/colorMarkup'
 import { isExplicitDocumentPath, resolveWikiDocumentPath } from '../wikiPaths'
 
 const markdownRenderer = MarkdownIt({
@@ -146,6 +147,8 @@ function markdownFromNode(node: Node): string {
     case 'span': {
       const wikiMarkdown = node.dataset.wikiMarkdown
       if (wikiMarkdown) return wikiMarkdown
+      const markdownColor = node.dataset.markdownColor
+      if (markdownColor) return `{color:${markdownColor}|${escapeColorSpanText(children)}}`
       return children
     }
     default:
@@ -197,40 +200,53 @@ function pushPreviewBlockHtml(out: string[], html: string, snippets: string[]): 
 }
 
 function preprocessPreviewMarkdown(markdown: string, notePaths: string[], sourcePath: string | null, snippets: string[]): string {
-  const lines = markdown.replace(/\r\n/g, '\n').split('\n')
+  const normalizedMarkdown = markdown.replace(/\r\n/g, '\n')
+  const lines = normalizedMarkdown.split('\n')
+  const colorSpans = findColorSpans(normalizedMarkdown)
+  const suppressedColorSpanStarts = new Set<number>()
   const out: string[] = []
   let codeFence: CodeFence | null = null
+  let lineStart = 0
 
   for (const line of lines) {
     if (codeFence) {
+      suppressColorSpansStartingOnLine(lineStart, line.length, colorSpans, suppressedColorSpanStarts)
       out.push(line)
       if (isClosingCodeFence(line, codeFence)) codeFence = null
+      lineStart += line.length + 1
       continue
     }
 
     const openingFence = parseOpeningCodeFence(line)
     if (openingFence) {
       codeFence = openingFence
+      suppressColorSpansStartingOnLine(lineStart, line.length, colorSpans, suppressedColorSpanStarts)
       out.push(line)
+      lineStart += line.length + 1
       continue
     }
 
-    const callout = line.match(/^\s*>\s*\[!([A-Za-z][A-Za-z0-9_-]*)\]\s*(.*)$/)
+    suppressInlineCodeColorSpans(line, lineStart, colorSpans, suppressedColorSpanStarts)
+    const renderedLine = renderColorMarkupOnLine(line, lineStart, colorSpans, suppressedColorSpanStarts, snippets)
+    const callout = renderedLine.match(/^\s*>\s*\[!([A-Za-z][A-Za-z0-9_-]*)\]\s*(.*)$/)
     if (callout) {
       const kind = escapeHtml(callout[1].toLowerCase())
       const title = escapeHtml(callout[1].toUpperCase())
       const rest = callout[2].trim()
       out.push(htmlPlaceholder(`<div class="preview-callout preview-callout-${kind}"><div class="preview-callout-title">${title}</div>`, snippets))
       if (rest) out.push(renderInlinePreviewSyntax(rest, notePaths, sourcePath, snippets))
+      lineStart += line.length + 1
       continue
     }
 
-    if (/^\s*>\s*$/.test(line) && isCalloutOpenPlaceholder(out[out.length - 1], snippets)) {
+    if (/^\s*>\s*$/.test(renderedLine) && isCalloutOpenPlaceholder(out[out.length - 1], snippets)) {
       out.push(htmlPlaceholder('</div>', snippets))
+      lineStart += line.length + 1
       continue
     }
 
-    out.push(renderInlinePreviewSyntax(line, notePaths, sourcePath, snippets))
+    out.push(renderInlinePreviewSyntax(renderedLine, notePaths, sourcePath, snippets))
+    lineStart += line.length + 1
   }
 
   const closed: string[] = []
@@ -253,6 +269,121 @@ function preprocessPreviewMarkdown(markdown: string, notePaths: string[], source
   if (calloutOpen) closed.push(htmlPlaceholder('</div>', snippets))
 
   return closed.join('\n')
+}
+
+function renderColorMarkupOnLine(
+  line: string,
+  lineStart: number,
+  spans: ColorMarkupSpan[],
+  suppressedSpanStarts: Set<number>,
+  snippets: string[]
+): string {
+  const lineEnd = lineStart + line.length
+  const relevantSpans = spans.filter((span) => (
+    !suppressedSpanStarts.has(span.from) && span.from < lineEnd && span.to > lineStart
+  ))
+  if (relevantSpans.length === 0) return line
+
+  const removed = new Set<number>()
+  const insertions = new Map<number, string[]>()
+  const removeRange = (from: number, to: number) => {
+    for (let index = Math.max(0, from); index < Math.min(line.length, to); index += 1) removed.add(index)
+  }
+  const insertAt = (position: number, value: string) => {
+    const values = insertions.get(position) ?? []
+    values.push(value)
+    insertions.set(position, values)
+  }
+
+  for (const span of relevantSpans) {
+    removeRange(span.from - lineStart, span.textFrom - lineStart)
+    removeRange(span.textTo - lineStart, span.to - lineStart)
+
+    const contentFrom = Math.max(0, span.textFrom - lineStart)
+    const contentTo = Math.min(line.length, span.textTo - lineStart)
+    if (contentFrom >= contentTo) continue
+
+    const selectedText = line.slice(contentFrom, contentTo)
+    const blockPrefixLength = contentFrom === 0 ? markdownBlockPrefixLength(selectedText) : 0
+    const color = escapeHtml(span.color)
+    insertAt(
+      contentFrom + blockPrefixLength,
+      htmlPlaceholder(`<span class="preview-color" style="color: ${color}" data-markdown-color="${color}">`, snippets)
+    )
+    insertAt(contentTo, htmlPlaceholder('</span>', snippets))
+  }
+
+  let rendered = ''
+  for (let index = 0; index <= line.length; index += 1) {
+    rendered += (insertions.get(index) ?? []).join('')
+    if (index < line.length && !removed.has(index)) rendered += line[index]
+  }
+  return rendered
+}
+
+function suppressColorSpansStartingOnLine(
+  lineStart: number,
+  lineLength: number,
+  spans: ColorMarkupSpan[],
+  suppressedSpanStarts: Set<number>
+): void {
+  const lineEnd = lineStart + lineLength
+  for (const span of spans) {
+    if (span.from >= lineStart && span.from < lineEnd) suppressedSpanStarts.add(span.from)
+  }
+}
+
+function suppressInlineCodeColorSpans(
+  line: string,
+  lineStart: number,
+  spans: ColorMarkupSpan[],
+  suppressedSpanStarts: Set<number>
+): void {
+  const lineEnd = lineStart + line.length
+  const startingSpans = spans.filter((span) => span.from >= lineStart && span.from < lineEnd)
+  if (startingSpans.length === 0) return
+
+  let index = 0
+  while (index < line.length) {
+    if (line[index] !== '`') {
+      index += 1
+      continue
+    }
+
+    const markerStart = index
+    while (line[index] === '`') index += 1
+    const marker = line.slice(markerStart, index)
+    const closingIndex = line.indexOf(marker, index)
+    if (closingIndex < 0) continue
+    const codeEnd = closingIndex + marker.length
+
+    for (const span of startingSpans) {
+      const localStart = span.from - lineStart
+      if (localStart >= markerStart && localStart < codeEnd) suppressedSpanStarts.add(span.from)
+    }
+    index = codeEnd
+  }
+}
+
+function markdownBlockPrefixLength(source: string): number {
+  let offset = source.match(/^ {0,3}/)?.[0].length ?? 0
+
+  while (true) {
+    const quote = source.slice(offset).match(/^>\s?/)?.[0]
+    if (!quote) break
+    offset += quote.length
+  }
+
+  const callout = source.slice(offset).match(/^\[![A-Za-z][A-Za-z0-9_-]*\]\s*/)?.[0]
+  if (callout) offset += callout.length
+
+  const list = source.slice(offset).match(/^(?:[-+*]|\d+[.)])\s+/)?.[0]
+  if (list) offset += list.length
+
+  const heading = source.slice(offset).match(/^#{1,6}\s+/)?.[0]
+  if (heading) offset += heading.length
+
+  return offset
 }
 
 type CodeFence = {

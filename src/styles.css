@@ -3199,6 +3199,11 @@ input:focus {
     color: #111;
     text-decoration: underline;
   }
+
+  body[data-print-mode] .preview-color {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
 }
 
 .track-workspace {
