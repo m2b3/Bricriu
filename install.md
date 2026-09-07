@@ -70,6 +70,8 @@ npm run build
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
+Run `npm ci` with Node.js 22 or newer. It installs the exact dependency tree recorded in `package-lock.json`; no global Markdown-It, KaTeX, Tiptap, or VS Code plugin installation is required.
+
 On Windows, the backslash form also works:
 
 ```powershell
@@ -92,6 +94,14 @@ Build release bundles for the current operating system:
 npm run tauri:build
 ```
 
+On Windows, the repository also provides a convenient executable-only build:
+
+```powershell
+.\build-exe.bat
+```
+
+Run `npm ci` at least once before this command and again after `package-lock.json` changes; the batch file does not install dependencies. It looks for an installed Node.js 22-or-newer runtime, including versions installed under NVM for Windows, and uses it only inside the build process. It does not run `nvm use` or persistently change the Node version active in the parent terminal. The current Windows build has been verified with Node.js 22.14.0. The output is `src-tauri\target\release\Bricriu.exe`; because this path uses Tauri's `--no-bundle` option, it does not create an installer.
+
 Build a debug bundle:
 
 ```sh
@@ -99,6 +109,8 @@ npm run tauri -- build --debug
 ```
 
 Tauri writes bundle output below `src-tauri/target/release/bundle/` or the corresponding debug target directory. Do not publish an artifact merely because it compiled; test installation, launch, editing copied notes, saving, upgrading, and uninstalling on a clean machine first.
+
+Node.js, npm, Rust, and the native compiler are not required to run a successfully built Bricriu executable. The target machine still needs the WebView2 Runtime on Windows. Existing vaults require no conversion after the Markdown-It 15, KaTeX plugin, or Tiptap 3 dependency upgrades because those are application implementation dependencies rather than vault-installed plugins.
 
 ## Optional runtime tools
 

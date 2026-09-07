@@ -77,9 +77,19 @@ No signed, notarized, broadly tested release installers are published yet. For n
 Quick development start after installing the platform prerequisites:
 
 ```sh
-npm install
+npm ci
 npm run tauri:dev
 ```
+
+On Windows, after `npm ci` has installed the locked dependencies, build the app executable with:
+
+```powershell
+.\build-exe.bat
+```
+
+`build-exe.bat` uses an installed Node.js 22-or-newer version for that build only. With NVM for Windows, it can find a suitable installed version even when an older Node version is active, and it does not persistently switch the active version. It does not install dependencies, so rerun `npm ci` after dependency-lock changes. The current Windows build has been verified with Node.js 22.14.0. It produces `src-tauri\target\release\Bricriu.exe`; this is the application executable, not an installer bundle.
+
+The Markdown-It 15, KaTeX, and Tiptap 3 upgrades do not require a vault migration, a VS Code extension, or separately installed runtime plugins. Those libraries are bundled into Bricriu. Running the resulting executable does not require Node.js, npm, Rust, or the C++ build tools, although WebView2 and any feature-specific optional tools listed below are still runtime requirements.
 
 Useful checks and builds:
 
@@ -122,8 +132,8 @@ Read the [user guide](USER_GUIDE.md) before enabling Git automation or private n
 - **Frontend:** React 18, TypeScript, Vite
 - **Text editor:** CodeMirror 6
 - **Native backend:** Rust
-- **Markdown:** markdown-it with `@mdit/plugin-katex`, KaTeX, CodeMirror Markdown language support
-- **Rich review mode:** Tiptap and ProseMirror
+- **Markdown:** Markdown-It 15 with `@mdit/plugin-katex` 1, KaTeX 0.18, and CodeMirror Markdown language support
+- **Rich review mode:** Tiptap 3 and ProseMirror
 - **Canvas:** React Flow and YAML
 - **Calendar:** FullCalendar
 - **Typst:** embedded Typst crates plus vendored CodeMirror Typst language support
