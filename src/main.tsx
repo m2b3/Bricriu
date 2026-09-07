@@ -1020,22 +1020,35 @@ function App(): JSX.Element {
   ])
 
   const openVault = useCallback(async () => {
-    const trimmed = vaultPath.trim()
-    if (!trimmed) {
-      setError('Enter a vault folder path.')
-      return
+    let path = vaultPath.trim()
+    if (!path) {
+      setError(null)
+      try {
+        const selected = await openFileDialog({
+          title: 'Open vault folder',
+          directory: true,
+          multiple: false,
+          defaultPath: vault?.root
+        })
+        if (typeof selected !== 'string') return
+        path = selected
+        setVaultPath(selected)
+      } catch (err) {
+        setError(`Could not open folder dialog: ${String(err)}`)
+        return
+      }
     }
     setBusy(true)
     setError(null)
     try {
-      const nextVault = await invoke<VaultInfo>('open_vault', { path: trimmed })
-      await activateOpenedVault(nextVault, trimmed)
+      const nextVault = await invoke<VaultInfo>('open_vault', { path })
+      await activateOpenedVault(nextVault, path)
     } catch (err) {
       setError(String(err))
     } finally {
       setBusy(false)
     }
-  }, [activateOpenedVault, vaultPath])
+  }, [activateOpenedVault, vault?.root, vaultPath])
 
   const unlockPrivateVault = useCallback(async () => {
     if (!privatePassword) {

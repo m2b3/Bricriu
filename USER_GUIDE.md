@@ -7,7 +7,7 @@ The ordinary Markdown editor is the only workflow with approximately six months 
 
 ## Open a vault
 
-A vault is an ordinary folder containing notes. Enter its path and select **Open**, or use the folder dialog beside the path field. Bricriu recursively shows supported files beneath that folder:
+A vault is an ordinary folder containing notes. Enter its path and select **Open**. To choose a folder with the system folder picker instead, leave the path field blank and select **Open**. Bricriu recursively shows supported files beneath that folder:
 
 - `.md` and `.markdown` — the primary, somewhat-tested path;
 - `.typ` — experimental Typst support.
