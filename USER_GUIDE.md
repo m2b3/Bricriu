@@ -48,6 +48,7 @@ The selected theme is stored locally and restored the next time Bricriu starts.
 
 The Text view is a CodeMirror 6 source editor. Markdown remains visible and the saved file stays plain text.
 
+- **Raw** switches the CodeMirror editor to source-only display by hiding in-editor processed widgets such as rendered math and Canvas summaries. It does not disable syntax highlighting or change the separately rendered Preview pane.
 - Save with **Save** or `Ctrl+S` / `Cmd+S`.
 - Create a note with `Ctrl+N` / `Cmd+N`.
 - Open a file with `Ctrl+O` / `Cmd+O`.

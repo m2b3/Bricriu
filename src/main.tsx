@@ -4223,11 +4223,11 @@ function noteMarkdownTools(
 ): Extension {
   const displayMathField = StateField.define<DisplayMathState>({
     create(state) {
-      return buildDisplayMathState(state)
+      return buildDisplayMathState(state, canvasMarkdownDisplayModeRef.current)
     },
     update(displayMath, transaction) {
       return transaction.docChanged
-        ? buildDisplayMathState(transaction.state)
+        ? buildDisplayMathState(transaction.state, canvasMarkdownDisplayModeRef.current)
         : displayMath
     },
     provide: (field) => EditorView.decorations.from(field, (displayMath) => displayMath.decorations)
@@ -4499,14 +4499,16 @@ function buildNoteDecorations(
         }) })
       }
 
-      for (const math of findInlineMath(text)) {
-        const start = line.from + math.from
-        const end = line.from + math.to
-        if (!blockMathRanges.some((range) => start >= range.from && end <= range.to)) {
-          ranges.push({ from: end, to: end, decoration: Decoration.widget({
-            widget: new MathPreviewWidget(math.source, false, version),
-            side: 1
-          }) })
+      if (!showRawMarkdown) {
+        for (const math of findInlineMath(text)) {
+          const start = line.from + math.from
+          const end = line.from + math.to
+          if (!blockMathRanges.some((range) => start >= range.from && end <= range.to)) {
+            ranges.push({ from: end, to: end, decoration: Decoration.widget({
+              widget: new MathPreviewWidget(math.source, false, version),
+              side: 1
+            }) })
+          }
         }
       }
       pos = line.to + 1
@@ -4561,7 +4563,14 @@ type DisplayMathState = {
   decorations: DecorationSet
 }
 
-function buildDisplayMathState(state: EditorState): DisplayMathState {
+function buildDisplayMathState(
+  state: EditorState,
+  markdownDisplayMode: CanvasMarkdownDisplayMode
+): DisplayMathState {
+  if (markdownDisplayMode === 'raw') {
+    return { blocks: [], decorations: Decoration.none }
+  }
+
   const version = state.field(editorDocumentVersion)
   const builder = new RangeSetBuilder<Decoration>()
   const blocks = findDisplayMathBlocks(state.doc.toString())
