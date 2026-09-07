@@ -3037,7 +3037,16 @@ function App(): JSX.Element {
             />
           )}
           {previewVisible && activeTab && (
-            <div className="auxiliary-pane-slot" style={{ flex: `${auxiliaryPaneRatio} 1 0` }}>
+            <div className="auxiliary-pane-slot preview-pane-slot" style={{ flex: `${auxiliaryPaneRatio} 1 0` }}>
+              <button
+                type="button"
+                className="preview-close-button"
+                aria-label="Close preview"
+                title="Close preview"
+                onClick={() => setShowPreview(false)}
+              >
+                <span aria-hidden="true">×</span>
+              </button>
               {activeIsTypst ? (
                 <TypstPreviewPane preview={typstPreview?.tabId === activeTab.id ? typstPreview : null} />
               ) : (

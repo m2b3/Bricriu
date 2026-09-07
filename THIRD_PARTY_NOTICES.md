@@ -15,7 +15,7 @@ Regenerate this file after changing dependencies:
 npm run notices
 ```
 
-## JavaScript and Web Dependencies (291)
+## JavaScript and Web Dependencies (295)
 
 | Package | Version | Declared license | Scope |
 | --- | ---: | --- | --- |
@@ -92,6 +92,9 @@ npm run notices
 | [@lezer/lr](https://www.npmjs.com/package/%40lezer%2Flr) | 1.4.10 | MIT | application |
 | [@lezer/markdown](https://www.npmjs.com/package/%40lezer%2Fmarkdown) | 1.6.3 | MIT | application |
 | [@marijn/find-cluster-break](https://www.npmjs.com/package/%40marijn%2Ffind-cluster-break) | 1.0.2 | MIT | application |
+| [@mdit/helper](https://www.npmjs.com/package/%40mdit%2Fhelper) | 0.23.2 | MIT | application |
+| [@mdit/plugin-katex](https://www.npmjs.com/package/%40mdit%2Fplugin-katex) | 0.25.2 | MIT | application |
+| [@mdit/plugin-tex](https://www.npmjs.com/package/%40mdit%2Fplugin-tex) | 0.24.2 | MIT | application |
 | [@popperjs/core](https://www.npmjs.com/package/%40popperjs%2Fcore) | 2.11.8 | MIT | application |
 | [@remirror/core-constants](https://www.npmjs.com/package/%40remirror%2Fcore-constants) | 3.0.0 | MIT | application |
 | [@rolldown/pluginutils](https://www.npmjs.com/package/%40rolldown%2Fpluginutils) | 1.0.0-beta.27 | MIT | development/build |
@@ -243,6 +246,7 @@ npm run notices
 | [js-tokens](https://www.npmjs.com/package/js-tokens) | 4.0.0 | MIT | application |
 | [jsesc](https://www.npmjs.com/package/jsesc) | 3.1.0 | MIT | development/build |
 | [json5](https://www.npmjs.com/package/json5) | 2.2.3 | MIT | development/build |
+| [katex](https://www.npmjs.com/package/katex) | 0.16.47 | MIT | application |
 | [katex](https://www.npmjs.com/package/katex) | 0.17.0 | MIT | application |
 | [linkify-it](https://www.npmjs.com/package/linkify-it) | 5.0.1 | MIT | application |
 | [loose-envify](https://www.npmjs.com/package/loose-envify) | 1.4.0 | MIT | application |

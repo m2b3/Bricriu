@@ -1372,6 +1372,40 @@ input:focus {
   flex: 1 1 50%;
 }
 
+.preview-pane-slot {
+  position: relative;
+}
+
+.preview-close-button {
+  position: absolute;
+  z-index: 4;
+  top: 9px;
+  right: 10px;
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  box-shadow: 0 1px 3px var(--shadow);
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  padding: 0;
+}
+
+.preview-close-button:hover {
+  border-color: var(--line-strong);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.preview-close-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 1px;
+}
+
 .workspace.split .auxiliary-pane-slot > .preview-pane,
 .workspace.split .auxiliary-pane-slot > .backlinks-pane {
   min-width: 0;
@@ -2286,13 +2320,18 @@ input:focus {
   color: var(--accent);
 }
 
-.preview-math-block {
+.preview-pane .katex-block {
+  max-width: 100%;
   overflow-x: auto;
-  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line));
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--accent) 5%, var(--panel));
-  margin: 12px 0;
-  padding: 12px;
+  overflow-y: hidden;
+  margin: 0.9em 0 1em;
+  padding: 0.25em 0;
+}
+
+.preview-pane .katex-block > .katex-display {
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
 }
 
 .print-root {
@@ -2864,7 +2903,7 @@ input:focus {
 
   body[data-print-mode] .preview-pane pre,
   body[data-print-mode] .preview-pane table,
-  body[data-print-mode] .preview-math-block {
+  body[data-print-mode] .katex-block {
     break-inside: avoid;
   }
 

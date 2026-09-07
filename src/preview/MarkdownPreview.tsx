@@ -1,5 +1,5 @@
 import { ClipboardEvent, useCallback, useMemo } from 'react'
-import katex from 'katex'
+import { katex as markdownItKatex } from '@mdit/plugin-katex'
 import MarkdownIt from 'markdown-it'
 import { isExplicitDocumentPath, resolveWikiDocumentPath } from '../wikiPaths'
 import 'katex/dist/katex.min.css'
@@ -9,6 +9,12 @@ const markdownRenderer = MarkdownIt({
   linkify: true,
   typographer: true,
   breaks: false
+}).use(markdownItKatex, {
+  delimiters: 'all',
+  mathFence: true,
+  throwOnError: false,
+  trust: false,
+  logger: () => 'ignore'
 })
 
 export function MarkdownPreview({
@@ -192,19 +198,9 @@ function pushPreviewBlockHtml(out: string[], html: string, snippets: string[]): 
 function preprocessPreviewMarkdown(markdown: string, notePaths: string[], sourcePath: string | null, snippets: string[]): string {
   const lines = markdown.replace(/\r\n/g, '\n').split('\n')
   const out: string[] = []
-  let displayMath: DisplayMathBlock | null = null
   let codeFence: CodeFence | null = null
 
   for (const line of lines) {
-    if (displayMath) {
-      displayMath.lines.push(line)
-      if (displayMath.isClosingLine(line)) {
-        pushPreviewBlockHtml(out, renderDisplayMath(displayMath.source()), snippets)
-        displayMath = null
-      }
-      continue
-    }
-
     if (codeFence) {
       out.push(line)
       if (isClosingCodeFence(line, codeFence)) codeFence = null
@@ -215,18 +211,6 @@ function preprocessPreviewMarkdown(markdown: string, notePaths: string[], source
     if (openingFence) {
       codeFence = openingFence
       out.push(line)
-      continue
-    }
-
-    const singleLineMath = parseSingleLineDisplayMath(line)
-    if (singleLineMath != null) {
-      pushPreviewBlockHtml(out, renderDisplayMath(singleLineMath), snippets)
-      continue
-    }
-
-    const openingMath = parseOpeningDisplayMath(line)
-    if (openingMath) {
-      displayMath = openingMath
       continue
     }
 
@@ -247,8 +231,6 @@ function preprocessPreviewMarkdown(markdown: string, notePaths: string[], source
 
     out.push(renderInlinePreviewSyntax(line, notePaths, sourcePath, snippets))
   }
-
-  if (displayMath) out.push(...displayMath.originalLines)
 
   const closed: string[] = []
   let calloutOpen = false
@@ -277,24 +259,6 @@ type CodeFence = {
   length: number
 }
 
-type DisplayMathBlock = {
-  lines: string[]
-  originalLines: string[]
-  isClosingLine: (line: string) => boolean
-  source: () => string
-}
-
-const DISPLAY_MATH_ENVIRONMENTS = new Set([
-  'equation',
-  'equation*',
-  'align',
-  'align*',
-  'alignat',
-  'alignat*',
-  'gather',
-  'gather*'
-])
-
 function parseOpeningCodeFence(line: string): CodeFence | null {
   const match = line.match(/^ {0,3}(`{3,}|~{3,})/)
   if (!match) return null
@@ -309,41 +273,6 @@ function isClosingCodeFence(line: string, fence: CodeFence): boolean {
   return !!match && match[1][0] === fence.marker && match[1].length >= fence.length
 }
 
-function parseSingleLineDisplayMath(line: string): string | null {
-  const trimmed = line.trim()
-  if (trimmed.startsWith('$$') && trimmed.endsWith('$$') && trimmed.length > 4) {
-    return trimmed.slice(2, -2).trim()
-  }
-  if (trimmed.startsWith('\\[') && trimmed.endsWith('\\]') && trimmed.length > 4) {
-    return trimmed.slice(2, -2).trim()
-  }
-  return null
-}
-
-function parseOpeningDisplayMath(line: string): DisplayMathBlock | null {
-  const trimmed = line.trim()
-  if (trimmed === '$$' || trimmed === '\\[') {
-    const closingMarker = trimmed === '$$' ? '$$' : '\\]'
-    const lines = [line]
-    return {
-      lines,
-      originalLines: lines,
-      isClosingLine: (candidate) => candidate.trim() === closingMarker,
-      source: () => lines.slice(1, -1).join('\n')
-    }
-  }
-
-  const environment = trimmed.match(/^\\begin\{([^{}]+)\}$/)?.[1]
-  if (!environment || !DISPLAY_MATH_ENVIRONMENTS.has(environment)) return null
-  const lines = [line]
-  return {
-    lines,
-    originalLines: lines,
-    isClosingLine: (candidate) => candidate.trim() === `\\end{${environment}}`,
-    source: () => lines.join('\n')
-  }
-}
-
 function isCalloutOpenPlaceholder(line: string | undefined, snippets: string[]): boolean {
   const match = line?.match(/^@@NZHTML(\d+)@@$/)
   if (!match) return false
@@ -352,7 +281,7 @@ function isCalloutOpenPlaceholder(line: string | undefined, snippets: string[]):
 
 function renderInlinePreviewSyntax(line: string, notePaths: string[], sourcePath: string | null, snippets: string[]): string {
   return mapOutsideInlineCode(line, (source) => {
-    const withWiki = source.replace(
+    return source.replace(
       /\[\[([^\]\n|#]+)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g,
       (match: string, rawLabel: string, rawAnchor: string | undefined, rawAlias: string | undefined) => {
         const label = rawLabel.trim()
@@ -363,7 +292,6 @@ function renderInlinePreviewSyntax(line: string, notePaths: string[], sourcePath
         return htmlPlaceholder(`<a class="preview-wiki" href="notesproject-wiki:${encodeURIComponent(formatWikiDestination(target, rawAnchor))}" data-wiki-markdown="${wikiMarkdown}">${text}</a>`, snippets)
       }
     )
-    return replaceInlineMath(withWiki, snippets)
   })
 }
 
@@ -392,99 +320,6 @@ function mapOutsideInlineCode(source: string, transform: (text: string) => strin
   }
 
   return result + transform(source.slice(plainStart))
-}
-
-function replaceInlineMath(source: string, snippets: string[]): string {
-  let result = ''
-  let plainStart = 0
-  let index = 0
-
-  while (index < source.length) {
-    let contentStart = -1
-    let closingStart = -1
-    let closingLength = 0
-
-    if (source[index] === '$' && source[index + 1] !== '$' && !isEscaped(source, index)) {
-      contentStart = index + 1
-      closingStart = findClosingDollar(source, contentStart)
-      closingLength = 1
-    } else if (
-      source[index] === '\\' &&
-      source[index + 1] === '(' &&
-      !isEscaped(source, index)
-    ) {
-      contentStart = index + 2
-      closingStart = findClosingBackslashParen(source, contentStart)
-      closingLength = 2
-    }
-
-    if (contentStart < 0 || closingStart < 0) {
-      index += 1
-      continue
-    }
-
-    const math = source.slice(contentStart, closingStart).trim()
-    if (!math) {
-      index = closingStart + closingLength
-      continue
-    }
-
-    result += source.slice(plainStart, index)
-    result += htmlPlaceholder(renderInlineMath(math), snippets)
-    index = closingStart + closingLength
-    plainStart = index
-  }
-
-  return result + source.slice(plainStart)
-}
-
-function findClosingDollar(source: string, from: number): number {
-  for (let index = from; index < source.length; index += 1) {
-    if (
-      source[index] === '$' &&
-      source[index - 1] !== '$' &&
-      source[index + 1] !== '$' &&
-      !isEscaped(source, index)
-    ) {
-      return index
-    }
-  }
-  return -1
-}
-
-function findClosingBackslashParen(source: string, from: number): number {
-  for (let index = from; index < source.length - 1; index += 1) {
-    if (source[index] === '\\' && source[index + 1] === ')' && !isEscaped(source, index)) {
-      return index
-    }
-  }
-  return -1
-}
-
-function isEscaped(source: string, index: number): boolean {
-  let slashCount = 0
-  for (let cursor = index - 1; cursor >= 0 && source[cursor] === '\\'; cursor -= 1) {
-    slashCount += 1
-  }
-  return slashCount % 2 === 1
-}
-
-function renderInlineMath(source: string): string {
-  return katex.renderToString(source, {
-    displayMode: false,
-    throwOnError: false,
-    strict: false,
-    trust: false
-  })
-}
-
-function renderDisplayMath(source: string): string {
-  return `<div class="preview-math-block">${katex.renderToString(source.trim(), {
-    displayMode: true,
-    throwOnError: false,
-    strict: false,
-    trust: false
-  })}</div>`
 }
 
 function escapeHtml(value: string): string {
