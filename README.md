@@ -70,7 +70,7 @@ No signed, notarized, broadly tested release installers are published yet. For n
 
 | Platform | Current advice |
 | --- | --- |
-| Windows 10/11 | The development and limited single-user testing path. Requires Node.js, Rust, Microsoft C++ Build Tools, and WebView2 to build. A future unsigned installer may trigger Windows warnings. |
+| Windows 10/11 | The development and limited single-user testing path. Requires Node.js 22 or newer, Rust, Microsoft C++ Build Tools, and WebView2 to build. A future unsigned installer may trigger Windows warnings. |
 | macOS | **Untested.** Build on macOS with Xcode Command Line Tools. Packaging, icons, signing, notarization, and runtime behavior still need validation. |
 | Linux | **Untested.** Install the Tauri prerequisites for your distribution and build on Linux. WebKit/system-package requirements and generated packages still need validation. |
 

@@ -15,7 +15,7 @@ Regenerate this file after changing dependencies:
 npm run notices
 ```
 
-## JavaScript and Web Dependencies (295)
+## JavaScript and Web Dependencies (299)
 
 | Package | Version | Declared license | Scope |
 | --- | ---: | --- | --- |
@@ -92,9 +92,9 @@ npm run notices
 | [@lezer/lr](https://www.npmjs.com/package/%40lezer%2Flr) | 1.4.10 | MIT | application |
 | [@lezer/markdown](https://www.npmjs.com/package/%40lezer%2Fmarkdown) | 1.6.3 | MIT | application |
 | [@marijn/find-cluster-break](https://www.npmjs.com/package/%40marijn%2Ffind-cluster-break) | 1.0.2 | MIT | application |
-| [@mdit/helper](https://www.npmjs.com/package/%40mdit%2Fhelper) | 0.23.2 | MIT | application |
-| [@mdit/plugin-katex](https://www.npmjs.com/package/%40mdit%2Fplugin-katex) | 0.25.2 | MIT | application |
-| [@mdit/plugin-tex](https://www.npmjs.com/package/%40mdit%2Fplugin-tex) | 0.24.2 | MIT | application |
+| [@mdit/helper](https://www.npmjs.com/package/%40mdit%2Fhelper) | 1.1.0 | MIT | application |
+| [@mdit/plugin-katex](https://www.npmjs.com/package/%40mdit%2Fplugin-katex) | 1.1.0 | MIT | application |
+| [@mdit/plugin-tex](https://www.npmjs.com/package/%40mdit%2Fplugin-tex) | 1.1.0 | MIT | application |
 | [@popperjs/core](https://www.npmjs.com/package/%40popperjs%2Fcore) | 2.11.8 | MIT | application |
 | [@remirror/core-constants](https://www.npmjs.com/package/%40remirror%2Fcore-constants) | 3.0.0 | MIT | application |
 | [@rolldown/pluginutils](https://www.npmjs.com/package/%40rolldown%2Fpluginutils) | 1.0.0-beta.27 | MIT | development/build |
@@ -204,6 +204,7 @@ npm run notices
 | [ansi-regex](https://www.npmjs.com/package/ansi-regex) | 5.0.1 | MIT | development/build |
 | [ansi-styles](https://www.npmjs.com/package/ansi-styles) | 4.3.0 | MIT | development/build |
 | [argparse](https://www.npmjs.com/package/argparse) | 2.0.1 | Python-2.0 | application |
+| [argparse](https://www.npmjs.com/package/argparse) | 3.0.1 | PSF-2.0 | application |
 | [baseline-browser-mapping](https://www.npmjs.com/package/baseline-browser-mapping) | 2.10.32 | Apache-2.0 | development/build |
 | [browserslist](https://www.npmjs.com/package/browserslist) | 4.28.2 | MIT | development/build |
 | [caniuse-lite](https://www.npmjs.com/package/caniuse-lite) | 1.0.30001793 | CC-BY-4.0 | development/build |
@@ -231,6 +232,7 @@ npm run notices
 | [electron-to-chromium](https://www.npmjs.com/package/electron-to-chromium) | 1.5.361 | ISC | development/build |
 | [emoji-regex](https://www.npmjs.com/package/emoji-regex) | 8.0.0 | MIT | development/build |
 | [entities](https://www.npmjs.com/package/entities) | 4.5.0 | BSD-2-Clause | application |
+| [entities](https://www.npmjs.com/package/entities) | 8.0.0 | BSD-2-Clause | application |
 | [esbuild](https://www.npmjs.com/package/esbuild) | 0.25.12 | MIT | development/build |
 | [escalade](https://www.npmjs.com/package/escalade) | 3.2.0 | MIT | development/build |
 | [escape-string-regexp](https://www.npmjs.com/package/escape-string-regexp) | 4.0.0 | MIT | application |
@@ -246,13 +248,14 @@ npm run notices
 | [js-tokens](https://www.npmjs.com/package/js-tokens) | 4.0.0 | MIT | application |
 | [jsesc](https://www.npmjs.com/package/jsesc) | 3.1.0 | MIT | development/build |
 | [json5](https://www.npmjs.com/package/json5) | 2.2.3 | MIT | development/build |
-| [katex](https://www.npmjs.com/package/katex) | 0.16.47 | MIT | application |
-| [katex](https://www.npmjs.com/package/katex) | 0.17.0 | MIT | application |
-| [linkify-it](https://www.npmjs.com/package/linkify-it) | 5.0.1 | MIT | application |
+| [katex](https://www.npmjs.com/package/katex) | 0.18.4 | MIT | application |
+| [linkify-it](https://www.npmjs.com/package/linkify-it) | 5.0.2 | MIT | application |
+| [linkify-it](https://www.npmjs.com/package/linkify-it) | 6.1.0 | MIT | application |
 | [loose-envify](https://www.npmjs.com/package/loose-envify) | 1.4.0 | MIT | application |
 | [lru-cache](https://www.npmjs.com/package/lru-cache) | 5.1.1 | ISC | development/build |
-| [markdown-it](https://www.npmjs.com/package/markdown-it) | 14.2.0 | MIT | application |
-| [mdurl](https://www.npmjs.com/package/mdurl) | 2.0.0 | MIT | application |
+| [markdown-it](https://www.npmjs.com/package/markdown-it) | 14.3.1 | MIT | application |
+| [markdown-it](https://www.npmjs.com/package/markdown-it) | 15.0.1 | MIT | application |
+| [mdurl](https://www.npmjs.com/package/mdurl) | 2.1.0 | MIT | application |
 | [ms](https://www.npmjs.com/package/ms) | 2.1.3 | MIT | development/build |
 | [nanoid](https://www.npmjs.com/package/nanoid) | 3.3.12 | MIT | development/build |
 | [node-releases](https://www.npmjs.com/package/node-releases) | 2.0.46 | MIT | development/build |
@@ -300,6 +303,7 @@ npm run notices
 | [tippy.js](https://www.npmjs.com/package/tippy.js) | 6.3.7 | MIT | application |
 | [typescript](https://www.npmjs.com/package/typescript) | 5.9.3 | Apache-2.0 | development/build |
 | [uc.micro](https://www.npmjs.com/package/uc.micro) | 2.1.0 | MIT | application |
+| [uc.micro](https://www.npmjs.com/package/uc.micro) | 3.0.0 | MIT | application |
 | [update-browserslist-db](https://www.npmjs.com/package/update-browserslist-db) | 1.2.3 | MIT | development/build |
 | [use-sync-external-store](https://www.npmjs.com/package/use-sync-external-store) | 1.6.0 | MIT | application |
 | [uuid](https://www.npmjs.com/package/uuid) | 11.1.1 | MIT | development/build |

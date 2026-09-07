@@ -14,8 +14,10 @@ const markdownRenderer = MarkdownIt({
   mathFence: true,
   throwOnError: false,
   trust: false,
-  logger: () => 'ignore'
+  logger: (): 'ignore' => 'ignore'
 })
+
+markdownRenderer.linkify.set({ fuzzyLink: true })
 
 export function MarkdownPreview({
   body,
