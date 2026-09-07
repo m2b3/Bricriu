@@ -2,7 +2,6 @@ import { ClipboardEvent, useCallback, useMemo } from 'react'
 import { katex as markdownItKatex } from '@mdit/plugin-katex'
 import MarkdownIt from 'markdown-it'
 import { isExplicitDocumentPath, resolveWikiDocumentPath } from '../wikiPaths'
-import 'katex/dist/katex.min.css'
 
 const markdownRenderer = MarkdownIt({
   html: false,

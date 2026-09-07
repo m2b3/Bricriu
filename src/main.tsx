@@ -44,11 +44,13 @@ import {
 } from '@codemirror/language'
 import { tags } from '@lezer/highlight'
 import { searchKeymap } from '@codemirror/search'
+import katex from 'katex'
 import { renderCanvasMarkdown } from './canvas/canvasMarkdown'
 import { markdownToTiptap } from './track/markdown'
 import { resolveWikiDocumentPath } from './wikiPaths'
 import type { CalendarEvent } from './calendar/CalendarView'
 import type { TrackState } from './track/types'
+import 'katex/dist/katex.min.css'
 import './styles.css'
 
 const CanvasEditor = React.lazy(() =>
@@ -4172,6 +4174,18 @@ function noteMarkdownTools(
   onOpenWikiLinkRef: React.MutableRefObject<(path: string) => void>,
   onLoadWikiCompletionBodyRef: React.MutableRefObject<(path: string) => Promise<string | null>>
 ): Extension {
+  const displayMathField = StateField.define<DisplayMathState>({
+    create(state) {
+      return buildDisplayMathState(state)
+    },
+    update(displayMath, transaction) {
+      return transaction.docChanged
+        ? buildDisplayMathState(transaction.state)
+        : displayMath
+    },
+    provide: (field) => EditorView.decorations.from(field, (displayMath) => displayMath.decorations)
+  })
+
   const canvasSummaryField = StateField.define<DecorationSet>({
     create(state) {
       return buildCanvasSummaryDecorations(state, notePathsRef.current, sourcePathRef.current, canvasMarkdownDisplayModeRef.current, onOpenWikiLinkRef)
@@ -4187,12 +4201,12 @@ function noteMarkdownTools(
       decorations: DecorationSet
 
       constructor(view: EditorView) {
-        this.decorations = buildVersionedNoteDecorations(view, notePathsRef.current, sourcePathRef.current, canvasMarkdownDisplayModeRef.current, searchHighlightRef.current, onOpenWikiLinkRef.current)
+        this.decorations = buildVersionedNoteDecorations(view, notePathsRef.current, sourcePathRef.current, canvasMarkdownDisplayModeRef.current, searchHighlightRef.current, view.state.field(displayMathField).blocks, onOpenWikiLinkRef.current)
       }
 
       update(update: ViewUpdate) {
         if (update.docChanged || update.viewportChanged || update.transactions.length > 0) {
-          this.decorations = buildVersionedNoteDecorations(update.view, notePathsRef.current, sourcePathRef.current, canvasMarkdownDisplayModeRef.current, searchHighlightRef.current, onOpenWikiLinkRef.current)
+          this.decorations = buildVersionedNoteDecorations(update.view, notePathsRef.current, sourcePathRef.current, canvasMarkdownDisplayModeRef.current, searchHighlightRef.current, update.state.field(displayMathField).blocks, onOpenWikiLinkRef.current)
         }
       }
     },
@@ -4202,6 +4216,7 @@ function noteMarkdownTools(
   )
 
   return [
+    displayMathField,
     canvasSummaryField,
     wikiLinkPlugin,
     Prec.highest(keymap.of([
@@ -4280,10 +4295,11 @@ function buildVersionedNoteDecorations(
   sourcePath: string | null,
   canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode,
   searchHighlight: SearchHighlight | null,
+  blockMathRanges: DisplayMathBlock[],
   onOpenWikiLink: (path: string) => void
 ): DecorationSet {
   const version = view.state.field(editorDocumentVersion)
-  const decorations = buildNoteDecorations(view, notePaths, sourcePath, canvasMarkdownDisplayMode, searchHighlight, version, onOpenWikiLink)
+  const decorations = buildNoteDecorations(view, notePaths, sourcePath, canvasMarkdownDisplayMode, searchHighlight, blockMathRanges, version, onOpenWikiLink)
   return version === view.state.field(editorDocumentVersion) ? decorations : Decoration.none
 }
 
@@ -4293,13 +4309,13 @@ function buildNoteDecorations(
   sourcePath: string | null,
   canvasMarkdownDisplayMode: CanvasMarkdownDisplayMode,
   searchHighlight: SearchHighlight | null,
+  blockMathRanges: DisplayMathBlock[],
   version: number,
   _onOpenWikiLink: (path: string) => void
 ): DecorationSet {
   const ranges: Array<{ from: number; to: number; decoration: Decoration }> = []
   const doc = view.state.doc
   const fullText = doc.toString()
-  const blockMathRanges: Array<{ from: number; to: number }> = []
   const showRawMarkdown = canvasMarkdownDisplayMode === 'raw'
   const canvasBlockRanges = canvasMarkdownDisplayMode === 'summary'
     ? findCanvasBlockRanges(doc.toString(), view.visibleRanges)
@@ -4388,23 +4404,6 @@ function buildNoteDecorations(
         attributes: { title: `Ctrl+click to open ${url.url}` }
       })
     })
-  }
-
-  for (const { from, to } of view.visibleRanges) {
-    const text = doc.sliceString(from, to)
-    const blockRegex = /\$\$([\s\S]*?)\$\$/g
-    let blockMatch: RegExpExecArray | null
-    while ((blockMatch = blockRegex.exec(text))) {
-      const blockFrom = from + blockMatch.index
-      const blockTo = blockFrom + blockMatch[0].length
-      if (rangesOverlapAny(blockFrom, blockTo, canvasBlockRanges)) continue
-      blockMathRanges.push({ from: blockFrom, to: blockTo })
-      ranges.push({ from: blockTo, to: blockTo, decoration: Decoration.widget({
-        widget: new MathPreviewWidget(blockMatch[1].trim(), true, version),
-        block: true,
-        side: 1
-      }) })
-    }
   }
 
   for (const { from, to } of view.visibleRanges) {
@@ -4504,6 +4503,92 @@ function buildNoteDecorations(
   return builder.finish()
 }
 
+type DisplayMathBlock = {
+  from: number
+  to: number
+  source: string
+}
+
+type DisplayMathState = {
+  blocks: DisplayMathBlock[]
+  decorations: DecorationSet
+}
+
+function buildDisplayMathState(state: EditorState): DisplayMathState {
+  const version = state.field(editorDocumentVersion)
+  const builder = new RangeSetBuilder<Decoration>()
+  const blocks = findDisplayMathBlocks(state.doc.toString())
+  for (const block of blocks) {
+    builder.add(block.to, block.to, Decoration.widget({
+      widget: new MathPreviewWidget(block.source, true, version),
+      block: true,
+      side: 1
+    }))
+  }
+  return { blocks, decorations: builder.finish() }
+}
+
+function findDisplayMathBlocks(text: string): DisplayMathBlock[] {
+  const blocks: DisplayMathBlock[] = []
+  let fence: { marker: '`' | '~'; length: number } | null = null
+  let openBlock: { from: number; contentFrom: number } | null = null
+  let offset = 0
+
+  for (const lineWithEnding of text.match(/.*(?:\r\n|\n|\r|$)/g) ?? []) {
+    if (!lineWithEnding) break
+    const line = lineWithEnding.replace(/(?:\r\n|\n|\r)$/, '')
+    const lineTo = offset + line.length
+    const trimmed = line.trim()
+
+    if (openBlock) {
+      if (trimmed === '$$') {
+        blocks.push({
+          from: openBlock.from,
+          to: lineTo,
+          source: text.slice(openBlock.contentFrom, offset).trim()
+        })
+        openBlock = null
+      }
+      offset += lineWithEnding.length
+      continue
+    }
+
+    if (fence) {
+      const closingFence = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/)
+      if (
+        closingFence &&
+        closingFence[1][0] === fence.marker &&
+        closingFence[1].length >= fence.length
+      ) {
+        fence = null
+      }
+      offset += lineWithEnding.length
+      continue
+    }
+
+    const openingFence = line.match(/^ {0,3}(`{3,}|~{3,})/)
+    if (openingFence) {
+      fence = {
+        marker: openingFence[1][0] as '`' | '~',
+        length: openingFence[1].length
+      }
+      offset += lineWithEnding.length
+      continue
+    }
+
+    const singleLineBlock = trimmed.match(/^\$\$([\s\S]+)\$\$$/)
+    if (singleLineBlock) {
+      blocks.push({ from: offset, to: lineTo, source: singleLineBlock[1].trim() })
+    } else if (trimmed === '$$') {
+      openBlock = { from: offset, contentFrom: offset + lineWithEnding.length }
+    }
+
+    offset += lineWithEnding.length
+  }
+
+  return blocks
+}
+
 function buildCanvasSummaryDecorations(
   state: EditorState,
   notePaths: string[],
@@ -4563,7 +4648,17 @@ class MathPreviewWidget extends WidgetType {
     const element = document.createElement(this.displayMode ? 'div' : 'span')
     element.className = this.displayMode ? 'cm-math-preview block' : 'cm-math-preview inline'
     element.dataset.editorVersion = String(this.version)
-    element.textContent = this.source
+    try {
+      katex.render(this.source, element, {
+        displayMode: this.displayMode,
+        throwOnError: false,
+        strict: false,
+        trust: false
+      })
+    } catch {
+      element.classList.add('error')
+      element.textContent = this.source
+    }
     return element
   }
 

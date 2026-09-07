@@ -1918,6 +1918,12 @@ input:focus {
   padding: 10px 12px;
 }
 
+.cm-math-preview.block > .katex-display {
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+}
+
 .cm-math-preview.error {
   border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
   color: var(--danger);
