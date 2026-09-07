@@ -19,7 +19,7 @@ export function CanvasNode({ id, data, selected }: NodeProps): JSX.Element {
         isVisible={selected && !nodeData.readonly}
         minWidth={120}
         minHeight={64}
-        color="#365fa0"
+        color="var(--accent-2)"
         onResizeEnd={(_event, params) => {
           nodeData.onResize?.(id, {
             width: params.width,

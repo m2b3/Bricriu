@@ -182,6 +182,7 @@ type SearchView = 'file' | 'content'
 type EditorPane = 'main' | 'split'
 type CanvasMarkdownDisplayMode = 'summary' | 'raw'
 type CanvasDocumentDisplayMode = 'node' | 'panel'
+type AppTheme = 'classic' | 'bright' | 'dark'
 
 type OpenTab = {
   id: string
@@ -222,30 +223,31 @@ const editorDocumentVersion = StateField.define<number>({
   }
 })
 const notesHighlightStyle = HighlightStyle.define([
-  { tag: tags.meta, color: '#404740' },
+  { tag: tags.meta, color: 'var(--syntax-meta)' },
   { tag: tags.heading, fontWeight: 'bold' },
   { tag: tags.emphasis, fontStyle: 'italic' },
   { tag: tags.strong, fontWeight: 'bold' },
   { tag: tags.strikethrough, textDecoration: 'line-through' },
-  { tag: tags.keyword, color: '#708' },
-  { tag: [tags.atom, tags.bool, tags.url, tags.contentSeparator, tags.labelName], color: '#219' },
-  { tag: [tags.literal, tags.inserted], color: '#164' },
-  { tag: [tags.string, tags.deleted], color: '#a11' },
-  { tag: [tags.regexp, tags.escape, tags.special(tags.string)], color: '#e40' },
-  { tag: tags.definition(tags.variableName), color: '#00f' },
-  { tag: tags.local(tags.variableName), color: '#30a' },
-  { tag: [tags.typeName, tags.namespace], color: '#085' },
-  { tag: tags.className, color: '#167' },
-  { tag: [tags.special(tags.variableName), tags.macroName], color: '#256' },
-  { tag: tags.definition(tags.propertyName), color: '#00c' },
-  { tag: tags.comment, color: '#940' },
-  { tag: tags.invalid, color: '#f00' }
+  { tag: tags.keyword, color: 'var(--syntax-keyword)' },
+  { tag: [tags.atom, tags.bool, tags.url, tags.contentSeparator, tags.labelName], color: 'var(--syntax-atom)' },
+  { tag: [tags.literal, tags.inserted], color: 'var(--syntax-inserted)' },
+  { tag: [tags.string, tags.deleted], color: 'var(--syntax-deleted)' },
+  { tag: [tags.regexp, tags.escape, tags.special(tags.string)], color: 'var(--syntax-special)' },
+  { tag: tags.definition(tags.variableName), color: 'var(--syntax-definition)' },
+  { tag: tags.local(tags.variableName), color: 'var(--syntax-local)' },
+  { tag: [tags.typeName, tags.namespace], color: 'var(--syntax-type)' },
+  { tag: tags.className, color: 'var(--syntax-class)' },
+  { tag: [tags.special(tags.variableName), tags.macroName], color: 'var(--syntax-macro)' },
+  { tag: tags.definition(tags.propertyName), color: 'var(--syntax-property)' },
+  { tag: tags.comment, color: 'var(--syntax-comment)' },
+  { tag: tags.invalid, color: 'var(--syntax-invalid)' }
 ])
 const LAST_VAULT_KEY = 'notesproject:last-vault'
 const SESSION_KEY_PREFIX = 'notesproject:session:'
 const WINDOW_PLACEMENT_KEY = 'notesproject:window-placement'
 const CANVAS_MARKDOWN_DISPLAY_KEY = 'notesproject:canvas-markdown-display'
 const CANVAS_DOCUMENT_DISPLAY_KEY = 'notesproject:canvas-document-display'
+const THEME_KEY = 'notesproject:theme'
 const SIDEBAR_WIDTH_KEY = 'notesproject:sidebar-width'
 const EDITOR_SPLIT_RATIO_KEY = 'notesproject:editor-split-ratio'
 const PREVIEW_SPLIT_RATIO_KEY = 'notesproject:preview-split-ratio'
@@ -362,6 +364,11 @@ function App(): JSX.Element {
   const [touchedPaths, setTouchedPaths] = useState<Set<string>>(() => new Set())
   const [profile, setProfile] = useState<AppProfile>(DEFAULT_PROFILE)
   const [showPreview, setShowPreview] = useState(false)
+  const [theme, setTheme] = useState<AppTheme>(() => {
+    const storedTheme = readStoredTheme()
+    document.documentElement.dataset.theme = storedTheme
+    return storedTheme
+  })
   const [canvasMarkdownDisplayMode, setCanvasMarkdownDisplayMode] = useState<CanvasMarkdownDisplayMode>(() => readCanvasMarkdownDisplayMode())
   const [canvasDocumentDisplayMode, setCanvasDocumentDisplayMode] = useState<CanvasDocumentDisplayMode>(() => readCanvasDocumentDisplayMode())
   const [typstPreviewFormat, setTypstPreviewFormat] = useState<TypstPreviewFormat>('svg')
@@ -422,6 +429,16 @@ function App(): JSX.Element {
     setCanvasDocumentDisplayMode(mode)
     try {
       localStorage.setItem(CANVAS_DOCUMENT_DISPLAY_KEY, mode)
+    } catch {
+      // Ignore storage failures; the in-memory setting still applies.
+    }
+  }, [])
+
+  const updateTheme = useCallback((nextTheme: AppTheme) => {
+    setTheme(nextTheme)
+    document.documentElement.dataset.theme = nextTheme
+    try {
+      localStorage.setItem(THEME_KEY, nextTheme)
     } catch {
       // Ignore storage failures; the in-memory setting still applies.
     }
@@ -2679,6 +2696,7 @@ function App(): JSX.Element {
             recentClosedPaths={recentClosedPaths}
             showBacklinks={showBacklinks}
             showPreview={showPreview}
+            theme={theme}
             typstPreviewFormat={typstPreviewFormat}
             vaultOpen={!!vault}
             onCheckpoint={() => void checkpointNow()}
@@ -2689,6 +2707,7 @@ function App(): JSX.Element {
             onOpenFile={() => void openDocumentDialog()}
             onOpenRecent={(path) => void openNote(path)}
             onSetCanvasDocumentDisplay={updateCanvasDocumentDisplayMode}
+            onSetTheme={updateTheme}
             onSetTypstPreviewFormat={setTypstPreviewFormat}
             onToggleBacklinks={() => setShowBacklinks((current) => !current)}
             onToggleHistory={(persistRecentFiles) => updateProfile({ ...profile, persistRecentFiles })}
@@ -3341,6 +3360,7 @@ function AppMenuBar({
   recentClosedPaths,
   showBacklinks,
   showPreview,
+  theme,
   typstPreviewFormat,
   vaultOpen,
   onCheckpoint,
@@ -3349,6 +3369,7 @@ function AppMenuBar({
   onOpenFile,
   onOpenRecent,
   onSetCanvasDocumentDisplay,
+  onSetTheme,
   onSetTypstPreviewFormat,
   onToggleBacklinks,
   onToggleHistory,
@@ -3367,6 +3388,7 @@ function AppMenuBar({
   recentClosedPaths: string[]
   showBacklinks: boolean
   showPreview: boolean
+  theme: AppTheme
   typstPreviewFormat: TypstPreviewFormat
   vaultOpen: boolean
   onCheckpoint: () => void
@@ -3375,6 +3397,7 @@ function AppMenuBar({
   onOpenFile: () => void
   onOpenRecent: (path: string) => void
   onSetCanvasDocumentDisplay: (mode: CanvasDocumentDisplayMode) => void
+  onSetTheme: (theme: AppTheme) => void
   onSetTypstPreviewFormat: React.Dispatch<React.SetStateAction<TypstPreviewFormat>>
   onToggleBacklinks: () => void
   onToggleHistory: (persistRecentFiles: boolean) => void
@@ -3555,6 +3578,17 @@ function AppMenuBar({
           toggleMenu('options')
         }}>Options</summary>
         <div className="app-menu-popover">
+          <label className="app-menu-field">
+            <span>Theme</span>
+            <select
+              value={theme}
+              onChange={(event) => onSetTheme(event.target.value as AppTheme)}
+            >
+              <option value="classic">Classic</option>
+              <option value="bright">Bright contrast</option>
+              <option value="dark">Dark</option>
+            </select>
+          </label>
           <label className="app-menu-field">
             <span>Canvas document</span>
             <select
@@ -3833,25 +3867,25 @@ function MarkdownEditor({
         },
         '.cm-content': {
           padding: '22px 28px 48px',
-          caretColor: '#226b52'
+          caretColor: 'var(--accent)'
         },
         '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
-          backgroundColor: '#d7c6ff'
+          backgroundColor: 'var(--selection)'
         },
         '.cm-content ::selection': {
-          backgroundColor: '#d7c6ff'
+          backgroundColor: 'var(--selection)'
         },
         '.cm-gutters': {
-          backgroundColor: '#f6f4ef',
-          borderRight: '1px solid #ddd8cf',
-          color: '#948d82'
+          backgroundColor: 'var(--cm-gutter-bg)',
+          borderRight: '1px solid var(--cm-gutter-line)',
+          color: 'var(--cm-gutter-text)'
         },
         '.cm-activeLine': {
-          backgroundColor: '#ece8df'
+          backgroundColor: 'var(--cm-active-line)'
         },
         '.cm-activeLineGutter': {
-          backgroundColor: '#ece8df',
-          color: '#2d2a25'
+          backgroundColor: 'var(--cm-active-line)',
+          color: 'var(--cm-active-gutter-text)'
         },
         '&.cm-focused': {
           outline: 'none'
@@ -6788,6 +6822,16 @@ function readCanvasDocumentDisplayMode(): CanvasDocumentDisplayMode {
   } catch {
     return 'node'
   }
+}
+
+function readStoredTheme(): AppTheme {
+  try {
+    const stored = localStorage.getItem(THEME_KEY)
+    if (stored === 'bright' || stored === 'dark') return stored
+  } catch {
+    // Fall through to the original theme when storage is unavailable.
+  }
+  return 'classic'
 }
 
 function windowPlacementIsVisible(

@@ -26,6 +26,7 @@ The Markdown-centered workflow includes:
 - A nested file tree with filename filtering, pinned notes, and create, rename, and delete actions.
 - Fast non-indexed content search with file-filter scoping and jump-to-match highlighting.
 - Multiple tabs, a resizable two-file split view, recent files, and session/window restoration.
+- Classic, brighter high-contrast, and dark interface themes, selectable from **Options → Theme**.
 - A CodeMirror 6 Markdown editor with manual save, delayed autosave, undo/redo, Canadian-English spellcheck, word/character counts, list helpers, and URL linkification.
 - Filesystem watching, external-change warnings, and save-conflict checks.
 - Wiki links (`[[Note]]`), link completion, backlinks, callouts, and inline/block KaTeX math.

@@ -34,6 +34,16 @@ Treat delete as permanent unless you have independently confirmed recovery throu
 - Switch main tabs with `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+PageUp`, `Ctrl+PageDown`, `Ctrl+[`, or `Ctrl+]` (use `Cmd` where the platform maps it).
 - **File → Recent** reopens recently closed files. **Persist recent files** controls whether that history survives an app restart.
 
+## Appearance
+
+Choose an interface palette under **Options → Theme**:
+
+- **Classic** preserves Bricriu's original cream-and-green appearance.
+- **Bright contrast** keeps the editor light while using stronger borders, deeper green accents, darker surrounding chrome, and clearer surface separation.
+- **Dark** applies a dark palette across the app chrome, Markdown editor, preview, calendar, canvas, and Track Changes surfaces. Typst output remains paper-white because it represents the rendered document.
+
+The selected theme is stored locally and restored the next time Bricriu starts.
+
 ## Editing Markdown
 
 The Text view is a CodeMirror 6 source editor. Markdown remains visible and the saved file stays plain text.

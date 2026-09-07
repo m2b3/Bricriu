@@ -327,14 +327,14 @@ export function CanvasEditor({
           nodeBorderRadius={6}
           nodeColor={(node) => {
             const color = (node.data as CanvasNodeData).color
-            if (color === 'yellow') return '#fff4be'
-            if (color === 'blue') return '#dfeafa'
-            if (color === 'green') return '#dff1e7'
-            if (color === 'red') return '#f8dfdb'
-            return '#fffdf8'
+            if (color === 'yellow') return 'var(--canvas-node-yellow)'
+            if (color === 'blue') return 'var(--canvas-node-blue)'
+            if (color === 'green') return 'var(--canvas-node-green)'
+            if (color === 'red') return 'var(--canvas-node-red)'
+            return 'var(--canvas-node)'
           }}
-          nodeStrokeColor="#7c7468"
-          maskColor="rgba(244, 241, 234, 0.72)"
+          nodeStrokeColor="var(--canvas-node-stroke)"
+          maskColor="var(--canvas-mask)"
         />
         <Controls />
       </ReactFlow>
