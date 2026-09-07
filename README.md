@@ -16,9 +16,7 @@ Bricriu was vibe-coded with OpenAI Codex and then used and tested for roughly si
 > [!WARNING]
 > Only the ordinary Markdown workflow has received even modest real-world testing: approximately six months of use by **one person** in a Windows-oriented development environment. That is not broad or professional QA. Typst, Track Changes, Canvas, Calendar, Git automation, private-folder encryption, packaging, and all macOS/Linux behavior should be treated as **very experimental**.
 
-<!-- Before the first public release, add a sanitized image at docs/images/bricriu.png and uncomment:
 ![Bricriu showing a demo Markdown vault](docs/images/bricriu.png)
-Never capture a real personal vault for the repository screenshot. -->
 
 ## Features
 
