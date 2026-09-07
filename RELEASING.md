@@ -26,6 +26,7 @@ This project is not ready to publish merely because it builds. Use this checklis
 - [ ] Run `npm run build`.
 - [ ] Run `cargo check --manifest-path src-tauri/Cargo.toml`.
 - [ ] Run `cargo test --manifest-path src-tauri/Cargo.toml`.
+- [ ] On Windows x64, run `npm run build-exe` and confirm that the versioned NSIS installer is copied from `src-tauri/target/release/bundle/nsis/` to the repository root without modification.
 - [ ] Test a production build with a disposable vault containing representative Markdown syntax.
 - [ ] Test create, manual save, autosave, conflict handling, rename, delete, search, external changes, close/reopen, and recovery from backup.
 - [ ] Separately test every experimental feature claimed in the release notes.
@@ -38,6 +39,7 @@ This project is not ready to publish merely because it builds. Use this checklis
 - [ ] Install, upgrade, launch, edit, and uninstall on clean supported machines—not only development machines.
 - [ ] Add code signing/notarization where appropriate and document any remaining operating-system warnings.
 - [ ] Verify package icons, identifiers, permissions, WebView/runtime prerequisites, and artifact architecture.
+- [ ] Confirm the installer filename, file properties, and product version match `src-tauri/tauri.conf.json`, then update the versioned installer links in README and `install.md`.
 - [ ] Generate checksums and retain build provenance for published artifacts.
 - [ ] Label macOS and Linux artifacts **untested** unless they have actually completed the release test matrix.
 

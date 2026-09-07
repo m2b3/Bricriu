@@ -219,7 +219,7 @@ For compatibility with earlier development versions, these settings and the `.no
 - Search scans files and has no persistent content index.
 - Wiki-link resolution and backlinks are intentionally narrower than a full knowledge-base application.
 - The app has no built-in cloud sync or backup.
-- Packaging, signing, installer upgrades, and clean uninstallation are not release-tested.
+- An unsigned Windows x64 installer is available, but signing, upgrades, and clean uninstallation have not received broad release testing. macOS and Linux packages are not provided.
 - macOS and Linux are untested.
 - Accessibility, internationalization, and high-DPI/multi-monitor combinations need broader review.
 - The application icon is a generated Windows-oriented placeholder.

@@ -13,6 +13,7 @@
     "tauri:dev": "tauri dev",
     "build": "tsc && vite build",
     "build:analyze": "set ANALYZE=true&& npm run build",
+    "build-exe": "tauri build --bundles nsis && node scripts/copy-nsis-installer.mjs",
     "tauri:build": "tauri build",
     "notices": "node scripts/generate-third-party-notices.mjs"
   },

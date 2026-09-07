@@ -67,28 +67,43 @@ Bricriu (approximately **BRICK-roo**) is named for the eloquent troublemaker and
 
 ## Install
 
-No signed, notarized, broadly tested release installers are published yet. For now, build from source using the [installation and build guide](install.md).
+Bricriu now has an experimental installer for 64-bit Windows 10/11:
+
+**[Download `Bricriu_0.1.0_x64-setup.exe`](Bricriu_0.1.0_x64-setup.exe)**
+
+The installer is not code-signed, so Windows may identify the publisher as unknown or show a Microsoft Defender SmartScreen warning. Only continue if you obtained the file from this repository or its official Releases page. The installer and its upgrade/uninstall behavior have received very limited testing; Bricriu itself remains pre-release software. Back up your notes and begin with a disposable vault.
+
+Installing the Windows package does not require Node.js, npm, Rust, or Visual Studio Build Tools. Windows still needs the Microsoft Edge WebView2 Runtime, which is already present on most current Windows 10/11 systems. See the [installation and build guide](install.md) for step-by-step installation, uninstall, troubleshooting, and source-build instructions.
 
 | Platform | Current advice |
 | --- | --- |
-| Windows 10/11 | The development and limited single-user testing path. Requires Node.js 22.12.0 or newer, Rust, Microsoft C++ Build Tools, and WebView2 to build. A future unsigned installer may trigger Windows warnings. |
+| Windows 10/11 x64 | Use the experimental unsigned installer above. The app has only limited single-user testing, and Windows may show an unknown-publisher or reputation warning. |
 | macOS | **Untested.** Build on macOS with Xcode Command Line Tools. Packaging, icons, signing, notarization, and runtime behavior still need validation. |
 | Linux | **Untested.** Install the Tauri prerequisites for your distribution and build on Linux. WebKit/system-package requirements and generated packages still need validation. |
 
-Quick development start after installing the platform prerequisites:
+For development, install the platform prerequisites and run:
 
 ```sh
 npm ci
 npm run tauri:dev
 ```
 
-On Windows, after `npm ci` has installed the locked dependencies, build the app executable with:
+On Windows x64, build the installer from source with:
+
+```powershell
+npm ci
+npm run build-exe
+```
+
+This writes the Tauri-generated installer below `src-tauri\target\release\bundle\nsis\` and copies it to the repository root as `Bricriu_<version>_x64-setup.exe`. The version and product name come from `src-tauri\tauri.conf.json`.
+
+To build only the unpackaged application executable on Windows, use:
 
 ```powershell
 .\build-exe.bat
 ```
 
-`build-exe.bat` uses an installed Node.js 22.12.0-or-newer version for that build only. With NVM for Windows, it can find a suitable installed version even when an older Node version is active, and it does not persistently switch the active version. It does not install dependencies, so rerun `npm ci` after dependency-lock changes. The current Windows build has been verified with Node.js 22.14.0. It produces `src-tauri\target\release\Bricriu.exe`; this is the application executable, not an installer bundle.
+`build-exe.bat` uses an installed Node.js 22.12.0-or-newer version for that build only. With NVM for Windows, it can find a suitable installed version even when an older Node version is active, and it does not persistently switch the active version. It does not install dependencies, so rerun `npm ci` after dependency-lock changes. The current Windows build has been verified with Node.js 22.14.0. It produces `src-tauri\target\release\Bricriu.exe`, not an installer.
 
 The Markdown-It 15, KaTeX, and Tiptap 3 upgrades do not require a vault migration, a VS Code extension, or separately installed runtime plugins. Those libraries are bundled into Bricriu. Running the resulting executable does not require Node.js, npm, Rust, or the C++ build tools, although WebView2 and any feature-specific optional tools listed below are still runtime requirements.
 

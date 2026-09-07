@@ -1,31 +1,43 @@
 # Installation and Build Guide
 
-Bricriu does not yet publish signed, notarized, broadly tested binaries. The source-build instructions below are therefore the supported way to try it today.
+Bricriu provides an experimental NSIS installer for 64-bit Windows 10/11. It is unsigned and has not received broad install, upgrade, or uninstall testing. macOS and Linux packages are not currently provided; those platforms must be built from source and remain untested.
 
 > [!CAUTION]
 > Start with copied, disposable notes and keep an independent backup. Installing or successfully building the app does not make it production-safe.
 
-## Prebuilt releases (future)
+## Install on Windows 10/11 x64
 
-When release assets exist on GitHub, ordinary users should download the artifact for their operating system and CPU rather than install the development toolchain. A release must clearly state which platforms were actually built and tested.
+Download **[`Bricriu_0.1.0_x64-setup.exe`](Bricriu_0.1.0_x64-setup.exe)** from this repository. A copy may also be attached to an official GitHub release when one is published. Do not download the installer from an unrelated mirror or third-party download site.
 
-- **Windows:** use the Windows installer produced by Tauri. Until the project is code-signed, Windows may show an unknown-publisher or reputation warning. Verify that the file came from the repository's own Releases page before running it.
-- **macOS:** use a macOS artifact built on macOS for the correct architecture. The project is not currently signed or notarized, so no public macOS artifact should be represented as production-ready.
-- **Linux:** use the package matching the distribution when one is provided. Linux packaging and runtime compatibility have not been tested.
+1. Back up any notes you plan to open, then create a disposable test vault containing copies.
+2. Close an older running copy of Bricriu, if applicable.
+3. Run `Bricriu_0.1.0_x64-setup.exe` and follow the installer prompts.
+4. Because the installer is not code-signed, Windows may report an unknown publisher or show a Microsoft Defender SmartScreen warning. Continue only after confirming that the filename and download source are correct.
+5. Launch Bricriu, open the disposable vault, and complete the checks in [Verify before using real notes](#verify-before-using-real-notes).
 
-Node.js, Rust, and compiler toolchains are build requirements; they should not normally be needed just to run a packaged app. Git, Pandoc, and the Typst CLI remain optional runtime tools for particular features described below.
+The installed app does not require Node.js, npm, Rust, or Visual Studio Build Tools. It does require the Microsoft Edge WebView2 Runtime, which is included with most current Windows 10/11 installations. If Bricriu opens to a blank window or reports a WebView2 problem, follow the [WebView2 troubleshooting](#webview2-errors-on-windows) steps.
 
-## Platform support
+To upgrade, close Bricriu and run the installer for the newer version. Upgrade behavior is still lightly tested, so keep an independent backup and repeat the disposable-vault smoke test after upgrading.
 
-| Platform | Test status | Source-build prerequisites |
+To uninstall, close Bricriu and remove it from **Windows Settings → Apps → Installed apps**. Uninstalling the application is not a backup or vault-deletion workflow: verify your vault files independently before removing anything. Clean uninstallation has not been broadly tested.
+
+## macOS and Linux packages
+
+There are no prebuilt macOS or Linux packages yet. Build on the target operating system using the instructions below. macOS signing/notarization and Linux packaging/runtime compatibility have not been validated.
+
+Node.js, Rust, and compiler toolchains are source-build requirements; they are not normally needed just to run a packaged app. Git, Pandoc, and the Typst CLI remain optional runtime tools for particular features described below.
+
+## Source-build platform support
+
+| Platform | Package status | Source-build prerequisites |
 | --- | --- | --- |
-| Windows 10/11 | Limited six-month, single-user, Windows-oriented use | Node.js 22.12.0 or newer (current LTS recommended), Rust MSVC toolchain, Visual Studio C++ Build Tools, Windows SDK, WebView2 |
-| macOS | **Untested** | Node.js 22.12.0 or newer (current LTS recommended), Rust, Xcode Command Line Tools |
-| Linux | **Untested** | Node.js 22.12.0 or newer (current LTS recommended), Rust, and the current Tauri/WebKit system packages for the distribution |
+| Windows 10/11 x64 | Experimental unsigned NSIS installer; limited single-user app testing | Node.js 22.12.0 or newer (current LTS recommended), Rust MSVC toolchain, Visual Studio C++ Build Tools, Windows SDK, WebView2 |
+| macOS | No package; **untested** | Node.js 22.12.0 or newer (current LTS recommended), Rust, Xcode Command Line Tools |
+| Linux | No package; **untested** | Node.js 22.12.0 or newer (current LTS recommended), Rust, and the current Tauri/WebKit system packages for the distribution |
 
 Tauri's native prerequisites change by platform and distribution. Check the [official Tauri 2 prerequisites](https://v2.tauri.app/start/prerequisites/) in addition to this guide.
 
-## Windows prerequisites
+## Windows source-build prerequisites
 
 1. Install [Node.js](https://nodejs.org/) 22.12.0 or newer (the current LTS is recommended), which includes npm.
 2. Install Rust using [rustup](https://rustup.rs/). Use the default stable MSVC toolchain.
@@ -94,13 +106,21 @@ Build release bundles for the current operating system:
 npm run tauri:build
 ```
 
-On Windows, the repository also provides a convenient executable-only build:
+On Windows x64, build only the NSIS installer and copy it to the repository root:
+
+```powershell
+npm run build-exe
+```
+
+The Tauri output remains in `src-tauri\target\release\bundle\nsis\Bricriu_<version>_x64-setup.exe`, and the copy at the repository root uses the same filename. The copy script reads the product name and version from `src-tauri\tauri.conf.json`. Run `npm ci` first and again whenever `package-lock.json` changes.
+
+For a convenient executable-only Windows build:
 
 ```powershell
 .\build-exe.bat
 ```
 
-Run `npm ci` at least once before this command and again after `package-lock.json` changes; the batch file does not install dependencies. It looks for an installed Node.js 22.12.0-or-newer runtime, including versions installed under NVM for Windows, and uses it only inside the build process. It does not run `nvm use` or persistently change the Node version active in the parent terminal. The current Windows build has been verified with Node.js 22.14.0. The output is `src-tauri\target\release\Bricriu.exe`; because this path uses Tauri's `--no-bundle` option, it does not create an installer.
+Run `npm ci` at least once before this command and again after `package-lock.json` changes; the batch file does not install dependencies. It looks for an installed Node.js 22.12.0-or-newer runtime, including versions installed under NVM for Windows, and uses it only inside the build process. It does not run `nvm use` or persistently change the Node version active in the parent terminal. The current Windows build has been verified with Node.js 22.14.0. The output is `src-tauri\target\release\Bricriu.exe`; because this path uses Tauri's `--no-bundle` option, it does not create an installer. Use `npm run build-exe` when you need the installer.
 
 Build a debug bundle:
 
