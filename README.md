@@ -70,7 +70,7 @@ No signed, notarized, broadly tested release installers are published yet. For n
 
 | Platform | Current advice |
 | --- | --- |
-| Windows 10/11 | The development and limited single-user testing path. Requires Node.js 22 or newer, Rust, Microsoft C++ Build Tools, and WebView2 to build. A future unsigned installer may trigger Windows warnings. |
+| Windows 10/11 | The development and limited single-user testing path. Requires Node.js 22.12.0 or newer, Rust, Microsoft C++ Build Tools, and WebView2 to build. A future unsigned installer may trigger Windows warnings. |
 | macOS | **Untested.** Build on macOS with Xcode Command Line Tools. Packaging, icons, signing, notarization, and runtime behavior still need validation. |
 | Linux | **Untested.** Install the Tauri prerequisites for your distribution and build on Linux. WebKit/system-package requirements and generated packages still need validation. |
 
@@ -87,7 +87,7 @@ On Windows, after `npm ci` has installed the locked dependencies, build the app 
 .\build-exe.bat
 ```
 
-`build-exe.bat` uses an installed Node.js 22-or-newer version for that build only. With NVM for Windows, it can find a suitable installed version even when an older Node version is active, and it does not persistently switch the active version. It does not install dependencies, so rerun `npm ci` after dependency-lock changes. The current Windows build has been verified with Node.js 22.14.0. It produces `src-tauri\target\release\Bricriu.exe`; this is the application executable, not an installer bundle.
+`build-exe.bat` uses an installed Node.js 22.12.0-or-newer version for that build only. With NVM for Windows, it can find a suitable installed version even when an older Node version is active, and it does not persistently switch the active version. It does not install dependencies, so rerun `npm ci` after dependency-lock changes. The current Windows build has been verified with Node.js 22.14.0. It produces `src-tauri\target\release\Bricriu.exe`; this is the application executable, not an installer bundle.
 
 The Markdown-It 15, KaTeX, and Tiptap 3 upgrades do not require a vault migration, a VS Code extension, or separately installed runtime plugins. Those libraries are bundled into Bricriu. Running the resulting executable does not require Node.js, npm, Rust, or the C++ build tools, although WebView2 and any feature-specific optional tools listed below are still runtime requirements.
 
@@ -132,7 +132,7 @@ Read the [user guide](USER_GUIDE.md) before enabling Git automation or private n
 - **Frontend:** React 18, TypeScript, Vite
 - **Text editor:** CodeMirror 6
 - **Native backend:** Rust
-- **Markdown:** Markdown-It 15 with `@mdit/plugin-katex` 1, KaTeX 0.18, and CodeMirror Markdown language support
+- **Markdown:** Markdown-It 15 with `@mdit/plugin-katex` 1, KaTeX 0.18.7, and CodeMirror Markdown language support
 - **Rich review mode:** Tiptap 3 and ProseMirror
 - **Canvas:** React Flow and YAML
 - **Calendar:** FullCalendar

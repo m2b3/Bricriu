@@ -4,25 +4,31 @@ cd /d "%~dp0"
 
 set "BUILD_NODE_DIR="
 set "ACTIVE_NODE_MAJOR="
+set "ACTIVE_NODE_MINOR="
 
-for /f "delims=" %%M in ('node -p "process.versions.node.split('.')[0]" 2^>nul') do set "ACTIVE_NODE_MAJOR=%%M"
+for /f "tokens=1,2 delims=." %%M in ('node -p "process.versions.node" 2^>nul') do (
+    set "ACTIVE_NODE_MAJOR=%%M"
+    set "ACTIVE_NODE_MINOR=%%N"
+)
 
-if defined ACTIVE_NODE_MAJOR if !ACTIVE_NODE_MAJOR! GEQ 22 (
-    for %%N in (node.exe) do set "BUILD_NODE_DIR=%%~dp$PATH:N"
+if defined ACTIVE_NODE_MAJOR (
+    if !ACTIVE_NODE_MAJOR! GTR 22 for %%N in (node.exe) do set "BUILD_NODE_DIR=%%~dp$PATH:N"
+    if !ACTIVE_NODE_MAJOR! EQU 22 if !ACTIVE_NODE_MINOR! GEQ 12 for %%N in (node.exe) do set "BUILD_NODE_DIR=%%~dp$PATH:N"
 )
 
 if not defined BUILD_NODE_DIR if defined NVM_HOME (
     for /d %%D in ("%NVM_HOME%\v*") do (
         set "CANDIDATE_VERSION=%%~nxD"
         set "CANDIDATE_VERSION=!CANDIDATE_VERSION:~1!"
-        for /f "tokens=1 delims=." %%M in ("!CANDIDATE_VERSION!") do (
-            if %%M GEQ 22 if exist "%%~fD\node.exe" set "BUILD_NODE_DIR=%%~fD"
+        for /f "tokens=1,2 delims=." %%M in ("!CANDIDATE_VERSION!") do (
+            if %%M GTR 22 if exist "%%~fD\node.exe" set "BUILD_NODE_DIR=%%~fD"
+            if %%M EQU 22 if %%N GEQ 12 if exist "%%~fD\node.exe" set "BUILD_NODE_DIR=%%~fD"
         )
     )
 )
 
 if not defined BUILD_NODE_DIR (
-    echo Bricriu requires Node.js 22 or newer to build.
+    echo Bricriu requires Node.js 22.12.0 or newer to build.
     echo Install a supported Node version with NVM for Windows, then try again.
     echo The active system Node version was not changed.
     exit /b 1

@@ -213,7 +213,7 @@ npm run notices
 | [codemirror-lang-typst](https://www.npmjs.com/package/codemirror-lang-typst) | 0.4.0 | Apache-2.0 | vendored/local |
 | [color-convert](https://www.npmjs.com/package/color-convert) | 2.0.1 | MIT | development/build |
 | [color-name](https://www.npmjs.com/package/color-name) | 1.1.4 | MIT | development/build |
-| [commander](https://www.npmjs.com/package/commander) | 8.3.0 | MIT | application |
+| [commander](https://www.npmjs.com/package/commander) | 15.0.0 | MIT | application |
 | [convert-source-map](https://www.npmjs.com/package/convert-source-map) | 2.0.0 | MIT | development/build |
 | [crelt](https://www.npmjs.com/package/crelt) | 1.0.6 | MIT | application |
 | [csstype](https://www.npmjs.com/package/csstype) | 3.2.3 | MIT | application |
@@ -246,7 +246,7 @@ npm run notices
 | [js-tokens](https://www.npmjs.com/package/js-tokens) | 4.0.0 | MIT | application |
 | [jsesc](https://www.npmjs.com/package/jsesc) | 3.1.0 | MIT | development/build |
 | [json5](https://www.npmjs.com/package/json5) | 2.2.3 | MIT | development/build |
-| [katex](https://www.npmjs.com/package/katex) | 0.18.4 | MIT | application |
+| [katex](https://www.npmjs.com/package/katex) | 0.18.7 | MIT | application |
 | [linkify-it](https://www.npmjs.com/package/linkify-it) | 6.1.0 | MIT | application |
 | [linkifyjs](https://www.npmjs.com/package/linkifyjs) | 4.3.3 | MIT | application |
 | [loose-envify](https://www.npmjs.com/package/loose-envify) | 1.4.0 | MIT | application |
