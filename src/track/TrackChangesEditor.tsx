@@ -77,9 +77,18 @@ export function TrackChangesEditor({
   }, [state])
 
   const editor = useEditor({
-    extensions: [StarterKit, BlockIdExtension, ReviewDecorationsExtension],
+    extensions: [
+      StarterKit.configure({
+        link: false,
+        listKeymap: false,
+        underline: false
+      }),
+      BlockIdExtension,
+      ReviewDecorationsExtension
+    ],
     content: state.currentDoc,
     editable: !disabled,
+    shouldRerenderOnTransaction: true,
     editorProps: {
       attributes: {
         class: 'track-editor-surface'
@@ -108,7 +117,7 @@ export function TrackChangesEditor({
     if (!editor) return
     const current = JSON.stringify(assignMissingBlockIds(editor.getJSON()))
     const next = JSON.stringify(assignMissingBlockIds(state.currentDoc))
-    if (current !== next) editor.commands.setContent(state.currentDoc)
+    if (current !== next) editor.commands.setContent(state.currentDoc, { emitUpdate: false })
   }, [editor, state.currentDoc])
 
   useEffect(() => {
