@@ -1,7 +1,9 @@
+import { collectMarkdownHeadings } from '../markdown/headings'
 import { resolveWikiDocumentPath } from '../wikiPaths'
 
 export function renderCanvasMarkdown(source: string, notePaths: string[] = [], sourcePath: string | null = null): string {
   const lines = source.replace(/\r\n/g, '\n').split('\n')
+  const headingsByLine = new Map(collectMarkdownHeadings(source).map((heading) => [heading.line, heading]))
   const html: string[] = []
   let listItems: string[] = []
 
@@ -11,18 +13,19 @@ export function renderCanvasMarkdown(source: string, notePaths: string[] = [], s
     listItems = []
   }
 
-  for (const line of lines) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex]
     const trimmed = line.trim()
     if (!trimmed) {
       flushList()
       continue
     }
 
-    const heading = trimmed.match(/^(#{1,3})\s+(.+)$/)
+    const heading = headingsByLine.get(lineIndex)
     if (heading) {
       flushList()
-      const level = heading[1].length
-      html.push(`<h${level}>${renderInlineCanvasMarkdown(heading[2], notePaths, sourcePath)}</h${level}>`)
+      html.push(`<h${heading.level} id="${escapeHtml(heading.slug)}">${renderInlineCanvasMarkdown(heading.markup, notePaths, sourcePath)}</h${heading.level}>`)
+      if (heading.style === 'setext') lineIndex = heading.endLine
       continue
     }
 
@@ -42,6 +45,7 @@ export function renderCanvasMarkdown(source: string, notePaths: string[] = [], s
 
 function renderInlineCanvasMarkdown(source: string, notePaths: string[], sourcePath: string | null): string {
   return renderWikiLinks(escapeHtml(source), notePaths, sourcePath)
+    .replace(/\[([^\]\n]+)\]\((#[^\s)]+)\)/g, '<a class="canvas-heading-anchor" href="$2">$1</a>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/\*([^*]+)\*/g, '<em>$1</em>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
@@ -49,9 +53,10 @@ function renderInlineCanvasMarkdown(source: string, notePaths: string[], sourceP
 
 function renderWikiLinks(source: string, notePaths: string[], sourcePath: string | null): string {
   return source.replace(
-    /\[\[([^\]\n|#]+)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g,
+    /\[\[([^\]\n|#]*)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g,
     (_match, rawLabel: string, rawAnchor: string | undefined, rawAlias: string | undefined) => {
       const label = unescapeHtml(rawLabel).trim()
+      if (!label && !rawAnchor) return _match
       const target = resolveWikiPath(label, notePaths, sourcePath)
       const text = wikiDisplayText(label, rawAnchor, rawAlias)
       if (!target) return `<span class="canvas-wiki missing">${text}</span>`
@@ -61,7 +66,7 @@ function renderWikiLinks(source: string, notePaths: string[], sourcePath: string
 }
 
 function resolveWikiPath(label: string, notePaths: string[], sourcePath: string | null = null): string | null {
-  return resolveWikiDocumentPath(label, notePaths, sourcePath)
+  return label.trim() ? resolveWikiDocumentPath(label, notePaths, sourcePath) : sourcePath
 }
 
 function wikiDisplayText(label: string, rawAnchor: string | undefined, rawAlias: string | undefined): string {

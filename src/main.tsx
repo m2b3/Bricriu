@@ -47,6 +47,7 @@ import { searchKeymap } from '@codemirror/search'
 import katex from 'katex'
 import { renderCanvasMarkdown } from './canvas/canvasMarkdown'
 import { escapeColorSpanText, findColorSpans, isSafeEditorColor } from './markdown/colorMarkup'
+import { collectMarkdownHeadings, findHeadingOffset, slugifyHeading } from './markdown/headings'
 import { markdownToTiptap } from './track/markdown'
 import { resolveWikiDocumentPath } from './wikiPaths'
 import type { CalendarEvent } from './calendar/CalendarView'
@@ -3090,6 +3091,7 @@ function App(): JSX.Element {
                 <React.Suspense fallback={<EditorLoading label="Loading Canvas..." />}>
                   <CanvasEditor
                     tabId={mainTab.id}
+                    sourcePath={mainTab.path}
                     body={mainTab.body}
                     disabled={!mainTab}
                     documentDisplayMode={canvasDocumentDisplayMode}
@@ -3196,6 +3198,7 @@ function App(): JSX.Element {
                   <React.Suspense fallback={<EditorLoading label="Loading Canvas..." />}>
                     <CanvasEditor
                       tabId={splitTab.id}
+                      sourcePath={splitTab.path}
                       body={splitTab.body}
                       disabled={!splitTab}
                       documentDisplayMode={canvasDocumentDisplayMode}
@@ -4494,6 +4497,15 @@ function noteMarkdownTools(
           return true
         }
 
+        if (target?.closest('.cm-heading-anchor')) {
+          const heading = headingAnchorAt(view.state, pos)
+          const sourcePath = sourcePathRef.current
+          if (!heading || !sourcePath) return false
+          event.preventDefault()
+          onOpenWikiLinkRef.current(formatWikiDestination(sourcePath, heading))
+          return true
+        }
+
         if (!target?.closest('.cm-wiki-link')) return false
         const link = wikiLinkAt(view.state, pos, notePathsRef.current, sourcePathRef.current)
         if (!link) return false
@@ -4519,8 +4531,14 @@ function noteMarkdownTools(
         key: 'Mod-Enter',
         run(view) {
           const link = wikiLinkAt(view.state, view.state.selection.main.head, notePathsRef.current, sourcePathRef.current)
-          if (!link) return false
-          onOpenWikiLinkRef.current(link.destination)
+          if (link) {
+            onOpenWikiLinkRef.current(link.destination)
+            return true
+          }
+          const heading = headingAnchorAt(view.state, view.state.selection.main.head)
+          const sourcePath = sourcePathRef.current
+          if (!heading || !sourcePath) return false
+          onOpenWikiLinkRef.current(formatWikiDestination(sourcePath, heading))
           return true
         }
       }
@@ -4560,6 +4578,7 @@ function buildNoteDecorations(
     ? findCanvasBlockRanges(doc.toString(), view.visibleRanges)
     : []
   const markdownExternalLinks = findMarkdownExternalLinks(fullText)
+  const markdownHeadingLinks = findMarkdownHeadingLinks(fullText)
   const rawExternalLinks = findRawHttpUrls(fullText).filter((url) => (
     !markdownExternalLinks.some((link) => url.from >= link.from && url.to <= link.to)
   ))
@@ -4632,6 +4651,23 @@ function buildNoteDecorations(
     })
   }
 
+  for (const link of markdownHeadingLinks) {
+    if (rangesOverlapAny(link.from, link.to, canvasBlockRanges)) continue
+    if (!view.visibleRanges.some((range) => link.from <= range.to && link.to >= range.from)) continue
+    if (!showRawMarkdown) {
+      ranges.push({ from: link.from, to: link.textFrom, decoration: Decoration.replace({}) })
+      ranges.push({ from: link.textTo, to: link.to, decoration: Decoration.replace({}) })
+    }
+    ranges.push({
+      from: showRawMarkdown ? link.from : link.textFrom,
+      to: showRawMarkdown ? link.to : link.textTo,
+      decoration: Decoration.mark({
+        class: 'cm-heading-anchor',
+        attributes: { title: `Ctrl+click to jump to ${link.destination}` }
+      })
+    })
+  }
+
   for (const url of rawExternalLinks) {
     if (rangesOverlapAny(url.from, url.to, canvasBlockRanges)) continue
     if (!view.visibleRanges.some((range) => url.from <= range.to && url.to >= range.from)) continue
@@ -4662,9 +4698,10 @@ function buildNoteDecorations(
         }) })
       }
 
-      for (const match of text.matchAll(/\[\[([^\]\n|#]+)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g)) {
+      for (const match of text.matchAll(/\[\[([^\]\n|#]*)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g)) {
         const label = match[1].trim()
         const heading = match[2]?.slice(1).trim()
+        if (!label && !heading) continue
         const start = line.from + (match.index ?? 0)
         const end = start + match[0].length
         const linkStart = start + 2
@@ -5045,8 +5082,26 @@ type MarkdownExternalLinkSpan = ExternalUrlSpan & {
   textTo: number
 }
 
+type MarkdownLinkSpan = {
+  from: number
+  to: number
+  textFrom: number
+  textTo: number
+  destination: string
+}
+
 function findMarkdownExternalLinks(text: string): MarkdownExternalLinkSpan[] {
-  const links: MarkdownExternalLinkSpan[] = []
+  return findMarkdownLinks(text)
+    .filter((link) => isHttpUrl(link.destination))
+    .map((link) => ({ ...link, url: link.destination }))
+}
+
+function findMarkdownHeadingLinks(text: string): MarkdownLinkSpan[] {
+  return findMarkdownLinks(text).filter((link) => /^#[^#]/.test(link.destination))
+}
+
+function findMarkdownLinks(text: string): MarkdownLinkSpan[] {
+  const links: MarkdownLinkSpan[] = []
   const opener = /\[([^\]\n]+)\]\(/g
   let match: RegExpExecArray | null
 
@@ -5079,7 +5134,7 @@ function findMarkdownExternalLinks(text: string): MarkdownExternalLinkSpan[] {
 
     if (depth !== 0) continue
     const destination = text.slice(destinationFrom, cursor).trim()
-    if (/\s/.test(destination) || !isHttpUrl(destination)) {
+    if (/\s/.test(destination)) {
       opener.lastIndex = cursor + 1
       continue
     }
@@ -5088,7 +5143,7 @@ function findMarkdownExternalLinks(text: string): MarkdownExternalLinkSpan[] {
       to: cursor + 1,
       textFrom,
       textTo,
-      url: destination
+      destination
     })
     opener.lastIndex = cursor + 1
   }
@@ -5375,6 +5430,12 @@ function findConcealedMarkdownSpans(view: EditorView): ConcealedMarkdownSpan[] {
       textFrom: span.textFrom,
       textTo: span.textTo
     })),
+    ...findMarkdownHeadingLinks(text).map((span) => ({
+      from: span.from,
+      to: span.to,
+      textFrom: span.textFrom,
+      textTo: span.textTo
+    })),
     ...findWikiLinkSpans(view)
   ]
 
@@ -5389,7 +5450,8 @@ function findWikiLinkSpans(view: EditorView): ConcealedMarkdownSpan[] {
     while (pos <= to) {
       const line = doc.lineAt(pos)
       if (line.from >= to) break
-      for (const match of line.text.matchAll(/\[\[([^\]\n|#]+)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g)) {
+      for (const match of line.text.matchAll(/\[\[([^\]\n|#]*)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g)) {
+        if (!match[1].trim() && !match[2]) continue
         const start = line.from + (match.index ?? 0)
         const end = start + match[0].length
         const displayRange = wikiLinkDisplayRange(start, match)
@@ -5422,12 +5484,16 @@ function wikiCompletionSource(
     if (hashIndex >= 0) {
       const label = source.slice(0, hashIndex).trim()
       const headingQuery = source.slice(hashIndex + 1)
-      if (!label || headingQuery.includes('|')) return null
+      if (headingQuery.includes('|')) return null
 
-      const target = resolveWikiPath(label, notePaths, sourcePathRef.current)
+      const target = label
+        ? resolveWikiPath(label, notePaths, sourcePathRef.current)
+        : sourcePathRef.current
       if (!target) return null
 
-      const body = await onLoadWikiCompletionBodyRef.current(target)
+      const body = label
+        ? await onLoadWikiCompletionBodyRef.current(target)
+        : context.state.doc.toString()
       if (body == null) return null
 
       const needle = headingQuery.trim().toLowerCase()
@@ -5436,9 +5502,11 @@ function wikiCompletionSource(
         .slice(0, 40)
         .map((heading) => ({
           label: heading.text,
-          detail: `${target} H${heading.level}`,
+          detail: `${target} H${heading.level} · #${heading.slug}`,
           type: 'text',
-          apply: `${heading.text}]]`
+          apply: heading.slug === slugifyHeading(heading.text)
+            ? `${heading.text}]]`
+            : `${heading.slug}|${heading.text}]]`
         }))
 
       return {
@@ -5466,23 +5534,6 @@ function wikiCompletionSource(
   }
 }
 
-function collectMarkdownHeadings(markdown: string): Array<{ text: string; level: number; searchText: string }> {
-  return markdown
-    .replace(/\r\n/g, '\n')
-    .split('\n')
-    .flatMap((line) => {
-      const match = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/)
-      if (!match) return []
-      const text = stripMarkdownInlineSyntax(match[2])
-      if (!text) return []
-      return [{
-        text,
-        level: match[1].length,
-        searchText: `${text} ${slugifyHeading(text)}`.toLowerCase()
-      }]
-    })
-}
-
 function wikiLinkAt(
   state: EditorState,
   pos: number,
@@ -5490,7 +5541,8 @@ function wikiLinkAt(
   sourcePath: string | null
 ): { destination: string; from: number; to: number } | null {
   const line = state.doc.lineAt(pos)
-  for (const match of line.text.matchAll(/\[\[([^\]\n|#]+)(#[^\]\n|]+)?(?:\|[^\]\n]+)?\]\]/g)) {
+  for (const match of line.text.matchAll(/\[\[([^\]\n|#]*)(#[^\]\n|]+)?(?:\|[^\]\n]+)?\]\]/g)) {
+    if (!match[1].trim() && !match[2]) continue
     const from = line.from + (match.index ?? 0)
     const to = from + match[0].length
     if (pos < from || pos > to) continue
@@ -5538,51 +5590,14 @@ function resolveNoteJumpOffset(body: string, heading: string | null, fallbackOff
   return findHeadingOffset(body, heading)
 }
 
-function findHeadingOffset(markdown: string, target: string): number | null {
-  const targetKey = normalizeHeadingKey(target)
-  const targetSlug = slugifyHeading(target)
-  let offset = 0
-  const lineRegex = /([^\r\n]*)(\r\n|\r|\n|$)/g
-  let lineMatch: RegExpExecArray | null
-  while ((lineMatch = lineRegex.exec(markdown))) {
-    const line = lineMatch[1]
-    const match = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/)
-    if (match) {
-      const headingText = stripMarkdownInlineSyntax(match[2])
-      if (normalizeHeadingKey(headingText) === targetKey || slugifyHeading(headingText) === targetSlug) {
-        return offset + line.search(/\S|$/)
-      }
-    }
-    offset += line.length + lineMatch[2].length
-    if (!lineMatch[2]) break
-  }
-  return null
-}
-
-function normalizeHeadingKey(value: string): string {
-  return stripMarkdownInlineSyntax(value)
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase()
-}
-
-function slugifyHeading(value: string): string {
-  return normalizeHeadingKey(value)
-    .replace(/[^\p{L}\p{N}\s-]/gu, '')
-    .replace(/\s+/g, '-')
-}
-
-function stripMarkdownInlineSyntax(value: string): string {
-  return value
-    .replace(/\\([\\`*_[\]#])/g, '$1')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/[*_~]+/g, '')
-    .trim()
-}
-
 function resolveWikiPath(label: string, notePaths: string[], sourcePath: string | null = null): string | null {
-  return resolveWikiDocumentPath(label, notePaths, sourcePath)
+  return label.trim() ? resolveWikiDocumentPath(label, notePaths, sourcePath) : sourcePath
+}
+
+function headingAnchorAt(state: EditorState, position: number): string | null {
+  return findMarkdownHeadingLinks(state.doc.toString()).find((link) => (
+    position >= link.from && position <= link.to
+  ))?.destination.slice(1) ?? null
 }
 
 function wikiSearchText(path: string): string {

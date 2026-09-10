@@ -2,6 +2,7 @@ import { ClipboardEvent, useCallback, useMemo } from 'react'
 import { katex as markdownItKatex } from '@mdit/plugin-katex'
 import MarkdownIt from 'markdown-it'
 import { escapeColorSpanText, findColorSpans, type ColorMarkupSpan } from '../markdown/colorMarkup'
+import { collectMarkdownHeadings, uniqueHeadingSlug } from '../markdown/headings'
 import { isExplicitDocumentPath, resolveWikiDocumentPath } from '../wikiPaths'
 
 const markdownRenderer = MarkdownIt({
@@ -18,6 +19,22 @@ const markdownRenderer = MarkdownIt({
 })
 
 markdownRenderer.linkify.set({ fuzzyLink: true })
+
+markdownRenderer.core.ruler.after('inline', 'heading_anchors', (state) => {
+  const anchorsByLine = (state.env as { headingAnchorsByLine?: Record<number, string> }).headingAnchorsByLine ?? {}
+  const usedSlugs = new Set<string>()
+
+  for (let index = 0; index < state.tokens.length; index += 1) {
+    const token = state.tokens[index]
+    if (token.type !== 'heading_open') continue
+    const preferredSlug = token.map ? anchorsByLine[token.map[0]] : undefined
+    const inlineText = state.tokens[index + 1]?.type === 'inline' ? state.tokens[index + 1].content : 'section'
+    let slug = preferredSlug
+    if (!slug || usedSlugs.has(slug)) slug = uniqueHeadingSlug(slug || inlineText, usedSlugs)
+    else usedSlugs.add(slug)
+    token.attrSet('id', slug)
+  }
+})
 
 export function MarkdownPreview({
   body,
@@ -65,6 +82,17 @@ export function MarkdownPreview({
       onCopy={handleCopy}
       onClick={(event) => {
         const target = event.target as HTMLElement | null
+        const headingAnchor = target?.closest('a[href^="#"]') as HTMLAnchorElement | null
+        if (headingAnchor) {
+          const headingId = decodeFragment(headingAnchor.getAttribute('href')?.slice(1) ?? '')
+          const heading = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[id]'))
+            .find((element) => element.id === headingId)
+          if (heading) {
+            event.preventDefault()
+            heading.scrollIntoView({ block: 'start' })
+          }
+          return
+        }
         const link = target?.closest('a.preview-wiki') as HTMLAnchorElement | null
         if (!link) return
         const href = link.getAttribute('href') ?? ''
@@ -183,7 +211,10 @@ function listItemsMarkdown(node: HTMLElement, ordered: boolean): string {
 export function renderMarkdownPreview(markdown: string, notePaths: string[], sourcePath: string | null = null): string {
   const snippets: string[] = []
   const prepared = preprocessPreviewMarkdown(markdown, notePaths, sourcePath, snippets)
-  return markdownRenderer.render(prepared)
+  const headingAnchorsByLine = Object.fromEntries(
+    collectMarkdownHeadings(markdown).map((heading) => [heading.line, heading.slug])
+  )
+  return markdownRenderer.render(prepared, { headingAnchorsByLine })
     .replace(/<p>@@NZHTML(\d+)@@<\/p>/g, (_match, index: string) => snippets[Number(index)] ?? '')
     .replace(/@@NZHTML(\d+)@@/g, (_match, index: string) => snippets[Number(index)] ?? '')
 }
@@ -414,9 +445,10 @@ function isCalloutOpenPlaceholder(line: string | undefined, snippets: string[]):
 function renderInlinePreviewSyntax(line: string, notePaths: string[], sourcePath: string | null, snippets: string[]): string {
   return mapOutsideInlineCode(line, (source) => {
     return source.replace(
-      /\[\[([^\]\n|#]+)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g,
+      /\[\[([^\]\n|#]*)(#[^\]\n|]+)?(?:\|([^\]\n]+))?\]\]/g,
       (match: string, rawLabel: string, rawAnchor: string | undefined, rawAlias: string | undefined) => {
         const label = rawLabel.trim()
+        if (!label && !rawAnchor) return match
         const target = resolveWikiPath(label, notePaths, sourcePath)
         const text = wikiDisplayText(label, rawAnchor, rawAlias)
         const wikiMarkdown = escapeHtml(match)
@@ -463,7 +495,7 @@ function escapeHtml(value: string): string {
 }
 
 function resolveWikiPath(label: string, notePaths: string[], sourcePath: string | null = null): string | null {
-  return resolveWikiDocumentPath(label, notePaths, sourcePath)
+  return label.trim() ? resolveWikiDocumentPath(label, notePaths, sourcePath) : sourcePath
 }
 
 function wikiDisplayText(label: string, rawAnchor: string | undefined, rawAlias: string | undefined): string {
@@ -484,5 +516,13 @@ function splitWikiDestination(destination: string): { path: string; heading: str
   return {
     path: destination.slice(0, hashIndex),
     heading: heading || null
+  }
+}
+
+function decodeFragment(fragment: string): string {
+  try {
+    return decodeURIComponent(fragment)
+  } catch {
+    return fragment
   }
 }

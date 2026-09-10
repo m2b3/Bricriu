@@ -55,6 +55,7 @@ type EditingNode = {
 
 export function CanvasEditor({
   tabId,
+  sourcePath,
   body,
   disabled,
   documentDisplayMode,
@@ -63,6 +64,7 @@ export function CanvasEditor({
   onOpenWikiLink
 }: {
   tabId: string | null
+  sourcePath: string | null
   body: string
   disabled: boolean
   documentDisplayMode: DocumentDisplayMode
@@ -122,6 +124,7 @@ export function CanvasEditor({
             color: 'neutral',
             readonly: true,
             notePaths,
+            sourcePath,
             onOpenWikiLink
           }
         }]
@@ -141,6 +144,7 @@ export function CanvasEditor({
         shape: node.shape ?? 'box',
         color: node.color ?? 'neutral',
         notePaths,
+        sourcePath,
         onResize: onResizeNode,
         onOpenWikiLink
       }
@@ -153,7 +157,7 @@ export function CanvasEditor({
       label: edge.label,
       animated: false
     })))
-  }, [canvasDocument, documentMarkdown, notePaths, onOpenWikiLink, onResizeNode, showDocumentNode])
+  }, [canvasDocument, documentMarkdown, notePaths, onOpenWikiLink, onResizeNode, showDocumentNode, sourcePath])
 
   useEffect(() => {
     if (selectedNodeId === documentNodeId && !showDocumentNode) {
@@ -266,15 +270,21 @@ export function CanvasEditor({
 
   const openRenderedWikiLink = useCallback((event: MouseEvent<HTMLElement>) => {
     const target = event.target instanceof HTMLElement
-      ? event.target.closest('a.canvas-wiki') as HTMLAnchorElement | null
+      ? event.target.closest('a.canvas-wiki, a.canvas-heading-anchor') as HTMLAnchorElement | null
       : null
     const href = target?.getAttribute('href')
-    if (!href?.startsWith('notesproject-wiki:')) return
+    if (!href) return
 
-    event.preventDefault()
-    event.stopPropagation()
-    onOpenWikiLink(decodeURIComponent(href.slice('notesproject-wiki:'.length)))
-  }, [onOpenWikiLink])
+    if (href.startsWith('notesproject-wiki:')) {
+      event.preventDefault()
+      event.stopPropagation()
+      onOpenWikiLink(decodeURIComponent(href.slice('notesproject-wiki:'.length)))
+    } else if (href.startsWith('#') && sourcePath) {
+      event.preventDefault()
+      event.stopPropagation()
+      onOpenWikiLink(`${sourcePath}${href}`)
+    }
+  }, [onOpenWikiLink, sourcePath])
 
   if (disabled) {
     return (
@@ -361,7 +371,7 @@ export function CanvasEditor({
           <div
             className="canvas-document-panel-content"
             onClick={openRenderedWikiLink}
-            dangerouslySetInnerHTML={{ __html: renderCanvasMarkdown(documentMarkdown, notePaths) }}
+            dangerouslySetInnerHTML={{ __html: renderCanvasMarkdown(documentMarkdown, notePaths, sourcePath) }}
           />
         </aside>
       )}
@@ -396,7 +406,7 @@ export function CanvasEditor({
             <div
               className="canvas-text-popover-preview"
               onClick={openRenderedWikiLink}
-              dangerouslySetInnerHTML={{ __html: renderCanvasMarkdown(editingNode.text || 'Empty block', notePaths) }}
+              dangerouslySetInnerHTML={{ __html: renderCanvasMarkdown(editingNode.text || 'Empty block', notePaths, sourcePath) }}
             />
           </div>
           <div className="canvas-text-popover-actions">

@@ -7,6 +7,7 @@ export type CanvasNodeData = {
   color: string
   readonly?: boolean
   notePaths?: string[]
+  sourcePath?: string | null
   onResize?: (id: string, size: { width: number; height: number }) => void
   onOpenWikiLink?: (path: string) => void
 }
@@ -40,16 +41,22 @@ export function CanvasNode({ id, data, selected }: NodeProps): JSX.Element {
           className="canvas-node-text"
           onClick={(event) => {
             const target = event.target instanceof HTMLElement
-              ? event.target.closest('a.canvas-wiki') as HTMLAnchorElement | null
+              ? event.target.closest('a.canvas-wiki, a.canvas-heading-anchor') as HTMLAnchorElement | null
               : null
             const href = target?.getAttribute('href')
-            if (!href?.startsWith('notesproject-wiki:')) return
+            if (!href) return
 
-            event.preventDefault()
-            event.stopPropagation()
-            nodeData.onOpenWikiLink?.(decodeURIComponent(href.slice('notesproject-wiki:'.length)))
+            if (href.startsWith('notesproject-wiki:')) {
+              event.preventDefault()
+              event.stopPropagation()
+              nodeData.onOpenWikiLink?.(decodeURIComponent(href.slice('notesproject-wiki:'.length)))
+            } else if (href.startsWith('#') && nodeData.sourcePath) {
+              event.preventDefault()
+              event.stopPropagation()
+              nodeData.onOpenWikiLink?.(`${nodeData.sourcePath}${href}`)
+            }
           }}
-          dangerouslySetInnerHTML={{ __html: renderCanvasMarkdown(nodeData.text || 'Empty block', nodeData.notePaths ?? []) }}
+          dangerouslySetInnerHTML={{ __html: renderCanvasMarkdown(nodeData.text || 'Empty block', nodeData.notePaths ?? [], nodeData.sourcePath) }}
         />
       </div>
     </>

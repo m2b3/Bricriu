@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "vite",
+    "test": "node --import ./tests/register-typescript.mjs --test tests/headingAnchors.test.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "build": "tsc && vite build",

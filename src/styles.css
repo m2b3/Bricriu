@@ -2057,14 +2057,16 @@ input:focus {
   background: color-mix(in srgb, var(--accent-2) 10%, transparent);
 }
 
-.cm-external-link {
+.cm-external-link,
+.cm-heading-anchor {
   color: var(--link);
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, var(--link) 45%, transparent);
   text-underline-offset: 2px;
 }
 
-.cm-external-link:hover {
+.cm-external-link:hover,
+.cm-heading-anchor:hover {
   background: color-mix(in srgb, var(--accent-2) 10%, transparent);
   text-decoration-color: currentColor;
 }
@@ -2488,6 +2490,10 @@ input:focus {
 
 .preview-pane h3 {
   font-size: 18px;
+}
+
+.preview-pane [id] {
+  scroll-margin-top: 16px;
 }
 
 .preview-pane p,
@@ -3038,7 +3044,8 @@ input:focus {
   padding: 0.05em 0.25em;
 }
 
-.canvas-wiki {
+.canvas-wiki,
+.canvas-heading-anchor {
   color: var(--accent-2);
   cursor: pointer;
   font-weight: 650;
