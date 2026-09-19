@@ -105,6 +105,24 @@ To build only the unpackaged application executable on Windows, use:
 
 `build-exe.bat` uses an installed Node.js 22.12.0-or-newer version for that build only. With NVM for Windows, it can find a suitable installed version even when an older Node version is active, and it does not persistently switch the active version. It does not install dependencies, so rerun `npm ci` after dependency-lock changes. The current Windows build has been verified with Node.js 22.14.0. It produces `src-tauri\target\release\Bricriu.exe`, not an installer.
 
+The executable accepts one existing Markdown or Typst file, for example
+`Bricriu.exe "C:\Notes\my document.md"`. Relative paths use the terminal's current
+directory. The file opens in a new app instance, using the last vault if it
+contains the file, or the file's parent folder otherwise. Missing files produce
+an error in the app; they are not created automatically.
+
+For a `b` command, put a `b.cmd` file in a folder on your user `PATH`, with these
+contents (adjust the executable path for your checkout):
+
+```bat
+@echo off
+start "" "C:\path\to\notesproject\src-tauri\target\release\Bricriu.exe" %*
+```
+
+The trailing `%*` forwards arguments, so `b doc.md` and `b "my document.md"` work.
+Keep the caller's working directory unchanged in this launcher. Running `b`
+without a filename opens the app normally.
+
 The Markdown-It 15, KaTeX, and Tiptap 3 upgrades do not require a vault migration, a VS Code extension, or separately installed runtime plugins. Those libraries are bundled into Bricriu. Running the resulting executable does not require Node.js, npm, Rust, or the C++ build tools, although WebView2 and any feature-specific optional tools listed below are still runtime requirements.
 
 Useful checks and builds:

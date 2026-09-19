@@ -19,6 +19,7 @@ Hidden folders are normally omitted. Search can reveal that a matching note exis
 ## Files and folders
 
 - **New note** creates a Markdown file by default. Supplying `.typ` creates an experimental Typst document.
+- **File → Save As** creates a new vault-relative copy and continues editing it. Existing files are never overwritten.
 - **New folder** creates a folder within the vault.
 - Tree-row actions pin, open in Track mode, rename, or delete a note; folder rows can be renamed or deleted.
 - Pinned notes remain near the top of the sidebar.
@@ -51,6 +52,7 @@ The Text view is a CodeMirror 6 source editor. Markdown remains visible and the 
 
 - **Raw** switches the CodeMirror editor to source-only display by hiding in-editor processed widgets such as rendered math and Canvas summaries. It does not disable syntax highlighting or change the separately rendered Preview pane.
 - Save with **Save** or `Ctrl+S` / `Cmd+S`.
+- Save to a new vault-relative path with **File → Save As** or `Ctrl+Shift+S` / `Cmd+Shift+S`.
 - Create a note with `Ctrl+N` / `Cmd+N`.
 - Open a file with `Ctrl+O` / `Cmd+O`.
 - Undo/redo uses CodeMirror history and remains available while the tab is open.

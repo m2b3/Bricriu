@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod private_vault;
+mod startup;
 
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
@@ -221,6 +222,22 @@ struct CalendarEvent {
 
 fn default_calendar_recurrence() -> String {
     "none".to_string()
+}
+
+#[tauri::command]
+fn get_startup_note(
+    preferred_vault: Option<String>,
+) -> Result<Option<startup::StartupNote>, String> {
+    let working_dir = env::current_dir()
+        .map_err(|err| format!("Could not resolve the startup directory: {err}"))?;
+    startup::resolve_startup_note(
+        env::args_os().skip(1),
+        &working_dir,
+        preferred_vault
+            .as_deref()
+            .filter(|path| !path.is_empty())
+            .map(Path::new),
+    )
 }
 
 #[derive(Clone, Serialize)]
@@ -630,6 +647,59 @@ fn save_note(
     }
     fs::write(&abs, body).map_err(|err| format!("Could not save note: {err}"))?;
     read_note(state, path)
+}
+
+#[tauri::command]
+fn save_note_as(
+    state: tauri::State<AppState>,
+    path: String,
+    body: String,
+) -> Result<CreateNoteResult, String> {
+    let root = current_root(&state)?;
+    let (normalized, abs) = resolve_new_vault_note_path(&root, &path)?;
+    ensure_private_path_ready(&state, &normalized)?;
+    if abs.exists() {
+        return Err("A note already exists at that path.".to_string());
+    }
+
+    let parent = abs
+        .parent()
+        .ok_or_else(|| "Could not resolve note folder.".to_string())?;
+    let parent_created = !parent.exists();
+    fs::create_dir_all(parent).map_err(|err| format!("Could not create folder: {err}"))?;
+
+    let write_result = {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&abs)
+            .map_err(|err| {
+                if err.kind() == std::io::ErrorKind::AlreadyExists {
+                    "A note already exists at that path.".to_string()
+                } else {
+                    format!("Could not create note: {err}")
+                }
+            })?;
+        file.write_all(body.as_bytes())
+            .map_err(|err| format!("Could not save note: {err}"))
+            .and_then(|_| {
+                file.sync_all()
+                    .map_err(|err| format!("Could not flush note: {err}"))
+            })
+    };
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&abs);
+        return Err(err);
+    }
+
+    let created_folder = parent_created
+        .then(|| parent_folder_relative(&normalized))
+        .flatten();
+    Ok(CreateNoteResult {
+        note: read_note(state, normalized)?,
+        created_folder,
+    })
 }
 
 #[tauri::command]
@@ -1151,6 +1221,44 @@ fn resolve_safe(root: &Path, rel: &str) -> Result<PathBuf, String> {
         }
     }
     Ok(root.join(clean))
+}
+
+fn resolve_new_vault_note_path(root: &Path, path: &str) -> Result<(String, PathBuf), String> {
+    let requested = Path::new(path.trim());
+    if requested.is_absolute() {
+        return Err("Save As paths must stay inside the vault.".to_string());
+    }
+
+    let normalized = normalize_note_path(path)?;
+    let abs = resolve_safe(root, &normalized)?;
+    let parent = abs
+        .parent()
+        .ok_or_else(|| "Could not resolve note folder.".to_string())?;
+
+    // A lexical vault-relative path can still escape through an existing symlink
+    // or junction. Check the nearest existing ancestor before creating folders.
+    let mut existing_ancestor = parent;
+    while !existing_ancestor.exists() {
+        existing_ancestor = existing_ancestor
+            .parent()
+            .ok_or_else(|| "Could not resolve note folder.".to_string())?;
+    }
+    let canonical_ancestor = existing_ancestor
+        .canonicalize()
+        .map_err(|err| format!("Could not resolve note folder: {err}"))?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|err| format!("Could not resolve vault folder: {err}"))?;
+    if !path_is_inside(&canonical_ancestor, &canonical_root) {
+        return Err("Save As paths must stay inside the vault.".to_string());
+    }
+
+    Ok((normalized, abs))
+}
+
+fn parent_folder_relative(path: &str) -> Option<String> {
+    path.rsplit_once('/')
+        .and_then(|(folder, _)| (!folder.is_empty()).then(|| folder.to_string()))
 }
 
 struct ResolvedDocumentPath {
@@ -2724,6 +2832,21 @@ mod private_checkpoint_tests {
     }
 
     #[test]
+    fn save_as_paths_are_new_and_vault_relative() {
+        let root = test_root("save-as-path");
+        let (normalized, abs) = resolve_new_vault_note_path(&root, "folder/copy").unwrap();
+        assert_eq!(normalized, "folder/copy.md");
+        assert_eq!(abs, root.join("folder/copy.md"));
+
+        assert!(resolve_new_vault_note_path(&root, "../outside.md").is_err());
+        assert!(
+            resolve_new_vault_note_path(&root, &root.join("absolute.md").to_string_lossy())
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn private_vault_archive_is_force_staged_even_when_dotfiles_are_ignored() {
         let root = test_root("private-stage");
         let initialized = Command::new("git")
@@ -2767,6 +2890,7 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            get_startup_note,
             open_vault,
             prepare_private_vault,
             load_profile,
@@ -2782,6 +2906,7 @@ fn main() {
             save_calendar_events,
             read_note,
             save_note,
+            save_note_as,
             save_note_if_unchanged,
             compile_typst_preview,
             export_pdf,
