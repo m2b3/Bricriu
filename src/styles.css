@@ -888,6 +888,30 @@ input:focus {
   text-align: center;
 }
 
+.open-tabs-panel {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+}
+
+.open-tabs-panel h2 {
+  display: flex;
+  justify-content: space-between;
+  margin: 0;
+  padding: 2px 9px 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.open-tab-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sidebar-footer {
   display: flex;
   min-height: 34px;

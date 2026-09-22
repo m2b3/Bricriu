@@ -633,9 +633,11 @@ function App(): JSX.Element {
     if (id === splitId) setSplitId(null)
     setActiveId(id)
     setFocusedPane('main')
+    setEditorFocusRequest((request) => request + 1)
   }, [splitId])
 
   const selectTabInPane = useCallback((id: string, pane: EditorPane) => {
+    setEditorFocusRequest((request) => request + 1)
     if (pane === 'main') {
       if (id === splitId) {
         setSplitId(activeId && activeId !== id ? activeId : null)
@@ -2411,6 +2413,22 @@ function App(): JSX.Element {
   }, [finalizeBeforeClose])
 
   useEffect(() => {
+    const onTabKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || !event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return
+      const tabForNavigation = mainTab ?? activeTab ?? tabs[0]
+      if (!tabForNavigation) return
+      event.preventDefault()
+      event.stopPropagation()
+      setWorkspaceMode('notes')
+      selectAdjacentTab(tabs, tabForNavigation.id, event.shiftKey ? -1 : 1, selectMainTab)
+    }
+    // Handle tab switching before an editor or the webview can consume the key.
+    window.addEventListener('keydown', onTabKeyDown, true)
+    return () => window.removeEventListener('keydown', onTabKeyDown, true)
+  }, [activeTab, mainTab, selectMainTab, tabs])
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase()
 
@@ -2476,7 +2494,7 @@ function App(): JSX.Element {
         return
       }
 
-      if (key === 'tab' || key === 'pagedown' || key === ']') {
+      if (key === 'pagedown' || key === ']') {
         const tabForNavigation = mainTab ?? activeTab
         if (tabs.length <= 1 || !tabForNavigation) return
         event.preventDefault()
@@ -2539,6 +2557,15 @@ function App(): JSX.Element {
     [focusedMarkdownPath, tree]
   )
   const filteredFilePaths = useMemo(() => collectFilePaths(filteredTree), [filteredTree])
+  const showingContentSearch = activeSearchView === 'content' && contentQuery.trim().length > 0
+  const otherOpenTabs = useMemo(() => {
+    const shownPaths = new Set([...pinnedPaths].map(pathKey))
+    if (focusedMarkdownEntry) shownPaths.add(pathKey(focusedMarkdownEntry.path))
+    if (showingContentSearch) {
+      for (const match of contentMatches) shownPaths.add(pathKey(match.path))
+    }
+    return tabs.filter((tab) => tab.outOfVault || !shownPaths.has(pathKey(tab.path)))
+  }, [contentMatches, focusedMarkdownEntry, pinnedPaths, showingContentSearch, tabs])
 
   useEffect(() => {
     if (!vault || !contentQuery.trim()) {
@@ -2925,63 +2952,68 @@ function App(): JSX.Element {
         </section>
 
         <section className="tree-panel">
-          {activeSearchView === 'content' && contentQuery.trim() ? (
-            <>
-              <PinnedNotes
-                entries={pinnedEntries}
-                focusedEntry={focusedMarkdownEntry}
-                activePath={activePath}
-                onOpen={(path) => void openNote(path)}
-                onOpenTrack={(path) => void openTrackNote(path)}
-                onTogglePin={togglePinnedPath}
-                onRenameFile={(path) => void renameNoteAction(path)}
-                onDeleteFile={(path) => void deleteNoteAction(path)}
-              />
+          <PinnedNotes
+            entries={pinnedEntries}
+            focusedEntry={focusedMarkdownEntry}
+            activePath={activePath}
+            onOpen={(path) => void openNote(path)}
+            onOpenTrack={(path) => void openTrackNote(path)}
+            onTogglePin={togglePinnedPath}
+            onRenameFile={(path) => void renameNoteAction(path)}
+            onDeleteFile={(path) => void deleteNoteAction(path)}
+          />
+          {showingContentSearch && contentMatches.length > 0 && (
+            <SearchResults
+              matches={contentMatches}
+              searching={searching}
+              activePath={activePath}
+              onOpen={openSearchMatch}
+            />
+          )}
+          <OpenTabsList
+            tabs={otherOpenTabs}
+            activeId={activeTab?.id ?? null}
+            isDirty={isTabDirty}
+            onSelect={(id) => {
+              setWorkspaceMode('notes')
+              selectMainTab(id)
+            }}
+          />
+          {showingContentSearch ? (
+            contentMatches.length === 0 && (
               <SearchResults
                 matches={contentMatches}
                 searching={searching}
                 activePath={activePath}
                 onOpen={openSearchMatch}
               />
-            </>
+            )
           ) : (
-            <>
-              <PinnedNotes
-                entries={pinnedEntries}
-                focusedEntry={focusedMarkdownEntry}
-                activePath={activePath}
-                onOpen={(path) => void openNote(path)}
-                onOpenTrack={(path) => void openTrackNote(path)}
-                onTogglePin={togglePinnedPath}
-                onRenameFile={(path) => void renameNoteAction(path)}
-                onDeleteFile={(path) => void deleteNoteAction(path)}
-              />
-              <FileTree
-                entries={filteredTree}
-                activePath={activePath}
-                featuredPath={focusedMarkdownEntry?.path ?? null}
-                expanded={expanded}
-                pinnedPaths={pinnedPaths}
-                onToggle={(path) => {
-                  setExpanded((prev) => {
-                    const next = new Set(prev)
-                    if (next.has(path)) next.delete(path)
-                    else next.add(path)
-                    return next
-                  })
-                }}
-                onOpen={(path) => void openNote(path)}
-                onOpenTrack={(path) => void openTrackNote(path)}
-                onTogglePin={togglePinnedPath}
-                onRenameFile={(path) => void renameNoteAction(path)}
-                onDeleteFile={(path) => void deleteNoteAction(path)}
-                onRenameFolder={(path) => void renameFolderAction(path)}
-                onDeleteFolder={(path) => void deleteFolderAction(path)}
-                onRevealHidden={(path) => {
-                  setSearchRevealedFolders((prev) => new Set([...prev, path]))
-                }}
-              />
-            </>
+            <FileTree
+              entries={filteredTree}
+              activePath={activePath}
+              featuredPath={focusedMarkdownEntry?.path ?? null}
+              expanded={expanded}
+              pinnedPaths={pinnedPaths}
+              onToggle={(path) => {
+                setExpanded((prev) => {
+                  const next = new Set(prev)
+                  if (next.has(path)) next.delete(path)
+                  else next.add(path)
+                  return next
+                })
+              }}
+              onOpen={(path) => void openNote(path)}
+              onOpenTrack={(path) => void openTrackNote(path)}
+              onTogglePin={togglePinnedPath}
+              onRenameFile={(path) => void renameNoteAction(path)}
+              onDeleteFile={(path) => void deleteNoteAction(path)}
+              onRenameFolder={(path) => void renameFolderAction(path)}
+              onDeleteFolder={(path) => void deleteFolderAction(path)}
+              onRevealHidden={(path) => {
+                setSearchRevealedFolders((prev) => new Set([...prev, path]))
+              }}
+            />
           )}
         </section>
 
@@ -3215,9 +3247,7 @@ function App(): JSX.Element {
             isDirty={isTabDirty}
             onSelect={(id) => {
               setWorkspaceMode('notes')
-              setFocusedPane('main')
-              if (id === splitId) setSplitId(null)
-              setActiveId(id)
+              selectMainTab(id)
             }}
             onClose={closeTab}
           />
@@ -3346,8 +3376,11 @@ function App(): JSX.Element {
                   className="split-file-select"
                   value={splitTab?.id ?? ''}
                   onChange={(event) => {
-                    setSplitId(event.target.value || null)
-                    setFocusedPane('split')
+                    if (event.target.value) selectTabInPane(event.target.value, 'split')
+                    else {
+                      setSplitId(null)
+                      setFocusedPane('split')
+                    }
                   }}
                   disabled={splitCandidates.length === 0}
                   title="Split pane file"
@@ -4127,7 +4160,7 @@ function MarkdownEditor({
   const onOpenExternalLinkRef = useRef(onOpenExternalLink)
   const onOpenWikiLinkRef = useRef(onOpenWikiLink)
   const onLoadWikiCompletionBodyRef = useRef(onLoadWikiCompletionBody)
-  const handledFocusRequestRef = useRef(focusRequest)
+  const handledFocusRequestRef = useRef(0)
   const handledSelectAllRequestRef = useRef(selectAllRequest)
   const handledBulletListRequestRef = useRef(bulletListRequest)
   const handledNumberedListRequestRef = useRef(numberedListRequest)
@@ -4310,6 +4343,9 @@ function MarkdownEditor({
           padding: '22px 28px 48px',
           caretColor: 'var(--accent)'
         },
+        '.cm-cursor, .cm-dropCursor': {
+          borderLeftColor: 'var(--accent)'
+        },
         '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
           backgroundColor: 'var(--selection)'
         },
@@ -4333,6 +4369,9 @@ function MarkdownEditor({
         }
       }),
       keymap.of([
+        // Let the app handle document history without moving the saved cursor first.
+        { key: 'Alt-ArrowLeft', run: () => true, shift: () => true },
+        { key: 'Alt-ArrowRight', run: () => true, shift: () => true },
         { key: 'Tab', run: indentMarkdownList },
         { key: 'Shift-Tab', run: outdentMarkdownList },
         { key: 'Enter', run: continueMarkdownList },
@@ -4535,8 +4574,14 @@ function MarkdownEditor({
     if (focusRequest === handledFocusRequestRef.current) return
     handledFocusRequestRef.current = focusRequest
     if (disabled || !isActivePane || focusRequest === 0) return
-    viewRef.current?.focus()
-  }, [disabled, focusRequest, isActivePane])
+    const view = viewRef.current
+    if (!view) return
+    // Tab/history navigation restores the cached selection before returning focus.
+    view.focus()
+    if (jumpOffset == null) {
+      view.dispatch({ effects: EditorView.scrollIntoView(view.state.selection.main) })
+    }
+  }, [disabled, focusRequest, isActivePane, jumpOffset])
 
   useEffect(() => {
     const view = viewRef.current
@@ -6399,6 +6444,11 @@ function TabStrip({
   onSelect: (id: string) => void
   onClose: (id: string) => void
 }): JSX.Element | null {
+  const activeButtonRef = useRef<HTMLButtonElement | null>(null)
+  useEffect(() => {
+    activeButtonRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [activeId, tabs.length])
+
   if (tabs.length === 0) return null
   return (
     <nav className="tab-strip" aria-label="Open files">
@@ -6408,6 +6458,7 @@ function TabStrip({
         return (
           <button
             key={tab.id}
+            ref={active ? activeButtonRef : undefined}
             type="button"
             className={active ? 'tab active' : 'tab'}
             onClick={() => onSelect(tab.id)}
@@ -6439,6 +6490,45 @@ function TabStrip({
         )
       })}
     </nav>
+  )
+}
+
+function OpenTabsList({
+  tabs,
+  activeId,
+  isDirty,
+  onSelect
+}: {
+  tabs: OpenTab[]
+  activeId: string | null
+  isDirty: (tab: OpenTab) => boolean
+  onSelect: (id: string) => void
+}): JSX.Element | null {
+  if (tabs.length === 0) return null
+  return (
+    <section className="open-tabs-panel" aria-labelledby="open-tabs-label">
+      <h2 id="open-tabs-label" title="Open tabs whose files are not already listed above">
+        Open tabs <span>{tabs.length}</span>
+      </h2>
+      <div className="open-tabs-list">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            className={tab.id === activeId ? 'tree-row active' : 'tree-row'}
+            aria-current={tab.id === activeId ? 'true' : undefined}
+            onClick={() => onSelect(tab.id)}
+            title={tabLabel(tab)}
+          >
+            <span className="tree-icon">{fileIcon(tab.path)}</span>
+            <span className="open-tab-title">{tabLabel(tab)}</span>
+            {tab.outOfVault && <span className="tab-outside" aria-label="Outside vault">OUT</span>}
+            {isDirty(tab) && <span className="tab-dirty" aria-label="Modified" />}
+            {tab.externalStatus && <span className="tab-external" aria-label={tab.externalStatus} />}
+          </button>
+        ))}
+      </div>
+    </section>
   )
 }
 
