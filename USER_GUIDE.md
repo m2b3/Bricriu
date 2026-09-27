@@ -61,13 +61,19 @@ The Text view is a CodeMirror 6 source editor. Markdown remains visible and the 
 - `Ctrl+L` / `Cmd+L` toggles Markdown links around URLs in the selection.
 - Canadian-English spellcheck underlines unknown words and offers suggestions or a personal dictionary entry.
 
-Saving uses the file's last-known modification information to detect likely external conflicts. A conflict is shown for review rather than silently replacing the newer disk version. This protection is useful but should not be treated as infallible backup or merge logic.
+Before saving, Bricriu compares the current disk text with the version last loaded or saved. If they differ, the save is blocked; an unreadable or missing file also blocks the save. For Markdown files inside the vault, a conflict saves your editor version to a separate merge candidate. For outside files, use **Save As** to preserve your version separately.
 
 ## Autosave and external changes
 
 Dirty notes autosave after a configurable delay; the default is five seconds. Autosave writes directly to disk but does not clear the editor's in-memory undo history.
 
 The vault watcher refreshes the tree and marks open notes changed or deleted when another program modifies them. Review these warnings carefully. Concurrent editing from two programs remains a risk even with conflict checks.
+
+Files opened outside the vault are watched while their tabs remain open. Native file notifications are backed up by content checks every two seconds and another check when Bricriu regains focus. These checks cover changes from other editors or sync services, including replacements that preserve timestamps.
+
+If the disk text differs from both the last saved version and your current text, a pop-up offers **Reload from disk** or **Keep editing**. It explicitly says whether there are unsaved edits when Bricriu detects the change. Reloading refreshes the file's open views and discards those edits. Keep editing preserves your text and leaves a **Changed on disk** indicator. Autosave pauses for that file while the conflict remains unresolved. Use **Save As** to keep a separate copy; pressing **Save** checks the disk again and offers the reload choice if it still conflicts, without overwriting the disk version.
+
+Duplicate notifications for the same disk contents do not repeat a dismissed prompt, even after a temporary lock or read failure. A new disk revision or an explicit Save can ask again. If the file is deleted or cannot be read, the editor keeps its text, pauses autosave, and shows **Unavailable on disk** until it becomes readable again.
 
 On close, Bricriu asks about dirty tabs, attempts to save them, and—when applicable—attempts a Git checkpoint before exiting. Do not assume a successful window close is an independent backup.
 

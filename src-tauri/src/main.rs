@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod external_watch;
 mod private_vault;
 mod startup;
 
@@ -22,7 +23,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use typst::{
     diag::{FileError, FileResult},
     foundations::Bytes,
@@ -35,9 +36,11 @@ use typst_as_lib::{
 
 #[derive(Default)]
 struct AppState {
+    open_requests: startup::OpenRequests,
     vault_root: Mutex<Option<PathBuf>>,
     private_vault_ready: Mutex<bool>,
     watcher: Mutex<Option<RecommendedWatcher>>,
+    external_watcher: Mutex<Option<external_watch::ExternalWatcher>>,
     typst_preview: Mutex<Option<TypstPreviewSession>>,
     typst_embedded: Mutex<Option<EmbeddedTypstSession>>,
 }
@@ -225,14 +228,21 @@ fn default_calendar_recurrence() -> String {
 }
 
 #[tauri::command]
-fn get_startup_note(
+fn get_next_open_note(
+    state: tauri::State<AppState>,
     preferred_vault: Option<String>,
 ) -> Result<Option<startup::StartupNote>, String> {
-    let working_dir = env::current_dir()
-        .map_err(|err| format!("Could not resolve the startup directory: {err}"))?;
-    startup::resolve_startup_note(
-        env::args_os().skip(1),
-        &working_dir,
+    let Some(request) = state.open_requests.pop() else {
+        return Ok(None);
+    };
+    let current_vault = state
+        .vault_root
+        .lock()
+        .map_err(|_| "Vault state is locked.")?
+        .clone();
+    startup::resolve_open_note(
+        request,
+        current_vault.as_deref(),
         preferred_vault
             .as_deref()
             .filter(|path| !path.is_empty())
@@ -390,6 +400,45 @@ fn watch_vault(app: tauri::AppHandle, state: tauri::State<AppState>) -> Result<(
         .lock()
         .map_err(|_| "Watcher state is locked.")? = Some(watcher);
     Ok(())
+}
+
+#[tauri::command]
+fn watch_external_files(
+    app: tauri::AppHandle,
+    state: tauri::State<AppState>,
+    paths: Vec<String>,
+) -> Result<Vec<String>, String> {
+    // An empty list also releases all watches when the last outside tab closes.
+    let mut slot = state
+        .external_watcher
+        .lock()
+        .map_err(|_| "Watcher state is locked.")?;
+    let mut resolved_paths = Vec::new();
+    let mut errors = Vec::new();
+    if !paths.is_empty() {
+        let root = current_root(&state)?;
+        for path in paths {
+            // Absolute paths are the existing explicit outside-document exception.
+            // Vault-relative inputs never expand this watch beyond the vault.
+            if !Path::new(&path).is_absolute() || !is_note_file(Path::new(&path)) {
+                errors.push(format!("Not a supported outside-file path: {path}"));
+                continue;
+            }
+            match resolve_document_path_for_write(&root, &path) {
+                Ok(resolved) if resolved.out_of_vault => resolved_paths.push(resolved.abs),
+                Ok(_) => {}
+                Err(err) => errors.push(format!("Could not watch {path}: {err}")),
+            }
+        }
+    }
+    resolved_paths.sort();
+    resolved_paths.dedup();
+    let (watcher, watch_errors) = external_watch::watch(resolved_paths, move |paths| {
+        let _ = app.emit("external-files://changed", VaultChangeEvent { paths });
+    })?;
+    *slot = watcher;
+    errors.extend(watch_errors);
+    Ok(errors)
 }
 
 #[tauri::command]
@@ -612,7 +661,7 @@ fn read_note(state: tauri::State<AppState>, path: String) -> Result<NoteContent,
     let resolved = resolve_document_path(&root, &path)?;
     let abs = resolved.abs;
     if !is_note_file(&abs) {
-        return Err("Only Markdown and Typst files can be opened.".to_string());
+        return Err("Only Markdown, Typst, TXT, CSV, and JSON files can be opened.".to_string());
     }
 
     let abs = abs
@@ -640,7 +689,7 @@ fn save_note(
     let resolved = resolve_document_path_for_write(&root, &path)?;
     let abs = resolved.abs;
     if !is_note_file(&abs) {
-        return Err("Only Markdown and Typst files can be saved.".to_string());
+        return Err("Only Markdown, Typst, TXT, CSV, and JSON files can be saved.".to_string());
     }
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent).map_err(|err| format!("Could not create folder: {err}"))?;
@@ -714,7 +763,7 @@ fn save_note_if_unchanged(
     let resolved = resolve_document_path_for_write(&root, &path)?;
     let abs = resolved.abs;
     if !is_note_file(&abs) {
-        return Err("Only Markdown and Typst files can be saved.".to_string());
+        return Err("Only Markdown, Typst, TXT, CSV, and JSON files can be saved.".to_string());
     }
 
     let current_body =
@@ -816,7 +865,7 @@ fn export_pdf(
     let root = current_root(&state)?;
     let normalized = normalize_relative_input(&path)?;
     let source_abs = resolve_safe(&root, &normalized)?;
-    if !is_note_file(&source_abs) {
+    if !is_markdown_file(&source_abs) && !is_typst_file(&source_abs) {
         return Err("Only Markdown and Typst notes can be exported.".to_string());
     }
 
@@ -963,7 +1012,7 @@ fn rename_note(
     let root = current_root(&state)?;
     let old_abs = resolve_safe(&root, &old_path)?;
     if !is_note_file(&old_abs) {
-        return Err("Only Markdown and Typst files can be renamed.".to_string());
+        return Err("Only Markdown, Typst, TXT, CSV, and JSON files can be renamed.".to_string());
     }
     let normalized_new = normalize_note_path(&new_path)?;
     let new_abs = resolve_safe(&root, &normalized_new)?;
@@ -985,7 +1034,7 @@ fn delete_note(state: tauri::State<AppState>, path: String) -> Result<(), String
     let root = current_root(&state)?;
     let abs = resolve_safe(&root, &path)?;
     if !is_note_file(&abs) {
-        return Err("Only Markdown and Typst files can be deleted.".to_string());
+        return Err("Only Markdown, Typst, TXT, CSV, and JSON files can be deleted.".to_string());
     }
     delete_path(&abs, "Could not delete note.")?;
     remove_track_sidecar(&root, &path)?;
@@ -1328,8 +1377,7 @@ fn document_path_candidate(root: &Path, path: &str) -> Result<PathBuf, String> {
 }
 
 fn with_default_note_extension(path: PathBuf) -> PathBuf {
-    let lower = path.to_string_lossy().to_lowercase();
-    if lower.ends_with(".md") || lower.ends_with(".markdown") || lower.ends_with(".typ") {
+    if is_note_file(&path) {
         return path;
     }
     let mut path = path;
@@ -1351,10 +1399,7 @@ fn path_is_inside(path: &Path, root: &Path) -> bool {
 
 fn normalize_note_path(path: &str) -> Result<String, String> {
     let mut normalized = normalize_relative_input(path)?;
-    if !normalized.to_lowercase().ends_with(".md")
-        && !normalized.to_lowercase().ends_with(".markdown")
-        && !normalized.to_lowercase().ends_with(".typ")
-    {
+    if !is_note_file(Path::new(&normalized)) {
         normalized.push_str(".md");
     }
     Ok(normalized)
@@ -1984,6 +2029,9 @@ fn is_note_file(path: &Path) -> bool {
             ext.eq_ignore_ascii_case("md")
                 || ext.eq_ignore_ascii_case("markdown")
                 || ext.eq_ignore_ascii_case("typ")
+                || ext.eq_ignore_ascii_case("txt")
+                || ext.eq_ignore_ascii_case("csv")
+                || ext.eq_ignore_ascii_case("json")
         })
         .unwrap_or(false)
 }
@@ -2885,17 +2933,36 @@ fn main() {
     if let Some(code) = private_vault::maybe_run_cli() {
         std::process::exit(code);
     }
-    tauri::Builder::default()
+    let state = AppState::default();
+    state.open_requests.push(
+        env::args_os().skip(1).collect(),
+        env::current_dir().unwrap_or_default(),
+    );
+    let builder = tauri::Builder::default().manage(state);
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+        app.state::<AppState>().open_requests.push(
+            args.into_iter().skip(1).map(Into::into).collect(),
+            PathBuf::from(cwd),
+        );
+        let _ = app.emit("notes://open-requested", ());
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+    }));
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
-            get_startup_note,
+            get_next_open_note,
             open_vault,
             prepare_private_vault,
             load_profile,
             save_profile,
             watch_vault,
+            watch_external_files,
             checkpoint_and_switch_inuse,
             checkpoint_inuse,
             checkpoint_vault,

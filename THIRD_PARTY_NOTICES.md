@@ -309,7 +309,7 @@ npm run notices
 | [yargs-parser](https://www.npmjs.com/package/yargs-parser) | 21.1.1 | ISC | development/build |
 | [zustand](https://www.npmjs.com/package/zustand) | 4.5.7 | MIT | application |
 
-## Rust Dependencies (725)
+## Rust Dependencies (726)
 
 | Crate | Version | Declared license | Scope |
 | --- | ---: | --- | --- |
@@ -806,6 +806,7 @@ npm run notices
 | [tauri-plugin-dialog](https://github.com/tauri-apps/plugins-workspace) | 2.7.3 | Apache-2.0 OR MIT | dependency |
 | [tauri-plugin-fs](https://github.com/tauri-apps/plugins-workspace) | 2.5.2 | Apache-2.0 OR MIT | dependency |
 | [tauri-plugin-opener](https://github.com/tauri-apps/plugins-workspace) | 2.5.4 | Apache-2.0 OR MIT | dependency |
+| [tauri-plugin-single-instance](https://github.com/tauri-apps/plugins-workspace) | 2.4.5 | Apache-2.0 OR MIT | dependency |
 | [tauri-runtime](https://github.com/tauri-apps/tauri) | 2.11.2 | Apache-2.0 OR MIT | dependency |
 | [tauri-runtime-wry](https://github.com/tauri-apps/tauri) | 2.11.2 | Apache-2.0 OR MIT | dependency |
 | [tauri-utils](https://github.com/tauri-apps/tauri) | 2.9.3 | Apache-2.0 OR MIT | dependency |

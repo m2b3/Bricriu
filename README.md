@@ -28,7 +28,7 @@ The Markdown-centered workflow includes:
 - A nested file tree with filename filtering, pinned notes, and create, rename, and delete actions.
 - Fast non-indexed content search with file-filter scoping and jump-to-match highlighting.
 - Multiple tabs, a resizable two-file split view, recent files, and session/window restoration.
-- `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle right / left through tabs, wrapping at either end. The sidebar lists open tabs after pinned notes and search results, before the file tree. Files already listed in the pinned area or search results are excluded; files in the tree remain in the list.
+- `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle right / left through tabs, wrapping at either end. The sidebar lists open tabs after pinned notes and search results (both filename and content matches). When there are no search results, open tabs appear above the regular file directory. Files already listed in the pinned area or search results are excluded; files in the regular directory remain in the list.
 - Classic, brighter high-contrast, and dark interface themes, selectable from **Options → Theme**.
 - A CodeMirror 6 Markdown editor with manual save, delayed autosave, undo/redo, Canadian-English spellcheck, word/character counts, list helpers, and URL linkification.
 - Filesystem watching, external-change warnings, and save-conflict checks.
@@ -82,6 +82,16 @@ Installing the Windows package does not require Node.js, npm, Rust, or Visual St
 | macOS | **Untested.** Build on macOS with Xcode Command Line Tools. Packaging, icons, signing, notarization, and runtime behavior still need validation. |
 | Linux | **Untested.** Install the Tauri prerequisites for your distribution and build on Linux. WebKit/system-package requirements and generated packages still need validation. |
 
+**Build and install from source on Windows x64:** install the [one-time prerequisites](install.md#windows-source-build-prerequisites), save your notes and close Bricriu, then run [build-install.bat](build-install.bat) from the repository folder in PowerShell or Command Prompt:
+
+```powershell
+.\build-install.bat
+```
+
+This runs `npm ci`, builds the app and Windows installer, and launches the installer. Follow its prompts to finish. Use the same command after updating the source to rebuild and reinstall.
+
+The script uses an already-installed compatible Node.js runtime; a line such as `v22.14.0` reports the selected version. It does not install or upgrade Node.js or install the system build prerequisites. Run `.\build-install.bat --check` to check Node and Rust availability before building. See the [full script instructions](install.md#one-command-windows-build-and-install).
+
 For development, install the platform prerequisites and run:
 
 ```sh
@@ -89,7 +99,7 @@ npm ci
 npm run tauri:dev
 ```
 
-On Windows x64, build the installer from source with:
+To build the installer without running it:
 
 ```powershell
 npm ci

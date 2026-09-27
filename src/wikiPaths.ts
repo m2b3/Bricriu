@@ -106,7 +106,7 @@ function stripMarkdownExtension(path: string): string {
 }
 
 function isDocumentPath(path: string): boolean {
-  return /\.(md|markdown|typ)$/i.test(path)
+  return /\.(md|markdown|typ|txt|csv|json)$/i.test(path)
 }
 
 function basename(path: string): string {

@@ -37,6 +37,7 @@ This project is not ready to publish merely because it builds. Use this checklis
 
 - [ ] Build each platform on that platform or a documented, trusted platform-native CI runner.
 - [ ] Install, upgrade, launch, edit, and uninstall on clean supported machines—not only development machines.
+- [ ] Verify Explorer **Open with → Bricriu** for `.md`, `.markdown`, `.typ`, `.txt`, `.csv`, and `.json`, including spaces and Unicode in filenames. Check cold launch, an existing/minimized window, duplicate files, multiple quick launches, and files outside the active vault with unsaved tabs. Confirm existing default editors are preserved and uninstall removes Bricriu's entries.
 - [ ] Add code signing/notarization where appropriate and document any remaining operating-system warnings.
 - [ ] Verify package icons, identifiers, permissions, WebView/runtime prerequisites, and artifact architecture.
 - [ ] Confirm the installer filename, file properties, and product version match `src-tauri/tauri.conf.json`, then update the versioned installer links in README and `install.md`.

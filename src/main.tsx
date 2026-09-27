@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
+import { flushSync } from 'react-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { availableMonitors, getCurrentWindow, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window'
-import { open as openFileDialog } from '@tauri-apps/plugin-dialog'
+import { confirm as confirmDialog, open as openFileDialog, type ConfirmDialogOptions } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import {
   Annotation,
@@ -50,6 +51,7 @@ import { escapeColorSpanText, findColorSpans, isSafeEditorColor } from './markdo
 import { collectMarkdownHeadings, findHeadingOffset, slugifyHeading } from './markdown/headings'
 import { markdownToTiptap } from './track/markdown'
 import { resolveWikiDocumentPath } from './wikiPaths'
+import { createExternalChangeMonitor } from './externalChanges'
 import type { CalendarEvent } from './calendar/CalendarView'
 import type { TrackState } from './track/types'
 import 'katex/dist/katex.min.css'
@@ -201,7 +203,7 @@ type OpenTab = {
   updatedAt: number
   size: number
   trackState?: TrackState
-  externalStatus?: 'changed' | 'deleted'
+  externalStatus?: 'changed' | 'deleted' | 'unavailable'
   outOfVault?: boolean
 }
 
@@ -390,7 +392,8 @@ function App(): JSX.Element {
   const [profile, setProfile] = useState<AppProfile>(DEFAULT_PROFILE)
   const [profileLoaded, setProfileLoaded] = useState(false)
   const [startupNote, setStartupNote] = useState<StartupNote | null>(null)
-  const startupStartedRef = useRef(false)
+  const [openRequestsPending, setOpenRequestsPending] = useState(false)
+  const openRequestFetchingRef = useRef(false)
   const startupNoteOpeningRef = useRef(false)
   const [showPreview, setShowPreview] = useState(false)
   const [theme, setTheme] = useState<AppTheme>(() => {
@@ -440,6 +443,9 @@ function App(): JSX.Element {
   const privatePreparationIdRef = useRef(0)
   const deferredPrivateRestoreRef = useRef<DeferredPrivateRestore | null>(null)
   const closingRef = useRef(false)
+  const pendingTabCloseIdsRef = useRef(new Set<string>())
+  const externalMonitorRef = useRef<ReturnType<typeof createExternalChangeMonitor<OpenTab>> | null>(null)
+  const externalWatchSyncRef = useRef(Promise.resolve())
   const activeTabHintRef = useRef<{ path: string; mode: EditorMode } | null>(null)
   const navigationHistoriesRef = useRef<NavigationHistories>(navigationHistories)
   const pendingNavigationTargetsRef = useRef<Record<EditorPane, NavigationEntry | null>>({
@@ -450,6 +456,16 @@ function App(): JSX.Element {
   const latestTabBody = useCallback((tab: OpenTab) => (
     latestBodiesRef.current.get(tab.id) ?? tab.body
   ), [])
+
+  const confirmAction = useCallback(async (message: string, options: ConfirmDialogOptions = {}): Promise<boolean> => {
+    try {
+      // Tauri's window.confirm polyfill returns a Promise despite its DOM type.
+      return await confirmDialog(message, { title: 'Bricriu', kind: 'warning', ...options })
+    } catch (err) {
+      setError(`Could not show confirmation: ${String(err)}`)
+      return false
+    }
+  }, [])
 
   const updateCanvasMarkdownDisplayMode = useCallback((mode: CanvasMarkdownDisplayMode) => {
     setCanvasMarkdownDisplayMode(mode)
@@ -702,6 +718,7 @@ function App(): JSX.Element {
 
   const printActiveDocument = useCallback(async (mode: 'raw' | 'preview') => {
     if (!activeTab || workspaceMode !== 'notes') return
+    if (isPlainTextPath(activeTab.path)) mode = 'raw'
     if (mode === 'preview' && !isTypstPath(activeTab.path)) {
       await import('./preview/MarkdownPreview')
     }
@@ -1039,7 +1056,7 @@ function App(): JSX.Element {
     setPrivatePending(false)
     await refreshTree()
     if (openedVault.git.status === 'needsCheckpoint') {
-      const proceed = window.confirm(
+      const proceed = await confirmAction(
         `${openedVault.git.message}\n\nCreate a checkpoint commit and switch to inuse?`
       )
       if (proceed) {
@@ -1050,7 +1067,7 @@ function App(): JSX.Element {
       }
     }
     setNotice(info.message)
-  }, [loadStoredSession, refreshTree])
+  }, [confirmAction, loadStoredSession, refreshTree])
 
   const preparePrivateVaultInBackground = useCallback(async (
     path: string,
@@ -1088,7 +1105,7 @@ function App(): JSX.Element {
     let openedVault = nextVault
     localStorage.setItem(LAST_VAULT_KEY, path)
     if (!nextVault.privateVault.enabled && nextVault.git.status === 'needsCheckpoint') {
-      const proceed = window.confirm(
+      const proceed = await confirmAction(
         `${nextVault.git.message}\n\nCreate a checkpoint commit and switch to inuse?`
       )
       if (proceed) {
@@ -1138,6 +1155,7 @@ function App(): JSX.Element {
       }, 0)
     }
   }, [
+    confirmAction,
     loadCalendarEvents,
     loadStoredSession,
     preparePrivateVaultInBackground,
@@ -1221,6 +1239,113 @@ function App(): JSX.Element {
       void unlistenPromise.then((unlisten) => unlisten())
     }
   }, [loadCalendarEvents, reconcileExternalTab, refreshTree, tabs, vault])
+
+  useEffect(() => {
+    if (!vault?.root) return
+    const monitor = createExternalChangeMonitor<OpenTab>({
+      getTabs: () => tabsRef.current,
+      getBody: latestTabBody,
+      pathKey,
+      read: (path) => invoke<NoteContent>('read_note', { path }),
+      confirm: (message) => confirmDialog(message, {
+        title: 'File changed on disk',
+        kind: 'warning',
+        okLabel: 'Reload from disk',
+        cancelLabel: 'Keep editing'
+      }),
+      update: (expected, note, reload) => {
+        let applied = false
+        let committed: OpenTab[] | undefined
+        const bodies = new Map(expected.map(({ tab }) => [tab.id, latestTabBody(tab)]))
+        flushSync(() => setTabs((previous) => {
+          if (expected.some(({ tab, body }) => {
+            const current = previous.find((item) => item.id === tab.id)
+            return !current || current.savedBody !== tab.savedBody || current.bodyVersion !== tab.bodyVersion || bodies.get(tab.id) !== body
+          })) return previous
+          const ids = new Set(expected.map(({ tab }) => tab.id))
+          const next = previous.map((tab) => {
+            if (!ids.has(tab.id)) return tab
+            return {
+              ...tab,
+              ...(reload ? { body: note.body, savedBody: note.body, bodyVersion: tab.bodyVersion + 1 } : {}),
+              updatedAt: note.updatedAt,
+              size: note.size,
+              externalStatus: undefined
+            }
+          })
+          // Render/effects must see the accepted text immediately. These writes
+          // are idempotent if React invokes the updater twice in StrictMode;
+          // the edit guard above uses bodies captured before this commit.
+          if (reload) for (const { tab } of expected) latestBodiesRef.current.set(tab.id, note.body)
+          committed = next
+          applied = true
+          return next
+        }))
+        if (committed) {
+          tabsRef.current = committed
+        }
+        return applied
+      },
+      mark: (expected, externalStatus) => {
+        const ids = new Set(expected.map((tab) => tab.id))
+        let committed: OpenTab[] | undefined
+        flushSync(() => setTabs((previous) => {
+          const next = previous.map((tab) => ids.has(tab.id) && tab.externalStatus !== externalStatus ? { ...tab, externalStatus } : tab)
+          committed = next
+          return next.every((tab, index) => tab === previous[index]) ? previous : next
+        }))
+        if (committed) tabsRef.current = committed
+      },
+      error: setError
+    })
+    externalMonitorRef.current = monitor
+    let stopped = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const changed = new Map<string, string>()
+    const checkOpenFiles = () => {
+      if (!stopped) void monitor.check(tabsRef.current.filter((tab) => tab.outOfVault).map((tab) => tab.path))
+    }
+    const focusSubscription = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (focused) checkOpenFiles()
+    })
+    void focusSubscription.catch((err) => { if (!stopped) setError(`Could not check outside files on focus: ${String(err)}`) })
+    const unlistenPromise = listen<VaultChangeEvent>('external-files://changed', (event) => {
+      for (const path of event.payload.paths) changed.set(pathKey(path), path)
+      clearTimeout(timer)
+      timer = setTimeout(() => {
+        void monitor.check([...changed.values()])
+        changed.clear()
+      }, 250)
+    })
+    // Wait for the listener before registering paths, then check for changes
+    // made between reading a newly opened note and starting its watch.
+    externalWatchSyncRef.current = externalWatchSyncRef.current.then(async () => {
+      await unlistenPromise
+    }).catch((err) => { if (!stopped) setError(`Could not listen for outside-file changes: ${String(err)}`) })
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+      monitor.dispose()
+      if (externalMonitorRef.current === monitor) externalMonitorRef.current = null
+      void unlistenPromise.then((unlisten) => unlisten()).catch(() => {})
+      void focusSubscription.then((unlisten) => unlisten()).catch(() => {})
+    }
+  }, [latestTabBody, vault?.root])
+
+  // The serialized path set stays unchanged while typing or switching tabs.
+  const externalPathsKey = JSON.stringify(uniquePaths(tabs.filter((tab) => tab.outOfVault).map((tab) => tab.path)).sort())
+  useEffect(() => {
+    let stopped = false
+    const paths: string[] = JSON.parse(externalPathsKey)
+    externalWatchSyncRef.current = externalWatchSyncRef.current.then(async () => {
+      if (stopped) return
+      const errors = await invoke<string[]>('watch_external_files', { paths })
+      if (stopped) return
+      if (errors.length) setError(errors.join('\n'))
+      void externalMonitorRef.current?.check(paths)
+    }).catch((err) => { if (!stopped) setError(`Could not watch outside files: ${String(err)}`) })
+    return () => { stopped = true }
+  }, [externalPathsKey, vault?.root])
 
   useEffect(() => {
     if (!vault?.git.isRepo) return
@@ -1322,7 +1447,7 @@ function App(): JSX.Element {
     }
     const conflicting = tabs.find((tab) => samePath(tab.path, path) && tab.mode !== 'markdown' && !isRawSourceMode(tab.mode) && isTabDirty(tab))
     if (conflicting) {
-      const proceed = window.confirm(`${path} is modified in another mode. Save or close it before opening Markdown mode?`)
+      const proceed = await confirmAction(`${path} is modified in another mode. Save or close it before opening Markdown mode?`)
       if (!proceed) return false
     }
     setBusy(true)
@@ -1354,35 +1479,60 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [isTabDirty, latestTabBody, rememberRecentPath, selectTabInPane, tabs])
+  }, [confirmAction, isTabDirty, latestTabBody, rememberRecentPath, selectTabInPane, tabs])
 
   useEffect(() => {
-    if (!profileLoaded || startupStartedRef.current) return
-    startupStartedRef.current = true
-    const openStartupVault = async () => {
+    let disposed = false
+    const subscription = listen('notes://open-requested', () => {
+      if (!disposed) setOpenRequestsPending(true)
+    })
+    // Subscribe before checking the backend queue so early launches are kept.
+    void subscription.then(() => {
+      if (!disposed) setOpenRequestsPending(true)
+    }).catch((err) => {
+      if (!disposed) setError(`Could not listen for opened files: ${String(err)}`)
+    })
+    return () => {
+      disposed = true
+      void subscription.then((unlisten) => unlisten()).catch(() => {})
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!profileLoaded || !openRequestsPending || busy || startupNote || openRequestFetchingRef.current) return
+    openRequestFetchingRef.current = true
+    setOpenRequestsPending(false)
+    const openRequestedVault = async () => {
       setBusy(true)
       try {
-        const requested = await invoke<StartupNote | null>('get_startup_note', {
+        const requested = await invoke<StartupNote | null>('get_next_open_note', {
           preferredVault: localStorage.getItem(LAST_VAULT_KEY)
         })
         if (!requested) return
-        setVaultPath(requested.vaultPath)
-        const nextVault = await invoke<VaultInfo>('open_vault', { path: requested.vaultPath })
-        await activateOpenedVault(nextVault, requested.vaultPath)
-        setStartupNote({ ...requested, vaultPath: nextVault.root })
+        if (!vaultRef.current) {
+          setVaultPath(requested.vaultPath)
+          const nextVault = await invoke<VaultInfo>('open_vault', { path: requested.vaultPath })
+          await activateOpenedVault(nextVault, requested.vaultPath)
+          setStartupNote({ ...requested, vaultPath: nextVault.root })
+        } else {
+          setStartupNote(requested)
+        }
       } catch (err) {
         setError(String(err))
+        setOpenRequestsPending(true)
       } finally {
+        openRequestFetchingRef.current = false
         setBusy(false)
       }
     }
-    void openStartupVault()
-  }, [activateOpenedVault, profileLoaded])
+    void openRequestedVault()
+  }, [activateOpenedVault, busy, openRequestsPending, profileLoaded, startupNote])
 
   useEffect(() => {
     if (!startupNote || startupNoteOpeningRef.current) return
     if (!vault || !samePath(vault.root, startupNote.vaultPath)) {
       setStartupNote(null)
+      setOpenRequestsPending(true)
       return
     }
     // Open after session restoration has rendered, and wait for private notes
@@ -1392,11 +1542,27 @@ function App(): JSX.Element {
       deferredPrivateRestoreRef.current.fallbackActiveId = null
     }
     startupNoteOpeningRef.current = true
-    setStartupNote(null)
-    void openNote(startupNote.path, null, 'main', true).then((opened) => {
-      if (opened) setEditorFocusRequest((previous) => previous + 1)
-    })
-  }, [openNote, privatePending, startupNote, vault])
+    const openRequestedTab = async () => {
+      try {
+        // Select an existing tab in any editor mode without replacing edits.
+        const existing = tabs.find((tab) => samePath(tab.path, startupNote.path))
+        if (existing) {
+          setWorkspaceMode('notes')
+          selectTabInPane(existing.id, 'main')
+          setEditorFocusRequest((previous) => previous + 1)
+        } else if (await openNote(startupNote.path, null, 'main', true)) {
+          setEditorFocusRequest((previous) => previous + 1)
+        }
+      } catch (err) {
+        setError(String(err))
+      } finally {
+        startupNoteOpeningRef.current = false
+        setStartupNote(null)
+        setOpenRequestsPending(true)
+      }
+    }
+    void openRequestedTab()
+  }, [openNote, privatePending, selectTabInPane, startupNote, tabs, vault])
 
   const openDocumentDialog = useCallback(async () => {
     if (!vault) {
@@ -1413,8 +1579,8 @@ function App(): JSX.Element {
         multiple: false,
         defaultPath: activeTab?.outOfVault ? activeTab.path : vault.root,
         filters: [{
-          name: 'Markdown and Typst',
-          extensions: ['md', 'markdown', 'typ']
+          name: 'Text documents',
+          extensions: ['md', 'markdown', 'typ', 'txt', 'csv', 'json']
         }]
       })
       if (typeof selected === 'string') await openNote(selected)
@@ -1440,10 +1606,14 @@ function App(): JSX.Element {
     }
     const markdownTab = tabs.find((tab) => samePath(tab.path, path) && tab.mode === 'markdown')
     if (markdownTab && profile.closeMarkdownBeforeTrack) {
-      const closeMarkdown = window.confirm(`${path} is already open in Markdown mode. Close that tab before opening Track mode?`)
+      const closeMarkdown = await confirmAction(`${path} is already open in Markdown mode. Close that tab before opening Track mode?`)
       if (closeMarkdown) {
         const dirtyMarkdown = isTabDirty(markdownTab)
-        const canClose = !dirtyMarkdown || window.confirm(`Close ${markdownTab.path} with unsaved changes?`)
+        const canClose = !dirtyMarkdown || await confirmAction(`Close ${markdownTab.path} with unsaved changes?`, {
+          title: 'Unsaved changes',
+          okLabel: 'Discard changes',
+          cancelLabel: 'Keep editing'
+        })
         if (canClose) {
           setTabs((prev) => {
             const index = prev.findIndex((tab) => tab.id === markdownTab.id)
@@ -1492,7 +1662,7 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [activeId, isTabDirty, profile.closeMarkdownBeforeTrack, rememberRecentPath, selectTabInPane, splitId, tabs])
+  }, [activeId, confirmAction, isTabDirty, profile.closeMarkdownBeforeTrack, rememberRecentPath, selectTabInPane, splitId, tabs])
 
   const openCanvasNote = useCallback(async (
     path: string,
@@ -1629,7 +1799,8 @@ function App(): JSX.Element {
         const conflictPath = result.conflictPath
         if (conflictPath) setTouchedPaths((prev) => new Set([...prev, conflictPath]))
         setTabs((prev) => prev.map((tab) => (tab.id === activeTab.id ? { ...tab, externalStatus: 'changed' } : tab)))
-        await refreshTree()
+        if (activeTab.outOfVault) void externalMonitorRef.current?.check([activeTab.path], { force: true })
+        else await refreshTree()
         setError(result.message)
         return
       }
@@ -1694,6 +1865,7 @@ function App(): JSX.Element {
   }, [activeTab, latestTabBody, refreshTree, rememberRecentPath])
 
   const saveTab = useCallback(async (tab: OpenTab) => {
+    if (tab.outOfVault && (tab.externalStatus || externalMonitorRef.current?.isBlocked(tab.path))) return
     const requestedBody = latestTabBody(tab)
     const result = await saveTabBodyWithConflictCheck(tab, requestedBody)
     if (!result.saved) {
@@ -1703,7 +1875,8 @@ function App(): JSX.Element {
       const conflictPath = result.conflictPath
       if (conflictPath) setTouchedPaths((prev) => new Set([...prev, conflictPath]))
       setTabs((prev) => prev.map((item) => (item.id === tab.id ? { ...item, externalStatus: 'changed' } : item)))
-      await refreshTree()
+      if (tab.outOfVault) void externalMonitorRef.current?.check([tab.path])
+      else await refreshTree()
       setError(result.message)
       return
     }
@@ -2079,7 +2252,7 @@ function App(): JSX.Element {
     if (!nextPath || nextPath === oldPath) return
     const dirtyTabsForPath = tabs.filter((tab) => samePath(tab.path, oldPath) && isTabDirty(tab))
     if (dirtyTabsForPath.length > 0) {
-      const proceed = window.confirm(`${oldPath} has unsaved changes. Save them before renaming?`)
+      const proceed = await confirmAction(`${oldPath} has unsaved changes. Save them before renaming?`)
       if (!proceed) return
     }
     setBusy(true)
@@ -2130,15 +2303,15 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [forgetRecentPath, isTabDirty, latestTabBody, refreshTree, rememberRecentPath, tabs])
+  }, [confirmAction, forgetRecentPath, isTabDirty, latestTabBody, refreshTree, rememberRecentPath, tabs])
 
   const deleteNoteAction = useCallback(async (path: string) => {
     const tab = tabs.find((tab) => samePath(tab.path, path))
     if (tab && isTabDirty(tab)) {
-      const proceedDirty = window.confirm(`${path} has unsaved changes. Delete it anyway?`)
+      const proceedDirty = await confirmAction(`${path} has unsaved changes. Delete it anyway?`)
       if (!proceedDirty) return
     }
-    const proceed = window.confirm(`Delete ${path}?`)
+    const proceed = await confirmAction(`Delete ${path}?`)
     if (!proceed) return
     setBusy(true)
     setError(null)
@@ -2165,14 +2338,14 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [forgetRecentPath, isTabDirty, mainTab, refreshTree, tabs])
+  }, [confirmAction, forgetRecentPath, isTabDirty, mainTab, refreshTree, tabs])
 
   const renameFolderAction = useCallback(async (oldPath: string) => {
     const nextPath = window.prompt('Rename folder path', oldPath)
     if (!nextPath || nextPath === oldPath) return
     const dirtyTabsInFolder = tabs.filter((tab) => isPathInsideFolder(tab.path, oldPath) && isTabDirty(tab))
     if (dirtyTabsInFolder.length > 0) {
-      const proceed = window.confirm(`Folder ${oldPath} contains open notes with unsaved changes. Save them before renaming?`)
+      const proceed = await confirmAction(`Folder ${oldPath} contains open notes with unsaved changes. Save them before renaming?`)
       if (!proceed) return
     }
     setBusy(true)
@@ -2234,15 +2407,15 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [isTabDirty, latestTabBody, mainTab, refreshTree, tabs])
+  }, [confirmAction, isTabDirty, latestTabBody, mainTab, refreshTree, tabs])
 
   const deleteFolderAction = useCallback(async (path: string) => {
     const affectedDirty = tabs.some((tab) => isPathInsideFolder(tab.path, path) && isTabDirty(tab))
     if (affectedDirty) {
-      const proceedDirty = window.confirm(`Folder ${path} contains open notes with unsaved changes. Delete anyway?`)
+      const proceedDirty = await confirmAction(`Folder ${path} contains open notes with unsaved changes. Delete anyway?`)
       if (!proceedDirty) return
     }
-    const proceed = window.confirm(`Delete folder ${path} and everything inside it?`)
+    const proceed = await confirmAction(`Delete folder ${path} and everything inside it?`)
     if (!proceed) return
     setBusy(true)
     setError(null)
@@ -2261,31 +2434,43 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [isTabDirty, mainTab, refreshTree, tabs])
+  }, [confirmAction, isTabDirty, mainTab, refreshTree, tabs])
 
-  const closeTab = useCallback((id: string) => {
-    const closing = tabs.find((tab) => tab.id === id)
-    if (closing && isTabDirty(closing)) {
-      const proceed = window.confirm(`Close ${closing.path} with unsaved changes?`)
-      if (!proceed) return
-    }
-    setTabs((prev) => {
-      const index = prev.findIndex((tab) => tab.id === id)
-      const next = prev.filter((tab) => tab.id !== id)
-      if (activeId === id) {
-        const liveNextIds = new Set(next.map((tab) => tab.id))
-        const recentId = activeIdHistoryRef.current.find((candidate) => liveNextIds.has(candidate)) ?? null
-        const replacement = next.find((tab) => tab.id === recentId) ?? next[Math.min(index, next.length - 1)] ?? null
-        setActiveId(replacement?.id ?? null)
-        if (replacement?.id === splitId) setSplitId(null)
+  const closeTab = useCallback(async (id: string) => {
+    if (closingRef.current || pendingTabCloseIdsRef.current.has(id)) return
+    const closing = tabsRef.current.find((tab) => tab.id === id)
+    if (!closing) return
+    pendingTabCloseIdsRef.current.add(id)
+    try {
+      if (isTabDirty(closing)) {
+        const proceed = await confirmAction(`Close ${closing.path} with unsaved changes?`, {
+          title: 'Unsaved changes',
+          okLabel: 'Discard changes',
+          cancelLabel: 'Keep editing'
+        })
+        if (!proceed) return
       }
-      if (splitId === id) setSplitId(null)
-      activeIdHistoryRef.current = activeIdHistoryRef.current.filter(
-        (candidate) => candidate !== id && next.some((tab) => tab.id === candidate)
-      )
-      return next
-    })
-  }, [activeId, isTabDirty, splitId, tabs])
+      setTabs((prev) => {
+        const index = prev.findIndex((tab) => tab.id === id)
+        if (index < 0) return prev
+        const next = prev.filter((tab) => tab.id !== id)
+        if (activeIdRef.current === id) {
+          const liveNextIds = new Set(next.map((tab) => tab.id))
+          const recentId = activeIdHistoryRef.current.find((candidate) => liveNextIds.has(candidate)) ?? null
+          const replacement = next.find((tab) => tab.id === recentId) ?? next[Math.min(index, next.length - 1)] ?? null
+          setActiveId(replacement?.id ?? null)
+          setSplitId((current) => current === replacement?.id ? null : current)
+        }
+        setSplitId((current) => current === id ? null : current)
+        activeIdHistoryRef.current = activeIdHistoryRef.current.filter(
+          (candidate) => candidate !== id && next.some((tab) => tab.id === candidate)
+        )
+        return next
+      })
+    } finally {
+      pendingTabCloseIdsRef.current.delete(id)
+    }
+  }, [confirmAction, isTabDirty])
 
   const updateTabBody = useCallback((id: string, body: string) => {
     const sourceTab = tabsRef.current.find((tab) => tab.id === id)
@@ -2333,7 +2518,9 @@ function App(): JSX.Element {
   }, [])
 
   useEffect(() => {
-    const dirtyTabs = uniqueSaveTargets(tabs.filter(isTabDirty))
+    const dirtyTabs = uniqueSaveTargets(tabs.filter((tab) => (
+      isTabDirty(tab) && !(tab.outOfVault && (tab.externalStatus || externalMonitorRef.current?.isBlocked(tab.path)))
+    )))
     if (dirtyTabs.length === 0) return
     const timer = window.setTimeout(() => {
       for (const tab of dirtyTabs) {
@@ -2381,36 +2568,37 @@ function App(): JSX.Element {
   useEffect(() => {
     const appWindow = getCurrentWindow()
     const unlistenPromise = appWindow.onCloseRequested(async (event) => {
-      if (closingRef.current) return
       event.preventDefault()
-
-      const dirtyTabs = uniqueSaveTargets(tabsRef.current.filter((tab) => {
-        const body = latestBodiesRef.current.get(tab.id) ?? tab.body
-        return body !== tab.savedBody
-      }))
-      for (const tab of dirtyTabs) {
-        const proceed = window.confirm(`Close ${tab.path} with unsaved changes?`)
-        if (!proceed) return
-      }
-
+      if (closingRef.current || pendingTabCloseIdsRef.current.size > 0) return
       closingRef.current = true
-      setBusy(true)
-      setError(null)
       try {
+        const dirtyTabs = uniqueSaveTargets(tabsRef.current.filter(isTabDirty))
+        for (const tab of dirtyTabs) {
+          const proceed = await confirmAction(`Close ${tab.path} with unsaved changes?`, {
+            title: 'Unsaved changes',
+            okLabel: 'Discard changes',
+            cancelLabel: 'Keep editing'
+          })
+          if (!proceed) return
+        }
+
+        setBusy(true)
+        setError(null)
         await saveWindowPlacement(appWindow)
         await finalizeBeforeClose()
         await appWindow.destroy()
       } catch (err) {
+        setError(`Close checkpoint failed: ${String(err)}`)
+      } finally {
         closingRef.current = false
         setBusy(false)
-        setError(`Close checkpoint failed: ${String(err)}`)
       }
     })
 
     return () => {
       void unlistenPromise.then((unlisten) => unlisten())
     }
-  }, [finalizeBeforeClose])
+  }, [confirmAction, finalizeBeforeClose, isTabDirty])
 
   useEffect(() => {
     const onTabKeyDown = (event: KeyboardEvent) => {
@@ -2490,7 +2678,7 @@ function App(): JSX.Element {
         }
         if (!activeTab) return
         event.preventDefault()
-        closeTab(activeTab.id)
+        void closeTab(activeTab.id)
         return
       }
 
@@ -2558,14 +2746,17 @@ function App(): JSX.Element {
   )
   const filteredFilePaths = useMemo(() => collectFilePaths(filteredTree), [filteredTree])
   const showingContentSearch = activeSearchView === 'content' && contentQuery.trim().length > 0
+  const showingFilenameResults = !showingContentSearch && fileQuery.trim().length > 0 && filteredFilePaths.length > 0
   const otherOpenTabs = useMemo(() => {
     const shownPaths = new Set([...pinnedPaths].map(pathKey))
     if (focusedMarkdownEntry) shownPaths.add(pathKey(focusedMarkdownEntry.path))
     if (showingContentSearch) {
       for (const match of contentMatches) shownPaths.add(pathKey(match.path))
+    } else if (showingFilenameResults) {
+      for (const path of filteredFilePaths) shownPaths.add(pathKey(path))
     }
     return tabs.filter((tab) => tab.outOfVault || !shownPaths.has(pathKey(tab.path)))
-  }, [contentMatches, focusedMarkdownEntry, pinnedPaths, showingContentSearch, tabs])
+  }, [contentMatches, filteredFilePaths, focusedMarkdownEntry, pinnedPaths, showingContentSearch, showingFilenameResults, tabs])
 
   useEffect(() => {
     if (!vault || !contentQuery.trim()) {
@@ -2649,7 +2840,7 @@ function App(): JSX.Element {
     && focusedNavigationHistory.index < focusedNavigationHistory.entries.length - 1
   )
   const activeIsTypst = !!activeTab && isTypstPath(activeTab.path)
-  const previewVisible = showPreview && !!activeTab && !(activeTab.outOfVault && activeIsTypst)
+  const previewVisible = showPreview && !!activeTab && !isPlainTextPath(activeTab.path) && !(activeTab.outOfVault && activeIsTypst)
   const backlinksVisible = showBacklinks && !!activeTab
   const auxiliaryPaneCount = Number(previewVisible) + Number(backlinksVisible)
   const editorAreaRatio = previewVisible ? previewSplitRatio : 1
@@ -2826,6 +3017,18 @@ function App(): JSX.Element {
     writeStoredPreviewSplitRatio(clampedRatio)
   }, [previewSplitRatio])
 
+  const openTabsList = (
+    <OpenTabsList
+      tabs={otherOpenTabs}
+      activeId={activeTab?.id ?? null}
+      isDirty={isTabDirty}
+      onSelect={(id) => {
+        setWorkspaceMode('notes')
+        selectMainTab(id)
+      }}
+    />
+  )
+
   return (
     <>
     <main
@@ -2970,15 +3173,7 @@ function App(): JSX.Element {
               onOpen={openSearchMatch}
             />
           )}
-          <OpenTabsList
-            tabs={otherOpenTabs}
-            activeId={activeTab?.id ?? null}
-            isDirty={isTabDirty}
-            onSelect={(id) => {
-              setWorkspaceMode('notes')
-              selectMainTab(id)
-            }}
-          />
+          {!showingFilenameResults && openTabsList}
           {showingContentSearch ? (
             contentMatches.length === 0 && (
               <SearchResults
@@ -3015,6 +3210,7 @@ function App(): JSX.Element {
               }}
             />
           )}
+          {showingFilenameResults && openTabsList}
         </section>
 
         <footer className="sidebar-footer">
@@ -3133,6 +3329,7 @@ function App(): JSX.Element {
             {workspaceMode === 'notes' && dirty && <span className="dirty-pill">Modified</span>}
             {workspaceMode === 'notes' && activeTab?.externalStatus === 'changed' && <span className="external-pill">Changed on disk</span>}
             {workspaceMode === 'notes' && activeTab?.externalStatus === 'deleted' && <span className="external-pill danger">Deleted on disk</span>}
+            {workspaceMode === 'notes' && activeTab?.externalStatus === 'unavailable' && <span className="external-pill danger">Unavailable on disk</span>}
           </div>
           <div className="editor-actions">
             <label className={canvasMarkdownDisplayMode === 'raw' ? 'raw-toggle active' : 'raw-toggle'}>
@@ -3190,7 +3387,7 @@ function App(): JSX.Element {
               title="Make selection a bulleted Markdown list"
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => setEditorBulletListRequest((request) => request + 1)}
-              disabled={workspaceMode === 'calendar' || activeTab?.mode !== 'markdown'}
+              disabled={workspaceMode === 'calendar' || activeTab?.mode !== 'markdown' || isPlainTextPath(activeTab.path)}
             >
               Bullets
             </button>
@@ -3200,7 +3397,7 @@ function App(): JSX.Element {
               title="Make selection a numbered Markdown list"
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => setEditorNumberedListRequest((request) => request + 1)}
-              disabled={workspaceMode === 'calendar' || activeTab?.mode !== 'markdown'}
+              disabled={workspaceMode === 'calendar' || activeTab?.mode !== 'markdown' || isPlainTextPath(activeTab.path)}
             >
               Numbers
             </button>
@@ -3973,7 +4170,7 @@ function AppMenuBar({
             }}
             disabled={!activeTab || busy}
           >
-            Print raw Markdown
+            Print raw text
           </button>
           <button
             type="button"
@@ -3981,7 +4178,7 @@ function AppMenuBar({
               setOpenMenu(null)
               onPrintPreview()
             }}
-            disabled={!activeTab || (activeOutOfVault && activeIsTypst) || busy}
+            disabled={!activeTab || isPlainTextPath(activeTab.path) || (activeOutOfVault && activeIsTypst) || busy}
           >
             Print preview / PDF
           </button>
@@ -3991,7 +4188,7 @@ function AppMenuBar({
               setOpenMenu(null)
               onExportPreviewPdf()
             }}
-            disabled={!activeTab || activeOutOfVault || busy}
+            disabled={!activeTab || isPlainTextPath(activeTab.path) || activeOutOfVault || busy}
           >
             Export PDF
           </button>
@@ -4024,7 +4221,7 @@ function AppMenuBar({
         }}>View</summary>
         <div className="app-menu-popover">
           <label className="app-menu-check">
-            <input type="checkbox" checked={showPreview} onChange={onTogglePreview} disabled={!activeTab || (activeOutOfVault && activeIsTypst)} />
+            <input type="checkbox" checked={showPreview} onChange={onTogglePreview} disabled={!activeTab || isPlainTextPath(activeTab.path) || (activeOutOfVault && activeIsTypst)} />
             <span>Preview</span>
           </label>
           <label className="app-menu-check">
@@ -4185,23 +4382,6 @@ function MarkdownEditor({
   }, [canvasMarkdownDisplayMode])
 
   useEffect(() => {
-    const view = viewRef.current
-    const markdownTools = markdownToolsRef.current
-    if (!view || !markdownTools) return
-    view.dispatch({
-      effects: markdownTools.reconfigure(noteMarkdownTools(
-        notePathsRef,
-        pathRef,
-        canvasMarkdownDisplayModeRef,
-        searchHighlightRef,
-        onOpenExternalLinkRef,
-        onOpenWikiLinkRef,
-        onLoadWikiCompletionBodyRef
-      ))
-    })
-  }, [canvasMarkdownDisplayMode, notePaths])
-
-  useEffect(() => {
     searchHighlightRef.current = searchHighlight
     viewRef.current?.dispatch({})
   }, [searchHighlight])
@@ -4243,7 +4423,7 @@ function MarkdownEditor({
   }, [colorMenu?.colorOpen])
 
   const openColorMenu = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-    if (!event.shiftKey) return
+    if (!event.shiftKey || isPlainTextPath(filePath)) return
     const view = viewRef.current
     if (!view || disabled) return
     event.preventDefault()
@@ -4258,13 +4438,13 @@ function MarkdownEditor({
         .filter((range) => !range.empty)
         .map((range) => ({ from: range.from, to: range.to }))
     })
-  }, [disabled])
+  }, [disabled, filePath])
 
   const preserveSelectionForColorMenu = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-    if (!event.shiftKey || event.button !== 2) return
+    if (!event.shiftKey || event.button !== 2 || isPlainTextPath(filePath)) return
     event.preventDefault()
     event.stopPropagation()
-  }, [])
+  }, [filePath])
 
   const applyColorValueToSelection = useCallback((rawColor: string) => {
     const view = viewRef.current
@@ -4304,6 +4484,10 @@ function MarkdownEditor({
     languageRef.current = language
     markdownToolsRef.current = markdownTools
     spellcheckRef.current = spellcheck
+
+    const markdownCommand = (command: (view: EditorView) => boolean) => (view: EditorView) => (
+      !isPlainTextPath(pathRef.current) && command(view)
+    )
 
     const extensions: Extension[] = [
       language.of(markdown()),
@@ -4372,9 +4556,9 @@ function MarkdownEditor({
         // Let the app handle document history without moving the saved cursor first.
         { key: 'Alt-ArrowLeft', run: () => true, shift: () => true },
         { key: 'Alt-ArrowRight', run: () => true, shift: () => true },
-        { key: 'Tab', run: indentMarkdownList },
-        { key: 'Shift-Tab', run: outdentMarkdownList },
-        { key: 'Enter', run: continueMarkdownList },
+        { key: 'Tab', run: markdownCommand(indentMarkdownList) },
+        { key: 'Shift-Tab', run: markdownCommand(outdentMarkdownList) },
+        { key: 'Enter', run: markdownCommand(continueMarkdownList) },
         {
           key: 'Ctrl-Space',
           run: startCompletion
@@ -4384,11 +4568,11 @@ function MarkdownEditor({
           run: (view) => !!pathRef.current && isMarkdownPath(pathRef.current) && toggleHttpLink(view),
           preventDefault: true
         },
-        { key: 'Ctrl-b', run: toggleMarkdownBold, preventDefault: true },
-        { key: 'Ctrl-i', run: toggleMarkdownItalic, preventDefault: true },
-        { key: 'Ctrl-Shift-8', run: (view) => formatMarkdownListSelection(view, 'bullet'), preventDefault: true },
-        { key: 'Ctrl-Shift-7', run: (view) => formatMarkdownListSelection(view, 'numbered'), preventDefault: true },
-        { key: 'Ctrl-Enter', run: calculateMarkdownLine, preventDefault: true },
+        { key: 'Ctrl-b', run: markdownCommand(toggleMarkdownBold), preventDefault: true },
+        { key: 'Ctrl-i', run: markdownCommand(toggleMarkdownItalic), preventDefault: true },
+        { key: 'Ctrl-Shift-8', run: markdownCommand((view) => formatMarkdownListSelection(view, 'bullet')), preventDefault: true },
+        { key: 'Ctrl-Shift-7', run: markdownCommand((view) => formatMarkdownListSelection(view, 'numbered')), preventDefault: true },
+        { key: 'Ctrl-Enter', run: markdownCommand(calculateMarkdownLine), preventDefault: true },
         { key: 'Mod-z', run: undoAndKeepEditorFocus, preventDefault: true, stopPropagation: true },
         { key: 'Mod-y', run: redoAndKeepEditorFocus, preventDefault: true, stopPropagation: true },
         { key: 'Mod-Shift-z', run: redoAndKeepEditorFocus, preventDefault: true, stopPropagation: true },
@@ -4436,27 +4620,6 @@ function MarkdownEditor({
       effects: editable.reconfigure(EditorView.editable.of(!disabled))
     })
   }, [disabled])
-
-  useEffect(() => {
-    const view = viewRef.current
-    const language = languageRef.current
-    if (!view || !language) return
-    let cancelled = false
-    if (!isTypstPath(filePath)) {
-      view.dispatch({ effects: language.reconfigure(markdown()) })
-      return
-    }
-    void import('codemirror-lang-typst')
-      .then(({ typst }) => {
-        if (!cancelled) view.dispatch({ effects: language.reconfigure(typst()) })
-      })
-      .catch(() => {
-        if (!cancelled) view.dispatch({ effects: language.reconfigure(markdown()) })
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [filePath])
 
   useEffect(() => {
     const view = viewRef.current
@@ -4533,6 +4696,45 @@ function MarkdownEditor({
     view.scrollDOM.scrollTop = 0
   }, [activePath, body, disabled, filePath])
 
+  // Configure after restoring the document state, including cached tabs.
+  useEffect(() => {
+    const view = viewRef.current
+    const language = languageRef.current
+    if (!view || !language) return
+    let cancelled = false
+    if (!isTypstPath(filePath)) {
+      view.dispatch({ effects: language.reconfigure(isPlainTextPath(filePath) ? [] : markdown()) })
+      return
+    }
+    void import('codemirror-lang-typst')
+      .then(({ typst }) => {
+        if (!cancelled) view.dispatch({ effects: language.reconfigure(typst()) })
+      })
+      .catch(() => {
+        if (!cancelled) view.dispatch({ effects: language.reconfigure(markdown()) })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activePath, filePath])
+
+  useEffect(() => {
+    const view = viewRef.current
+    const markdownTools = markdownToolsRef.current
+    if (!view || !markdownTools) return
+    view.dispatch({
+      effects: markdownTools.reconfigure(noteMarkdownTools(
+        notePathsRef,
+        pathRef,
+        canvasMarkdownDisplayModeRef,
+        searchHighlightRef,
+        onOpenExternalLinkRef,
+        onOpenWikiLinkRef,
+        onLoadWikiCompletionBodyRef
+      ))
+    })
+  }, [activePath, filePath, canvasMarkdownDisplayMode, notePaths])
+
   useEffect(() => {
     const view = viewRef.current
     const spellcheck = spellcheckRef.current
@@ -4598,19 +4800,19 @@ function MarkdownEditor({
     const view = viewRef.current
     if (bulletListRequest === handledBulletListRequestRef.current) return
     handledBulletListRequestRef.current = bulletListRequest
-    if (disabled || !isActivePane || bulletListRequest === 0 || !view) return
+    if (disabled || !isActivePane || bulletListRequest === 0 || !view || isPlainTextPath(filePath)) return
     formatMarkdownListSelection(view, 'bullet')
     view.focus()
-  }, [bulletListRequest, disabled, isActivePane])
+  }, [bulletListRequest, disabled, filePath, isActivePane])
 
   useEffect(() => {
     const view = viewRef.current
     if (numberedListRequest === handledNumberedListRequestRef.current) return
     handledNumberedListRequestRef.current = numberedListRequest
-    if (disabled || !isActivePane || numberedListRequest === 0 || !view) return
+    if (disabled || !isActivePane || numberedListRequest === 0 || !view || isPlainTextPath(filePath)) return
     formatMarkdownListSelection(view, 'numbered')
     view.focus()
-  }, [disabled, isActivePane, numberedListRequest])
+  }, [disabled, filePath, isActivePane, numberedListRequest])
 
   useEffect(() => {
     const view = viewRef.current
@@ -4707,6 +4909,7 @@ function noteMarkdownTools(
   onOpenWikiLinkRef: React.MutableRefObject<(path: string) => void>,
   onLoadWikiCompletionBodyRef: React.MutableRefObject<(path: string) => Promise<string | null>>
 ): Extension {
+  if (isPlainTextPath(sourcePathRef.current)) return []
   const displayMathField = StateField.define<DisplayMathState>({
     create(state) {
       return buildDisplayMathState(state, canvasMarkdownDisplayModeRef.current)
@@ -7022,12 +7225,12 @@ function noteName(path: string): string {
 
 function normalizeSaveAsPath(path: string): string {
   const normalized = path.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
-  return /\.(md|markdown|typ)$/i.test(normalized) ? normalized : `${normalized}.md`
+  return /\.(md|markdown|typ|txt|csv|json)$/i.test(normalized) ? normalized : `${normalized}.md`
 }
 
 function suggestSaveAsPath(path: string, outOfVault: boolean): string {
   const name = noteName(path)
-  const extension = name.match(/\.(markdown|md|typ)$/i)?.[0] ?? '.md'
+  const extension = name.match(/\.(markdown|md|typ|txt|csv|json)$/i)?.[0] ?? '.md'
   const stem = name.slice(0, -extension.length) || 'untitled'
   const folder = outOfVault ? '' : parentFolder(path)
   return `${folder ? `${folder}/` : ''}${stem} copy${extension}`
@@ -7042,8 +7245,12 @@ function isMarkdownPath(path: string): boolean {
   return /\.(md|markdown)$/i.test(path)
 }
 
+function isPlainTextPath(path: string | null): boolean {
+  return !!path && /\.(txt|csv|json)$/i.test(path)
+}
+
 function fileIcon(path: string): string {
-  return isTypstPath(path) ? 'typ' : 'md'
+  return isPlainTextPath(path) ? path.split('.').pop()!.toLowerCase() : isTypstPath(path) ? 'typ' : 'md'
 }
 
 function createEmptyNavigationHistories(): NavigationHistories {

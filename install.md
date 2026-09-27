@@ -19,6 +19,8 @@ The installed app does not require Node.js, npm, Rust, or Visual Studio Build To
 
 To upgrade, close Bricriu and run the installer for the newer version. Upgrade behavior is still lightly tested, so keep an independent backup and repeat the disposable-vault smoke test after upgrading.
 
+The Windows NSIS installer adds **Bricriu** to **Open with** for `.md`, `.markdown`, `.typ`, `.txt`, `.csv`, and `.json` files. Right-click a file in Explorer, select **Open with**, then **Bricriu** (or **Choose another app → Bricriu**). TXT, CSV, and JSON open as plain text and retain their original extensions when saved. Installing does not change your default editor. If Bricriu is running, the file opens as a tab in that window; an already-open file selects its existing tab and keeps unsaved edits. Files outside the current vault use the app's external-file tabs without switching vaults. If no vault is open, Bricriu uses the file's folder, or the last vault if it contains the file. Uninstalling removes Bricriu's Open with registration. Executable-only builds do not register these menu entries.
+
 To uninstall, close Bricriu and remove it from **Windows Settings → Apps → Installed apps**. Uninstalling the application is not a backup or vault-deletion workflow: verify your vault files independently before removing anything. Clean uninstallation has not been broadly tested.
 
 ## macOS and Linux packages
@@ -74,7 +76,29 @@ Build Linux packages on the Linux distribution or compatible build environment y
 
 ## Build from source
 
-From a cloned copy of the repository:
+### One-command Windows build and install
+
+After installing the [Windows source-build prerequisites](#windows-source-build-prerequisites), save your notes and close Bricriu. Open PowerShell or Command Prompt in your cloned repository folder and run [build-install.bat](build-install.bat):
+
+```powershell
+.\build-install.bat
+```
+
+The script runs `npm ci`, builds the latest app and NSIS installer, and launches that installer. Follow the installer prompts; the script waits until it finishes. Run this same command after updating the source to rebuild and reinstall. No separate dependency or build command is needed.
+
+The script stops on dependency or build failures and selects the installer using the product name and version in `src-tauri\tauri.conf.json`. It uses a compatible Node.js runtime already installed on PATH or under NVM for Windows, without changing your active NVM version. A printed version such as `v22.14.0` identifies that runtime; it does not mean Node.js is being installed or upgraded. The one-time system prerequisites must already be installed. If Bricriu is running, the script asks you to close it before continuing.
+
+To check Node and the x64 MSVC Rust toolchain without building or installing:
+
+```powershell
+.\build-install.bat --check
+```
+
+This availability check does not compile the app or verify Visual Studio C++ Build Tools, the Windows SDK, or WebView2.
+
+### Manual build and development
+
+For individual build steps or development on a supported platform, run these commands from a cloned copy of the repository:
 
 ```sh
 npm ci
@@ -106,7 +130,7 @@ Build release bundles for the current operating system:
 npm run tauri:build
 ```
 
-On Windows x64, build only the NSIS installer and copy it to the repository root:
+To build only the NSIS installer and copy it to the repository root:
 
 ```powershell
 npm run build-exe
