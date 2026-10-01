@@ -51,8 +51,8 @@ test('renders preview IDs, standard fragment links, and same-note wiki anchors',
   ].join('\n')
   const html = renderMarkdownPreview(markdown, ['folder/note.md'], 'folder/note.md')
 
-  assert.match(html, /<h1 id="intro">Intro<\/h1>/)
-  assert.match(html, /<h1 id="intro-1">Intro<\/h1>/)
+  assert.match(html, /<h1 id="intro"[^>]*>Intro<\/h1>/)
+  assert.match(html, /<h1 id="intro-1"[^>]*>Intro<\/h1>/)
   assert.match(html, /<a href="#intro-1">Second<\/a>/)
   assert.match(html, /class="preview-wiki" href="notesproject-wiki:folder%2Fnote\.md%23intro-1"/)
 })

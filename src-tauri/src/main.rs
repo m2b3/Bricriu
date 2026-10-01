@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod external_watch;
+mod git_checkpoint;
 mod private_vault;
 mod startup;
 
@@ -269,6 +270,8 @@ struct AppProfile {
     close_markdown_before_track: bool,
     #[serde(default = "default_persist_recent_files")]
     persist_recent_files: bool,
+    #[serde(default = "default_markdown_preview_follow_cursor")]
+    markdown_preview_follow_cursor: bool,
 }
 
 #[tauri::command]
@@ -548,11 +551,33 @@ fn checkpoint_inuse_at(root: &Path, paths: Vec<String>) -> Result<GitInfo, Strin
 
 #[tauri::command]
 async fn checkpoint_vault(state: tauri::State<'_, AppState>) -> Result<GitInfo, String> {
-    ensure_private_vault_ready(&state)?;
+    let include_private = private_vault_is_ready(&state)?;
     let root = current_root(&state)?;
-    tauri::async_runtime::spawn_blocking(move || checkpoint_vault_at(&root))
-        .await
-        .map_err(|err| format!("Checkpoint worker failed: {err}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        if include_private {
+            checkpoint_vault_at(&root)
+        } else {
+            checkpoint_public_vault_at(&root)
+        }
+    })
+    .await
+    .map_err(|err| format!("Checkpoint worker failed: {err}"))?
+}
+
+fn checkpoint_public_vault_at(root: &Path) -> Result<GitInfo, String> {
+    if !is_git_repo(root)? {
+        return Ok(not_repo_git_info());
+    }
+    private_vault::prepare_public_checkpoint(root)?;
+    let committed = git_checkpoint::checkpoint_public(root)?;
+    inspect_git_info(
+        root,
+        if committed {
+            "Public checkpoint committed. Locked .h and its archive were left unchanged."
+        } else {
+            "No public changes to commit. Locked .h and its archive were left unchanged."
+        },
+    )
 }
 
 fn checkpoint_vault_at(root: &Path) -> Result<GitInfo, String> {
@@ -1245,7 +1270,7 @@ fn ensure_private_vault_ready(state: &tauri::State<AppState>) -> Result<(), Stri
     if private_vault_is_ready(state)? {
         Ok(())
     } else {
-        Err("The private .h folder is still being prepared.".to_string())
+        Err("The private .h folder is locked. Unlock private notes to access it.".to_string())
     }
 }
 
@@ -2810,6 +2835,7 @@ fn default_profile() -> AppProfile {
         typst_preview_debounce_ms: default_typst_preview_debounce_ms(),
         close_markdown_before_track: default_close_markdown_before_track(),
         persist_recent_files: default_persist_recent_files(),
+        markdown_preview_follow_cursor: default_markdown_preview_follow_cursor(),
     }
 }
 
@@ -2823,6 +2849,7 @@ fn normalize_profile(profile: AppProfile) -> AppProfile {
         typst_preview_debounce_ms: profile.typst_preview_debounce_ms.clamp(50, 5_000),
         close_markdown_before_track: profile.close_markdown_before_track,
         persist_recent_files: profile.persist_recent_files,
+        markdown_preview_follow_cursor: profile.markdown_preview_follow_cursor,
     }
 }
 
@@ -2840,6 +2867,35 @@ fn default_close_markdown_before_track() -> bool {
 
 fn default_persist_recent_files() -> bool {
     true
+}
+
+fn default_markdown_preview_follow_cursor() -> bool {
+    true
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn older_profiles_enable_markdown_preview_following() {
+        let profile: AppProfile = serde_json::from_str(
+            r#"{"autosaveDelayMs":5000,"checkpointIntervalMs":180000}"#,
+        )
+        .unwrap();
+        assert!(normalize_profile(profile).markdown_preview_follow_cursor);
+        assert!(default_profile().markdown_preview_follow_cursor);
+    }
+
+    #[test]
+    fn disabling_markdown_preview_following_survives_profile_roundtrip() {
+        let mut profile = default_profile();
+        profile.markdown_preview_follow_cursor = false;
+        let json = serde_json::to_value(normalize_profile(profile)).unwrap();
+        assert_eq!(json["markdownPreviewFollowCursor"], false);
+        let reloaded: AppProfile = serde_json::from_value(json).unwrap();
+        assert!(!reloaded.markdown_preview_follow_cursor);
+    }
 }
 
 fn write_profile_file(path: &Path, profile: &AppProfile) -> Result<(), String> {

@@ -1,0 +1,66 @@
+{
+  "ibmPlexCommit": "763c36ef9117782905ae010056dfbe8fd2653a25",
+  "lilexCommit": "6ced03ec81c127b46a3074b868855eab534a5018",
+  "files": [
+    {
+      "file": "ibm-plex-sans/IBMPlexSans-Regular.woff2",
+      "source": "https://raw.githubusercontent.com/IBM/plex/763c36ef9117782905ae010056dfbe8fd2653a25/packages/plex-sans/fonts/complete/woff2/IBMPlexSans-Regular.woff2",
+      "sha256": "ba711a3085ff9f27440b6b9c4550cfc47c97bf36591d5da958b975bb3add8c1a",
+      "bytes": 63020
+    },
+    {
+      "file": "ibm-plex-sans/IBMPlexSans-Italic.woff2",
+      "source": "https://raw.githubusercontent.com/IBM/plex/763c36ef9117782905ae010056dfbe8fd2653a25/packages/plex-sans/fonts/complete/woff2/IBMPlexSans-Italic.woff2",
+      "sha256": "13284fab1821ba6e3652c1580fcf2bbfd8c9309520c69b3d1224dab40b37c597",
+      "bytes": 67220
+    },
+    {
+      "file": "ibm-plex-sans/IBMPlexSans-SemiBold.woff2",
+      "source": "https://raw.githubusercontent.com/IBM/plex/763c36ef9117782905ae010056dfbe8fd2653a25/packages/plex-sans/fonts/complete/woff2/IBMPlexSans-SemiBold.woff2",
+      "sha256": "f78048030eab62e860efa39a0df79e2e5581bf122eb95b9bc42c0b8a4988d205",
+      "bytes": 67060
+    },
+    {
+      "file": "ibm-plex-sans/IBMPlexSans-SemiBoldItalic.woff2",
+      "source": "https://raw.githubusercontent.com/IBM/plex/763c36ef9117782905ae010056dfbe8fd2653a25/packages/plex-sans/fonts/complete/woff2/IBMPlexSans-SemiBoldItalic.woff2",
+      "sha256": "d875a0705b4596532250beeb66d9a2b8866a25f78b5b249b3d3293b5f922e50e",
+      "bytes": 70664
+    },
+    {
+      "file": "ibm-plex-sans/IBMPlexSans-Bold.woff2",
+      "source": "https://raw.githubusercontent.com/IBM/plex/763c36ef9117782905ae010056dfbe8fd2653a25/packages/plex-sans/fonts/complete/woff2/IBMPlexSans-Bold.woff2",
+      "sha256": "fa7130d854a660b39a7fc9e6e0f2dc23dba5f1346e2adea3e1fe37b6d884133d",
+      "bytes": 63012
+    },
+    {
+      "file": "ibm-plex-sans/IBMPlexSans-BoldItalic.woff2",
+      "source": "https://raw.githubusercontent.com/IBM/plex/763c36ef9117782905ae010056dfbe8fd2653a25/packages/plex-sans/fonts/complete/woff2/IBMPlexSans-BoldItalic.woff2",
+      "sha256": "73d57000ee0fa7d6e1dd3a9fe5901c2d7c71904af9a935dbbc1d44abc9574c1f",
+      "bytes": 66632
+    },
+    {
+      "file": "ibm-plex-sans/OFL.txt",
+      "source": "https://raw.githubusercontent.com/IBM/plex/763c36ef9117782905ae010056dfbe8fd2653a25/packages/plex-sans/fonts/complete/woff2/license.txt",
+      "sha256": "91c25c350d3cac39da2736d74f7ba37ef648f5237a4e330a240615bc8d8c4360",
+      "bytes": 4360
+    },
+    {
+      "file": "lilex/Lilex-Variable.woff2",
+      "source": "https://raw.githubusercontent.com/mishamyrt/Lilex/6ced03ec81c127b46a3074b868855eab534a5018/fonts/Lilex/webfonts/Lilex%5Bwght%5D.woff2",
+      "sha256": "9bf383fbcdf98423cf7da877e3b6ce133f5b292395c0aee1fcb421c016777230",
+      "bytes": 95448
+    },
+    {
+      "file": "lilex/Lilex-Italic-Variable.woff2",
+      "source": "https://raw.githubusercontent.com/mishamyrt/Lilex/6ced03ec81c127b46a3074b868855eab534a5018/fonts/Lilex/webfonts/Lilex-Italic%5Bwght%5D.woff2",
+      "sha256": "dd49d80f9aca13920d4b69b0669e7c09ac0cfa3e2fcf1940400f4db847a53075",
+      "bytes": 107220
+    },
+    {
+      "file": "lilex/OFL.txt",
+      "source": "https://raw.githubusercontent.com/mishamyrt/Lilex/6ced03ec81c127b46a3074b868855eab534a5018/OFL.txt",
+      "sha256": "cc3bd94cf51f40137e353fc9ca0859d54ec07e59c2092270b64a0723f4b34011",
+      "bytes": 4382
+    }
+  ]
+}

@@ -42,7 +42,7 @@ impl PrivateVaultInfo {
             enabled: true,
             archive_updated: false,
             hooks_installed: false,
-            message: "Opening the vault while the private .h folder is prepared in the background."
+            message: "Private .h is locked."
                 .to_string(),
         }
     }
@@ -826,6 +826,54 @@ fn install_git_hooks(root: &Path, settings_path: &Path) -> Result<(), String> {
     )
 }
 
+// Older installed wrappers always synchronize .h and force-add .h.zip. Upgrade
+// only this vault's generated action, retaining any user's preceding hook.
+pub fn prepare_public_checkpoint(root: &Path) -> Result<(), String> {
+    let hook = git_path(root, "hooks/pre-commit")?;
+    if !hook.is_file() {
+        return Ok(());
+    }
+    let bytes = fs::read(&hook)
+        .map_err(|err| format!("Could not read private-vault hook: {err}"))?;
+    let Ok(body) = String::from_utf8(bytes) else {
+        // A user's binary hook is not one of our shell wrappers.
+        return Ok(());
+    };
+    if !body.contains(HOOK_MARKER) || body.contains(crate::git_checkpoint::PUBLIC_CHECKPOINT_ROOT) {
+        return Ok(());
+    }
+    let needle = format!("--private-vault-sync {} ", shell_quote(root));
+    let Some(sync_offset) = body.find(&needle) else {
+        return Ok(());
+    };
+    let start = body[..sync_offset].rfind('\n').map_or(0, |offset| offset + 1);
+    let updated = format!(
+        "{}{}",
+        &body[..start],
+        public_checkpoint_guard(root, &body[start..])
+    );
+    let parent = hook
+        .parent()
+        .ok_or("Could not locate private-vault hook folder.")?;
+    let temporary = unique_sibling_path(parent, ".pre-commit.notesproject-tmp");
+    fs::write(&temporary, updated)
+        .map_err(|err| format!("Could not update private-vault hook: {err}"))?;
+    if let Err(err) = make_executable(&temporary).and_then(|_| replace_file(&temporary, &hook)) {
+        let _ = fs::remove_file(&temporary);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn public_checkpoint_guard(root: &Path, action: &str) -> String {
+    format!(
+        "if [ \"${{{}:-}}\" != {} ]; then\n{}\nfi\n",
+        crate::git_checkpoint::PUBLIC_CHECKPOINT_ROOT,
+        shell_quote(root),
+        action.trim_end()
+    )
+}
+
 fn install_hook(
     hooks: &Path,
     name: &str,
@@ -870,9 +918,12 @@ fn install_hook(
         name
     );
     let action = if name == "pre-commit" {
-        format!(
-            "{sync} || exit $?\ngit add -f -- {} || exit $?\n",
-            shell_quote_value(archive_git_path)
+        public_checkpoint_guard(
+            root,
+            &format!(
+                "{sync} || exit $?\ngit add -f -- {} || exit $?\n",
+                shell_quote_value(archive_git_path)
+            ),
         )
     } else {
         format!("{sync} || exit $?\n")
@@ -1171,6 +1222,53 @@ mod tests {
             "#!/bin/sh\necho original\n"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn public_checkpoint_skips_only_private_sync_in_new_and_legacy_hooks() {
+        for legacy in [false, true] {
+            let root = test_root(if legacy { "public-legacy-hook" } else { "public-hook" });
+            let git = |args: &[&str]| {
+                let output = git_command(&root).args(args).output().unwrap();
+                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                output
+            };
+            git(&["init"]);
+            git(&["config", "user.name", "Checkpoint Test"]);
+            git(&["config", "user.email", "checkpoint@example.invalid"]);
+            git(&["config", "commit.gpgSign", "false"]);
+            git(&["config", "core.hooksPath", ".git/hooks"]);
+            fs::write(root.join("public.md"), "public").unwrap();
+            fs::create_dir(root.join(".h")).unwrap();
+            fs::write(root.join(".h/secret.md"), "private").unwrap();
+            let hooks = git_path(&root, "hooks").unwrap();
+            let original = hooks.join("pre-commit");
+            let user_hook = "#!/bin/sh\nprintf ran > .git/user-hook-ran\n";
+            fs::write(&original, user_hook).unwrap();
+            make_executable(&original).unwrap();
+            install_hook(&hooks, "pre-commit", &root, &root.join("missing-passwords.json"),
+                &root.join("private-sync-must-not-run"), ".h.zip").unwrap();
+            if legacy {
+                let body = fs::read_to_string(&original).unwrap();
+                let body = body.lines().filter(|line| !line.starts_with("if [") && *line != "fi")
+                    .collect::<Vec<_>>().join("\n") + "\n";
+                fs::write(&original, body).unwrap();
+            }
+            prepare_public_checkpoint(&root).unwrap();
+            assert!(crate::git_checkpoint::checkpoint_public(&root).unwrap());
+            assert_eq!(fs::read_to_string(root.join(".git/user-hook-ran")).unwrap(), "ran");
+            assert!(!root.join(".h.zip").exists());
+            assert_eq!(fs::read_to_string(hooks.join("pre-commit.notesproject-existing")).unwrap(), user_hook);
+            // Ordinary commits must still attempt the private sync.
+            let normal = git_command(&root).args(["commit", "--allow-empty", "-m", "normal"]).output().unwrap();
+            assert!(!normal.status.success());
+            let head = git(&["rev-parse", "HEAD"]).stdout;
+            fs::write(hooks.join("pre-commit.notesproject-existing"), "#!/bin/sh\nexit 23\n").unwrap();
+            fs::write(root.join("public.md"), "changed public note").unwrap();
+            assert!(crate::git_checkpoint::checkpoint_public(&root).is_err());
+            assert_eq!(git(&["rev-parse", "HEAD"]).stdout, head);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

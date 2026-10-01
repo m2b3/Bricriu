@@ -37,7 +37,7 @@ import {
   redo,
   undo
 } from '@codemirror/commands'
-import { markdown } from '@codemirror/lang-markdown'
+import { commonmarkLanguage, markdown } from '@codemirror/lang-markdown'
 import {
   HighlightStyle,
   syntaxTree,
@@ -52,10 +52,12 @@ import { collectMarkdownHeadings, findHeadingOffset, slugifyHeading } from './ma
 import { markdownToTiptap } from './track/markdown'
 import { resolveWikiDocumentPath } from './wikiPaths'
 import { createExternalChangeMonitor } from './externalChanges'
+import type { PreviewFollowRequest } from './preview/sourceNavigation'
 import type { CalendarEvent } from './calendar/CalendarView'
 import type { TrackState } from './track/types'
 import 'katex/dist/katex.min.css'
 import './styles.css'
+import './preview/previewTypography.css'
 
 const CanvasEditor = React.lazy(() =>
   import('./canvas/CanvasEditor').then((module) => ({ default: module.CanvasEditor }))
@@ -288,6 +290,7 @@ type AppProfile = {
   typstPreviewDebounceMs: number
   closeMarkdownBeforeTrack: boolean
   persistRecentFiles: boolean
+  markdownPreviewFollowCursor: boolean
 }
 
 const DEFAULT_PROFILE: AppProfile = {
@@ -296,7 +299,8 @@ const DEFAULT_PROFILE: AppProfile = {
   gitStatusPollIntervalMs: 5 * 60 * 1000,
   typstPreviewDebounceMs: 250,
   closeMarkdownBeforeTrack: true,
-  persistRecentFiles: true
+  persistRecentFiles: true,
+  markdownPreviewFollowCursor: true
 }
 
 const MAX_RECENT_FILES = 20
@@ -396,6 +400,7 @@ function App(): JSX.Element {
   const openRequestFetchingRef = useRef(false)
   const startupNoteOpeningRef = useRef(false)
   const [showPreview, setShowPreview] = useState(false)
+  const [previewFollowRequest, setPreviewFollowRequest] = useState<PreviewFollowRequest | null>(null)
   const [theme, setTheme] = useState<AppTheme>(() => {
     const storedTheme = readStoredTheme()
     document.documentElement.dataset.theme = storedTheme
@@ -441,7 +446,9 @@ function App(): JSX.Element {
   const vaultRef = useRef<VaultInfo | null>(null)
   const privatePendingRef = useRef(false)
   const privatePreparationIdRef = useRef(0)
+  const privateUnlockWaitersRef = useRef<Array<(unlocked: boolean) => void>>([])
   const deferredPrivateRestoreRef = useRef<DeferredPrivateRestore | null>(null)
+  const checkpointRunningRef = useRef(false)
   const closingRef = useRef(false)
   const pendingTabCloseIdsRef = useRef(new Set<string>())
   const externalMonitorRef = useRef<ReturnType<typeof createExternalChangeMonitor<OpenTab>> | null>(null)
@@ -544,11 +551,31 @@ function App(): JSX.Element {
     [activeId, tabs]
   )
   const activeTab = focusedPane === 'split' ? splitTab : mainTab
+  const followMarkdownPreview = useCallback((tabId: string, line: number) => {
+    if (!showPreview || !profile.markdownPreviewFollowCursor) return
+    setPreviewFollowRequest((previous) => ({ tabId, line, request: (previous?.request ?? 0) + 1 }))
+  }, [showPreview, profile.markdownPreviewFollowCursor])
   const activePath = activeTab?.path ?? null
   const dirty = !!activeTab && isTabDirty(activeTab)
   const activeOutOfVault = activeTab?.outOfVault === true
   const activePrintBody = activeTab ? latestTabBody(activeTab) : ''
   const gitHasDirtyFiles = vault?.git.status === 'dirtyOnInuse' || vault?.git.status === 'needsCheckpoint'
+  const vaultCheckpointTitle = !vault?.git.isRepo
+    ? vault?.git.message ?? 'Open a Git vault to create checkpoints.'
+    : privatePending
+      ? 'Commit public notes only. Locked .h and its archive will stay unchanged.'
+      : busy
+        ? 'Checkpoint is waiting for the current operation to finish.'
+        : 'Save vault notes and commit vault changes.'
+  const editorCheckpointTitle = activeOutOfVault
+    ? 'Select a note inside the vault to create a checkpoint.'
+    : !vault?.git.isRepo || busy || privatePending
+      ? vaultCheckpointTitle
+      : vault.git.currentBranch !== 'inuse'
+        ? 'Editor checkpoints require the inuse branch.'
+        : touchedPaths.size === 0
+          ? 'No files changed through Bricriu this session to checkpoint.'
+          : 'Checkpoint files changed through Bricriu this session.'
 
   const rememberPaneNavigation = useCallback((pane: EditorPane, tab: OpenTab) => {
     const pendingTarget = pendingNavigationTargetsRef.current[pane]
@@ -721,6 +748,14 @@ function App(): JSX.Element {
     if (isPlainTextPath(activeTab.path)) mode = 'raw'
     if (mode === 'preview' && !isTypstPath(activeTab.path)) {
       await import('./preview/MarkdownPreview')
+      // The print document is hidden until printing, so its fonts may not have
+      // been requested yet. Load the bundled faces before opening the dialog.
+      await Promise.allSettled([
+        '400 16px "IBM Plex Sans"', 'italic 400 16px "IBM Plex Sans"',
+        '600 16px "IBM Plex Sans"', 'italic 600 16px "IBM Plex Sans"',
+        '700 16px "IBM Plex Sans"', 'italic 700 16px "IBM Plex Sans"',
+        '400 16px "Lilex"', 'italic 400 16px "Lilex"'
+      ].map((font) => document.fonts.load(font)))
     }
     const body = document.body
     const cleanup = () => {
@@ -1069,39 +1104,44 @@ function App(): JSX.Element {
     setNotice(info.message)
   }, [confirmAction, loadStoredSession, refreshTree])
 
-  const preparePrivateVaultInBackground = useCallback(async (
-    path: string,
-    preparationId: number,
-    password?: string
-  ) => {
-    try {
-      const info = await invoke<PrivateVaultInfo>('prepare_private_vault', {
-        path,
-        privatePassword: password
-      })
-      await completePrivateVaultPreparation(path, info, preparationId)
-      if (preparationId === privatePreparationIdRef.current) {
-        setPrivatePassword('')
-        setPrivatePasswordOpen(false)
-        setPrivatePasswordError(null)
-      }
-    } catch (err) {
-      if (preparationId !== privatePreparationIdRef.current) return
-      const message = String(err)
-      if (message.includes(PRIVATE_VAULT_PASSWORD_REQUIRED)) {
-        setPrivatePasswordPath(path)
-        setPrivatePassword('')
-        setPrivatePasswordError(password ? 'The password is incorrect, or .h.zip is damaged.' : null)
-        setPrivatePasswordOpen(true)
-        setNotice('The vault is open. Enter the password to make the private .h folder available.')
-      } else {
-        setError(message)
-        setNotice('The vault is open, but its private .h folder is unavailable.')
-      }
+  const finishPrivateVaultUnlock = useCallback((unlocked: boolean) => {
+    const waiters = privateUnlockWaitersRef.current
+    privateUnlockWaitersRef.current = []
+    for (const resolve of waiters) resolve(unlocked)
+  }, [])
+
+  const cancelPrivateVaultUnlock = useCallback(() => {
+    setPrivatePassword('')
+    setPrivatePasswordOpen(false)
+    setPrivatePasswordError(null)
+    finishPrivateVaultUnlock(false)
+  }, [finishPrivateVaultUnlock])
+
+  const requestPrivateVaultUnlock = useCallback((): Promise<boolean> => {
+    const currentVault = vaultRef.current
+    if (!currentVault || !privatePendingRef.current) return Promise.resolve(!!currentVault)
+    if (privateUnlockWaitersRef.current.length === 0) {
+      setPrivatePasswordPath(currentVault.root)
+      setPrivatePassword('')
+      setPrivatePasswordError(null)
+      setPrivatePasswordOpen(true)
+      // Explicit access should keep the user's current public tab selected.
+      if (deferredPrivateRestoreRef.current) deferredPrivateRestoreRef.current.fallbackActiveId = null
     }
-  }, [completePrivateVaultPreparation])
+    return new Promise((resolve) => privateUnlockWaitersRef.current.push(resolve))
+  }, [])
+
+  const ensurePrivateVaultAccess = useCallback(async (path: string): Promise<boolean> => {
+    const currentVault = vaultRef.current
+    if (!currentVault || !privatePendingRef.current || !isPrivateVaultRequest(path, currentVault.root)) return true
+    const unlocked = await requestPrivateVaultUnlock()
+    return unlocked && !!vaultRef.current && samePath(vaultRef.current.root, currentVault.root)
+  }, [requestPrivateVaultUnlock])
 
   const activateOpenedVault = useCallback(async (nextVault: VaultInfo, path: string) => {
+    privatePreparationIdRef.current += 1
+    cancelPrivateVaultUnlock()
+    setPrivatePasswordBusy(false)
     let openedVault = nextVault
     localStorage.setItem(LAST_VAULT_KEY, path)
     if (!nextVault.privateVault.enabled && nextVault.git.status === 'needsCheckpoint') {
@@ -1121,8 +1161,6 @@ function App(): JSX.Element {
       !openedVault.privateVault.enabled,
       storedSession
     )
-    const preparationId = privatePreparationIdRef.current + 1
-    privatePreparationIdRef.current = preparationId
     deferredPrivateRestoreRef.current = openedVault.privateVault.enabled
       ? { session: storedSession, fallbackActiveId: restoredSession?.activeId ?? null }
       : null
@@ -1149,16 +1187,11 @@ function App(): JSX.Element {
     await refreshTree()
     await loadCalendarEvents()
     await invoke('watch_vault')
-    if (openedVault.privateVault.enabled) {
-      window.setTimeout(() => {
-        void preparePrivateVaultInBackground(openedVault.root, preparationId)
-      }, 0)
-    }
   }, [
     confirmAction,
     loadCalendarEvents,
     loadStoredSession,
-    preparePrivateVaultInBackground,
+    cancelPrivateVaultUnlock,
     profile.persistRecentFiles,
     refreshTree
   ])
@@ -1199,19 +1232,30 @@ function App(): JSX.Element {
       setPrivatePasswordError('Enter the private-vault password.')
       return
     }
+    const preparationId = privatePreparationIdRef.current
     setPrivatePasswordBusy(true)
     setError(null)
     setPrivatePasswordError(null)
     try {
-      await preparePrivateVaultInBackground(
-        privatePasswordPath,
-        privatePreparationIdRef.current,
+      const info = await invoke<PrivateVaultInfo>('prepare_private_vault', {
+        path: privatePasswordPath,
         privatePassword
-      )
+      })
+      await completePrivateVaultPreparation(privatePasswordPath, info, preparationId)
+      if (preparationId !== privatePreparationIdRef.current) return
+      setPrivatePassword('')
+      setPrivatePasswordOpen(false)
+      finishPrivateVaultUnlock(true)
+    } catch (err) {
+      if (preparationId !== privatePreparationIdRef.current) return
+      const message = String(err)
+      setPrivatePasswordError(message.includes(PRIVATE_VAULT_PASSWORD_REQUIRED)
+        ? 'The password is incorrect, or .h.zip is damaged.'
+        : message)
     } finally {
-      setPrivatePasswordBusy(false)
+      if (preparationId === privatePreparationIdRef.current) setPrivatePasswordBusy(false)
     }
-  }, [preparePrivateVaultInBackground, privatePassword, privatePasswordPath])
+  }, [completePrivateVaultPreparation, finishPrivateVaultUnlock, privatePassword, privatePasswordPath])
 
   useEffect(() => {
     if (!vault) return
@@ -1373,8 +1417,8 @@ function App(): JSX.Element {
   }, [profile.gitStatusPollIntervalMs, vault?.git.isRepo, vault?.root])
 
   useEffect(() => {
-    if (!vault || privatePending) return
-    writeStoredSession(vault.root, {
+    if (!vault) return
+    writeStoredSession(vault.root, withDeferredPrivateTabs({
       openTabs: tabs.map((tab) => ({ path: tab.path, mode: tab.mode })),
       activeId,
       activePath,
@@ -1386,7 +1430,7 @@ function App(): JSX.Element {
       recentPaths: profile.persistRecentFiles ? recentPaths : [],
       fileQuery,
       contentUsesFileFilter
-    })
+    }, deferredPrivateRestoreRef.current?.session))
   }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, pinnedPaths, privatePending, profile.persistRecentFiles, recentPaths, splitOpen, splitTab, tabs, vault])
 
   const openExternalLink = useCallback((rawUrl: string) => {
@@ -1412,6 +1456,7 @@ function App(): JSX.Element {
     const { path, heading } = literalPath
       ? { path: destination, heading: null }
       : splitWikiDestination(destination)
+    if (!await ensurePrivateVaultAccess(path)) return false
     setWorkspaceMode('notes')
     const existing = tabs.find((tab) => tab.mode === 'markdown' && samePath(tab.path, path))
     if (existing) {
@@ -1479,7 +1524,7 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [confirmAction, isTabDirty, latestTabBody, rememberRecentPath, selectTabInPane, tabs])
+  }, [confirmAction, ensurePrivateVaultAccess, isTabDirty, latestTabBody, rememberRecentPath, selectTabInPane, tabs])
 
   useEffect(() => {
     let disposed = false
@@ -1535,9 +1580,8 @@ function App(): JSX.Element {
       setOpenRequestsPending(true)
       return
     }
-    // Open after session restoration has rendered, and wait for private notes
-    // to be unlocked so their deferred restoration cannot steal the selection.
-    if (privatePending && isPrivateVaultPath(startupNote.path)) return
+    // This is an explicit file-open request, including OS file associations.
+    // openNote requests the password if this file is in the locked .h folder.
     if (deferredPrivateRestoreRef.current) {
       deferredPrivateRestoreRef.current.fallbackActiveId = null
     }
@@ -1593,6 +1637,7 @@ function App(): JSX.Element {
     path: string,
     targetPane: EditorPane = 'main'
   ): Promise<boolean> => {
+    if (!await ensurePrivateVaultAccess(path)) return false
     setWorkspaceMode('notes')
     if (tabs.some((tab) => samePath(tab.path, path) && tab.outOfVault)) {
       setError('Track Changes is disabled for files outside the vault.')
@@ -1662,12 +1707,13 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [activeId, confirmAction, isTabDirty, profile.closeMarkdownBeforeTrack, rememberRecentPath, selectTabInPane, splitId, tabs])
+  }, [activeId, confirmAction, ensurePrivateVaultAccess, isTabDirty, profile.closeMarkdownBeforeTrack, rememberRecentPath, selectTabInPane, splitId, tabs])
 
   const openCanvasNote = useCallback(async (
     path: string,
     targetPane: EditorPane = 'main'
   ): Promise<boolean> => {
+    if (!await ensurePrivateVaultAccess(path)) return false
     setWorkspaceMode('notes')
     if (tabs.some((tab) => samePath(tab.path, path) && tab.outOfVault)) {
       setError('Canvas is disabled for files outside the vault.')
@@ -1735,7 +1781,7 @@ function App(): JSX.Element {
     } finally {
       setBusy(false)
     }
-  }, [rememberRecentPath, selectTabInPane, tabs])
+  }, [ensurePrivateVaultAccess, rememberRecentPath, selectTabInPane, tabs])
 
   const openNavigationEntry = useCallback((entry: NavigationEntry, pane: EditorPane) => {
     if (entry.mode === 'track') return openTrackNote(entry.path, pane)
@@ -1864,8 +1910,8 @@ function App(): JSX.Element {
     }
   }, [activeTab, latestTabBody, refreshTree, rememberRecentPath])
 
-  const saveTab = useCallback(async (tab: OpenTab) => {
-    if (tab.outOfVault && (tab.externalStatus || externalMonitorRef.current?.isBlocked(tab.path))) return
+  const saveTab = useCallback(async (tab: OpenTab): Promise<boolean> => {
+    if (tab.outOfVault && (tab.externalStatus || externalMonitorRef.current?.isBlocked(tab.path))) return false
     const requestedBody = latestTabBody(tab)
     const result = await saveTabBodyWithConflictCheck(tab, requestedBody)
     if (!result.saved) {
@@ -1878,7 +1924,7 @@ function App(): JSX.Element {
       if (tab.outOfVault) void externalMonitorRef.current?.check([tab.path])
       else await refreshTree()
       setError(result.message)
-      return
+      return false
     }
     const saved = result.note
     const savedId = tabId(saved.path, tab.mode)
@@ -1932,13 +1978,15 @@ function App(): JSX.Element {
     if (!saved.outOfVault) setTouchedPaths((prev) => new Set([...prev, saved.path]))
     rememberRecentPath(saved.path)
     if (!saved.outOfVault) await refreshTree()
+    return true
   }, [latestTabBody, refreshTree, rememberRecentPath])
 
   const checkpointNow = useCallback(async () => {
-    if (privatePending || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse') return
+    if (checkpointRunningRef.current || privatePending || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse') return
     const paths = [...touchedPaths]
     if (paths.length === 0) return
     const touched = new Set(paths)
+    checkpointRunningRef.current = true
     setBusy(true)
     setError(null)
     try {
@@ -1949,46 +1997,54 @@ function App(): JSX.Element {
       }
       const git = await invoke<GitInfo>('checkpoint_inuse', { paths: uniquePaths(paths) })
       setVault((prev) => (prev ? { ...prev, git } : prev))
-      setTouchedPaths(new Set())
+      setTouchedPaths((current) => current === touchedPaths ? new Set() : current)
     } catch (err) {
       setError(String(err))
     } finally {
+      checkpointRunningRef.current = false
       setBusy(false)
     }
   }, [privatePending, tabs, touchedPaths, vault])
 
   const checkpointVaultNow = useCallback(async () => {
-    if (privatePending || !vault?.git.isRepo) return
+    if (checkpointRunningRef.current || !vault?.git.isRepo) return
+    checkpointRunningRef.current = true
     setBusy(true)
     setError(null)
-    setNotice(null)
+    setNotice('Creating checkpoint…')
     try {
-      for (const tab of uniqueSaveTargets(tabs)) {
+      for (const tab of uniqueSaveTargets(tabsRef.current.filter((tab) => (
+        !tab.outOfVault && !(privatePending && isPrivateVaultPath(tab.path))
+      )))) {
         if (isTabDirty(tab)) {
-          const result = await saveTabBodyWithConflictCheck(tab, latestTabBody(tab))
-          if (!result.saved) {
-            throw new Error(result.message)
+          // Use the normal save path so the editor's saved baseline advances too.
+          if (!(await saveTab(tab))) {
+            setNotice(null)
+            return
           }
-        }
-        if (!tab.outOfVault && tab.mode === 'track' && tab.trackState) {
+        } else if (tab.mode === 'track' && tab.trackState) {
           await invoke('save_track_state', { path: tab.path, trackState: tab.trackState })
         }
       }
+      const checkpointedPaths = touchedPathsRef.current
       const git = await invoke<GitInfo>('checkpoint_vault')
       setVault((prev) => (prev ? { ...prev, git } : prev))
-      setTouchedPaths(new Set())
+      // A save during Git's work must remain pending for the next checkpoint.
+      setTouchedPaths((current) => current === checkpointedPaths
+        ? new Set([...current].filter((path) => privatePending && isPrivateVaultPath(path)))
+        : current)
       await refreshTree()
       const message = git.message || 'Checkpoint committed.'
       setNotice(message)
       clearStatusLater('notice', message)
     } catch (err) {
-      const message = String(err)
-      setError(message)
-      clearStatusLater('error', message)
+      setNotice(null)
+      setError(String(err))
     } finally {
+      checkpointRunningRef.current = false
       setBusy(false)
     }
-  }, [clearStatusLater, isTabDirty, latestTabBody, privatePending, refreshTree, saveTabBodyWithConflictCheck, tabs, vault])
+  }, [clearStatusLater, isTabDirty, privatePending, refreshTree, saveTab, vault])
 
   const toggleToCommitFiles = useCallback(async () => {
     if (!gitHasDirtyFiles || loadingToCommit) return
@@ -2011,8 +2067,8 @@ function App(): JSX.Element {
 
   const finalizeBeforeClose = useCallback(async () => {
     const vault = vaultRef.current
-    if (vault && !privatePendingRef.current) {
-      writeStoredSession(vault.root, {
+    if (vault) {
+      writeStoredSession(vault.root, withDeferredPrivateTabs({
         openTabs: tabsRef.current.map((tab) => ({ path: tab.path, mode: tab.mode })),
         activeId: activeIdRef.current,
         activePath: activePathRef.current,
@@ -2024,7 +2080,7 @@ function App(): JSX.Element {
         recentPaths: profile.persistRecentFiles ? recentPathsRef.current : [],
         fileQuery: fileQueryRef.current,
         contentUsesFileFilter: contentUsesFileFilterRef.current
-      })
+      }, deferredPrivateRestoreRef.current?.session))
     }
     const paths = new Set(touchedPathsRef.current)
 
@@ -3105,8 +3161,9 @@ function App(): JSX.Element {
             <button
               type="button"
               className="sidebar-checkpoint-button"
+              title={vaultCheckpointTitle}
               onClick={() => void checkpointVaultNow()}
-              disabled={!vault?.git.isRepo || privatePending || busy}
+              disabled={!vault?.git.isRepo || busy}
             >
               <span className="checkpoint-label-full">Checkpoint</span>
               <span className="checkpoint-label-short">CP</span>
@@ -3125,6 +3182,7 @@ function App(): JSX.Element {
               onChange={(event) => {
                 setActiveSearchView('file')
                 setFileQuery(event.target.value)
+                if (isPrivateVaultPath(event.target.value.trim())) void requestPrivateVaultUnlock()
               }}
               onFocus={() => setActiveSearchView('file')}
               placeholder="Filter paths"
@@ -3215,7 +3273,7 @@ function App(): JSX.Element {
 
         <footer className="sidebar-footer">
           <span>{totalFiles} files</span>
-          {privatePending && <span>Private .h pending...</span>}
+          {privatePending && <span>Private .h locked</span>}
           {busy && <span>Working...</span>}
         </footer>
       </aside>
@@ -3287,7 +3345,8 @@ function App(): JSX.Element {
               activeIsTypst={activeIsTypst}
               busy={busy}
               canvasDocumentDisplayMode={canvasDocumentDisplayMode}
-              checkpointDisabled={activeOutOfVault || privatePending || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
+              checkpointDisabled={activeOutOfVault || !vault?.git.isRepo || busy || (!privatePending && (vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0))}
+              checkpointTitle={editorCheckpointTitle}
               profile={profile}
               recentClosedPaths={recentClosedPaths}
               showBacklinks={showBacklinks}
@@ -3295,7 +3354,7 @@ function App(): JSX.Element {
               theme={theme}
               typstPreviewFormat={typstPreviewFormat}
               vaultOpen={!!vault}
-              onCheckpoint={() => void checkpointNow()}
+              onCheckpoint={() => void (privatePending ? checkpointVaultNow() : checkpointNow())}
               onDeleteCurrent={() => {
                 if (activeTab) void deleteNoteAction(activeTab.path)
               }}
@@ -3429,8 +3488,9 @@ function App(): JSX.Element {
             </button>
             <button
               type="button"
-              onClick={() => void checkpointNow()}
-              disabled={activeOutOfVault || privatePending || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0 || busy}
+              onClick={() => void (privatePending ? checkpointVaultNow() : checkpointNow())}
+              title={editorCheckpointTitle}
+              disabled={activeOutOfVault || !vault?.git.isRepo || busy || (!privatePending && (vault.git.currentBranch !== 'inuse' || touchedPaths.size === 0))}
             >
               Checkpoint
             </button>
@@ -3528,6 +3588,7 @@ function App(): JSX.Element {
                   onOpenExternalLink={openExternalLink}
                   onOpenWikiLink={(path) => void openNote(path, null, 'main')}
                   onLoadWikiCompletionBody={loadWikiCompletionBody}
+                  onPreviewNavigate={followMarkdownPreview}
                 />
             )}
           </div>
@@ -3638,6 +3699,7 @@ function App(): JSX.Element {
                     onOpenExternalLink={openExternalLink}
                     onOpenWikiLink={(path) => void openNote(path, null, 'split')}
                     onLoadWikiCompletionBody={loadWikiCompletionBody}
+                    onPreviewNavigate={followMarkdownPreview}
                   />
               )}
             </div>
@@ -3692,6 +3754,7 @@ function App(): JSX.Element {
                     version={activeTab.bodyVersion}
                     notePaths={allFilePaths}
                     sourcePath={activeTab.path}
+                    followRequest={profile.markdownPreviewFollowCursor && previewFollowRequest?.tabId === activeTab.id ? previewFollowRequest : null}
                     onOpenWikiLink={(path) => void openNote(path, null, focusedPane)}
                   />
                 </React.Suspense>
@@ -3876,10 +3939,8 @@ function App(): JSX.Element {
             <button
               type="button"
               className="icon-button"
-              onClick={() => {
-                setPrivatePassword('')
-                setPrivatePasswordOpen(false)
-              }}
+              onClick={cancelPrivateVaultUnlock}
+              disabled={privatePasswordBusy}
               aria-label="Cancel private vault unlock"
             >
               x
@@ -3907,10 +3968,7 @@ function App(): JSX.Element {
             <button
               type="button"
               className="secondary-button"
-              onClick={() => {
-                setPrivatePassword('')
-                setPrivatePasswordOpen(false)
-              }}
+              onClick={cancelPrivateVaultUnlock}
               disabled={privatePasswordBusy}
             >
               Cancel
@@ -4014,6 +4072,7 @@ function AppMenuBar({
   busy,
   canvasDocumentDisplayMode,
   checkpointDisabled,
+  checkpointTitle,
   profile,
   recentClosedPaths,
   showBacklinks,
@@ -4043,6 +4102,7 @@ function AppMenuBar({
   busy: boolean
   canvasDocumentDisplayMode: CanvasDocumentDisplayMode
   checkpointDisabled: boolean
+  checkpointTitle: string
   profile: AppProfile
   recentClosedPaths: string[]
   showBacklinks: boolean
@@ -4271,7 +4331,7 @@ function AppMenuBar({
               <option value="panel">Panel</option>
             </select>
           </label>
-          <button type="button" onClick={onCheckpoint} disabled={checkpointDisabled}>
+          <button type="button" onClick={onCheckpoint} disabled={checkpointDisabled} title={checkpointTitle}>
             Checkpoint
           </button>
         </div>
@@ -4302,7 +4362,8 @@ function MarkdownEditor({
   onChange,
   onOpenExternalLink,
   onOpenWikiLink,
-  onLoadWikiCompletionBody
+  onLoadWikiCompletionBody,
+  onPreviewNavigate
 }: {
   activePath: string | null
   changeId: string | null
@@ -4326,6 +4387,7 @@ function MarkdownEditor({
   onOpenExternalLink: (url: string) => void
   onOpenWikiLink: (path: string) => void
   onLoadWikiCompletionBody: (path: string) => Promise<string | null>
+  onPreviewNavigate: (tabId: string, line: number) => void
 }): JSX.Element {
   type ColorMenuState = {
     x: number
@@ -4357,6 +4419,7 @@ function MarkdownEditor({
   const onOpenExternalLinkRef = useRef(onOpenExternalLink)
   const onOpenWikiLinkRef = useRef(onOpenWikiLink)
   const onLoadWikiCompletionBodyRef = useRef(onLoadWikiCompletionBody)
+  const onPreviewNavigateRef = useRef(onPreviewNavigate)
   const handledFocusRequestRef = useRef(0)
   const handledSelectAllRequestRef = useRef(selectAllRequest)
   const handledBulletListRequestRef = useRef(bulletListRequest)
@@ -4368,6 +4431,10 @@ function MarkdownEditor({
   useEffect(() => {
     onChangeRef.current = onChange
   }, [onChange])
+
+  useEffect(() => {
+    onPreviewNavigateRef.current = onPreviewNavigate
+  }, [onPreviewNavigate])
 
   useEffect(() => {
     changeIdRef.current = changeId
@@ -4582,6 +4649,18 @@ function MarkdownEditor({
         ...searchKeymap
       ]),
       editable.of(EditorView.editable.of(!disabled)),
+      EditorView.domEventHandlers({
+        click(event, view) {
+          const path = pathRef.current
+          const id = changeIdRef.current
+          if (event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey
+            || !path || !id || !isMarkdownPath(path) || !view.contentDOM.contains(event.target as Node)) return false
+          // click runs after CodeMirror has placed the caret, including when a
+          // repeated click leaves the selection unchanged. Keep editor focus.
+          onPreviewNavigateRef.current(id, view.state.doc.lineAt(view.state.selection.main.head).number - 1)
+          return false
+        }
+      }),
       EditorView.updateListener.of((update) => {
         if (!update.docChanged) return
         if (update.transactions.some((tr) => tr.annotation(programmaticChange))) return
@@ -6403,10 +6482,7 @@ function formatMarkdownListSelection(view: EditorView, style: MarkdownListStyle)
 
     const counters = new Map<number, number>()
     const formattedLines = lines.map((line) => {
-      if (line.trim().length === 0) {
-        counters.clear()
-        return line
-      }
+      if (line.trim().length === 0) return line
 
       const existing = parseMarkdownListLine(line)
       const indent = existing?.indent ?? line.match(/^\s*/)?.[0] ?? ''
@@ -6487,45 +6563,28 @@ function parseMarkdownListLine(text: string): MarkdownListLine | null {
 
 function renumberMarkdownOrderedLists(view: EditorView): void {
   const changes: Array<{ from: number; to: number; insert: string }> = []
-  const counters = new Map<number, number>()
-  let previousWasList = false
-
-  for (let lineNumber = 1; lineNumber <= view.state.doc.lines; lineNumber += 1) {
-    const line = view.state.doc.line(lineNumber)
-    const match = line.text.match(/^(\s*)(\d+)([.)])(\s+)/)
-    const unordered = line.text.match(/^\s*[-+*]\s+/)
-    if (!match) {
-      if (!unordered && line.text.trim().length === 0) {
-        counters.clear()
-        previousWasList = false
-      } else if (!unordered && !previousWasList) {
-        counters.clear()
-      }
-      previousWasList = !!unordered
-      continue
-    }
-
-    const level = Math.floor(indentColumn(match[1]) / 4)
-    for (const key of [...counters.keys()]) {
-      if (key > level) counters.delete(key)
-    }
-    const next = (counters.get(level) ?? 0) + 1
-    counters.set(level, next)
-    const current = Number.parseInt(match[2], 10)
-    if (current !== next) {
-      const from = line.from + match[1].length
-      changes.push({
-        from,
-        to: from + match[2].length,
-        insert: String(next)
+  const doc = view.state.doc
+  // Blank lines can belong to a list; use Markdown's boundaries for each counter.
+  const tree = commonmarkLanguage.parser.parse(doc.toString())
+  tree.iterate({
+    enter(node) {
+      if (node.name !== 'OrderedList') return
+      node.node.getChildren('ListItem').forEach((item, index) => {
+        const marker = item.getChild('ListMark')
+        if (!marker) return
+        const from = marker.from
+        const to = marker.to - 1 // Preserve the '.' or ')' delimiter.
+        const next = index + 1
+        if (Number.parseInt(doc.sliceString(from, to), 10) !== next) {
+          changes.push({ from, to, insert: String(next) })
+        }
       })
     }
-    previousWasList = true
-  }
+  })
 
   if (changes.length > 0) {
     view.dispatch({
-      changes,
+      changes: changes.sort((left, right) => left.from - right.from),
       userEvent: 'input'
     })
   }
@@ -7305,6 +7364,21 @@ function samePath(left: string, right: string): boolean {
 function isPrivateVaultPath(path: string): boolean {
   const normalized = path.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
   return normalized === '.h' || normalized.startsWith('.h/')
+}
+
+function isPrivateVaultRequest(path: string, root: string): boolean {
+  const normalized = pathKey(path).replace(/^(\.\/)+/, '')
+  const prefix = `${pathKey(root)}/`
+  return isPrivateVaultPath(normalized.startsWith(prefix) ? normalized.slice(prefix.length) : normalized)
+}
+
+// Public sessions still persist while locked, without losing deferred private tabs.
+function withDeferredPrivateTabs(session: StoredSession, deferred?: StoredSession | null): StoredSession {
+  if (!deferred) return session
+  const privateTabs = (deferred.openTabs ?? deferred.openPaths?.map((path) => ({ path, mode: 'markdown' as const })) ?? [])
+    .filter((tab) => isPrivateVaultPath(tab.path))
+  const existing = new Set(session.openTabs.map((tab) => tabId(tab.path, tab.mode)))
+  return { ...session, openTabs: [...session.openTabs, ...privateTabs.filter((tab) => !existing.has(tabId(tab.path, tab.mode)))] }
 }
 
 function hasPath(paths: Set<string>, path: string): boolean {

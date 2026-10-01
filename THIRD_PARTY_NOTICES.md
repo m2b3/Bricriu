@@ -9,6 +9,12 @@ Package names link to their npm, crates.io, or upstream project pages. License e
 - The Bricriu wordmark is rendered in **Segotia 1.005**, designed by Dominic Stanley and released under the SIL Open Font License 1.1 with Reserved Font Name Segotia. The SVG contains outlined lettering, not an embedded font. The upstream copyright notice and complete OFL text are retained at [`public/brand/segotia-OFL-1.1.txt`](public/brand/segotia-OFL-1.1.txt).
 - The Bricriu squaremark is a static rendering of the capital `B` in **Gadelica 3**, designed by Séamas Ó Brógáin. [Gaelchló's published note](https://www.gaelchlo.com/clonna2.html) says Gadelica may be distributed but not modified. Bricriu does not include the Gadelica font file or its vector glyph outlines.
 
+## Markdown Preview Typefaces
+
+- [IBM Plex Sans](https://github.com/IBM/plex) is bundled as unmodified WOFF2 files. Copyright © 2017 IBM Corp., with Reserved Font Name "Plex". [Complete SIL Open Font License 1.1](public/fonts/ibm-plex-sans/OFL.txt).
+- [Lilex](https://github.com/mishamyrt/Lilex) is bundled as unmodified variable WOFF2 files. Copyright 2019 The Lilex Project Authors. [Complete SIL Open Font License 1.1](public/fonts/lilex/OFL.txt).
+- [Font provenance and checksums](public/fonts/sources.json) record the upstream commits and exact distributed files. The fonts remain under their own licences.
+
 Regenerate this file after changing dependencies:
 
 ```sh

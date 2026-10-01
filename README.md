@@ -33,7 +33,7 @@ The Markdown-centered workflow includes:
 - A CodeMirror 6 Markdown editor with manual save, delayed autosave, undo/redo, Canadian-English spellcheck, word/character counts, list helpers, and URL linkification.
 - Filesystem watching, external-change warnings, and save-conflict checks.
 - Wiki links (`[[Note]]`), link completion, backlinks, callouts, and inline/block KaTeX math.
-- A split Markdown preview with escaped raw HTML, printing, and PDF workflows.
+- A split Markdown preview that follows editor clicks by default, with escaped raw HTML, printing, and PDF workflows. Set `markdownPreviewFollowCursor` to `false` in `profile.json` to disable following.
 
 Experimental features extend the workspace beyond the core Markdown editor:
 

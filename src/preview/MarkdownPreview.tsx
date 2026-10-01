@@ -1,9 +1,15 @@
-import { ClipboardEvent, useCallback, useMemo } from 'react'
+import { ClipboardEvent, useCallback, useEffect, useMemo, useRef } from 'react'
 import { katex as markdownItKatex } from '@mdit/plugin-katex'
 import MarkdownIt from 'markdown-it'
 import { escapeColorSpanText, findColorSpans, type ColorMarkupSpan } from '../markdown/colorMarkup'
 import { collectMarkdownHeadings, uniqueHeadingSlug } from '../markdown/headings'
 import { isExplicitDocumentPath, resolveWikiDocumentPath } from '../wikiPaths'
+import { scrollPreviewToLine, type PreviewFollowRequest } from './sourceNavigation'
+
+type PreviewEnvironment = {
+  headingAnchorsByLine: Record<number, string>
+  sourceLines: number[]
+}
 
 const markdownRenderer = MarkdownIt({
   html: false,
@@ -21,13 +27,13 @@ const markdownRenderer = MarkdownIt({
 markdownRenderer.linkify.set({ fuzzyLink: true })
 
 markdownRenderer.core.ruler.after('inline', 'heading_anchors', (state) => {
-  const anchorsByLine = (state.env as { headingAnchorsByLine?: Record<number, string> }).headingAnchorsByLine ?? {}
+  const { headingAnchorsByLine: anchorsByLine, sourceLines } = state.env as PreviewEnvironment
   const usedSlugs = new Set<string>()
 
   for (let index = 0; index < state.tokens.length; index += 1) {
     const token = state.tokens[index]
     if (token.type !== 'heading_open') continue
-    const preferredSlug = token.map ? anchorsByLine[token.map[0]] : undefined
+    const preferredSlug = token.map ? anchorsByLine[sourceLines[token.map[0]]] : undefined
     const inlineText = state.tokens[index + 1]?.type === 'inline' ? state.tokens[index + 1].content : 'section'
     let slug = preferredSlug
     if (!slug || usedSlugs.has(slug)) slug = uniqueHeadingSlug(slug || inlineText, usedSlugs)
@@ -36,20 +42,58 @@ markdownRenderer.core.ruler.after('inline', 'heading_anchors', (state) => {
   }
 })
 
+markdownRenderer.core.ruler.after('heading_anchors', 'preview_source_lines', (state) => {
+  const { sourceLines } = state.env as PreviewEnvironment
+  for (const token of state.tokens) {
+    if (!token.block || !token.map || token.hidden || token.type === 'inline') continue
+    token.attrSet('data-source-line', String(sourceLines[token.map[0]]))
+    token.attrSet('data-source-end', String(sourceLines[token.map[1] - 1] + 1))
+  }
+})
+
+// These rules render their own outer HTML instead of using renderToken, which
+// would ordinarily carry our source attributes onto the rendered block.
+for (const name of ['fence', 'code_block', 'math_block']) {
+  const render = markdownRenderer.renderer.rules[name]
+  if (!render) continue
+  markdownRenderer.renderer.rules[name] = (tokens, index, options, env, renderer) => {
+    const html = render(tokens, index, options, env, renderer)
+    const token = tokens[index]
+    const start = token.attrGet('data-source-line')
+    const end = token.attrGet('data-source-end')
+    return start === null || end === null ? html : html.replace(/^(\s*<[a-z][\w-]*)([^>]*>)/i,
+      (opening, tag: string, attributes: string) => attributes.includes('data-source-line=') ? opening
+        : `${tag} data-source-line="${start}" data-source-end="${end}"${attributes}`)
+  }
+}
+
 export function MarkdownPreview({
   body,
   version,
   notePaths,
   sourcePath,
+  followRequest,
   onOpenWikiLink
 }: {
   body: string
   version: number
   notePaths: string[]
   sourcePath: string | null
+  followRequest?: PreviewFollowRequest | null
   onOpenWikiLink: (path: string) => void
 }): JSX.Element {
+  const containerRef = useRef<HTMLElement | null>(null)
   const html = useMemo(() => renderMarkdownPreview(body, notePaths, sourcePath), [body, notePaths, sourcePath])
+  useEffect(() => {
+    if (!followRequest) return
+    let cancelled = false
+    // Font loading can change wrapping on the first preview. Measure only
+    // after the fonts settle, and discard requests superseded by another click.
+    void document.fonts.ready.then(() => {
+      if (!cancelled && containerRef.current) scrollPreviewToLine(containerRef.current, followRequest.line)
+    })
+    return () => { cancelled = true }
+  }, [followRequest])
   const handleCopy = useCallback((event: ClipboardEvent<HTMLElement>) => {
     const selection = window.getSelection()
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return
@@ -77,7 +121,8 @@ export function MarkdownPreview({
 
   return (
     <article
-      className="preview-pane"
+      ref={containerRef}
+      className="preview-pane markdown-preview"
       data-body-version={version}
       onCopy={handleCopy}
       onClick={(event) => {
@@ -214,8 +259,14 @@ export function renderMarkdownPreview(markdown: string, notePaths: string[], sou
   const headingAnchorsByLine = Object.fromEntries(
     collectMarkdownHeadings(markdown).map((heading) => [heading.line, heading.slug])
   )
-  return markdownRenderer.render(prepared, { headingAnchorsByLine })
-    .replace(/<p>@@NZHTML(\d+)@@<\/p>/g, (_match, index: string) => snippets[Number(index)] ?? '')
+  return markdownRenderer.render(prepared.markdown, { headingAnchorsByLine, sourceLines: prepared.sourceLines })
+    .replace(/<p([^>]*)>@@NZHTML(\d+)@@<\/p>/g, (_match, attributes: string, index: string) => {
+      const snippet = snippets[Number(index)] ?? ''
+      // Standalone callout/wiki placeholders replace the paragraph; preserve
+      // its source location on the snippet's opening element.
+      return snippet.replace(/^(<[a-z][\w-]*)([^>]*>)/i,
+        (opening, tag: string, existing: string) => existing.includes('data-source-line=') ? opening : `${tag}${attributes}${existing}`)
+    })
     .replace(/@@NZHTML(\d+)@@/g, (_match, index: string) => snippets[Number(index)] ?? '')
 }
 
@@ -230,19 +281,20 @@ function pushPreviewBlockHtml(out: string[], html: string, snippets: string[]): 
   out.push('')
 }
 
-function preprocessPreviewMarkdown(markdown: string, notePaths: string[], sourcePath: string | null, snippets: string[]): string {
+function preprocessPreviewMarkdown(markdown: string, notePaths: string[], sourcePath: string | null, snippets: string[]): { markdown: string; sourceLines: number[] } {
   const normalizedMarkdown = markdown.replace(/\r\n/g, '\n')
   const lines = normalizedMarkdown.split('\n')
   const colorSpans = findColorSpans(normalizedMarkdown)
   const suppressedColorSpanStarts = new Set<number>()
-  const out: string[] = []
+  const out: Array<{ text: string; line: number }> = []
   let codeFence: CodeFence | null = null
   let lineStart = 0
 
-  for (const line of lines) {
+  for (const [sourceLine, line] of lines.entries()) {
+    const push = (text: string) => out.push({ text, line: sourceLine })
     if (codeFence) {
       suppressColorSpansStartingOnLine(lineStart, line.length, colorSpans, suppressedColorSpanStarts)
-      out.push(line)
+      push(line)
       if (isClosingCodeFence(line, codeFence)) codeFence = null
       lineStart += line.length + 1
       continue
@@ -252,7 +304,7 @@ function preprocessPreviewMarkdown(markdown: string, notePaths: string[], source
     if (openingFence) {
       codeFence = openingFence
       suppressColorSpansStartingOnLine(lineStart, line.length, colorSpans, suppressedColorSpanStarts)
-      out.push(line)
+      push(line)
       lineStart += line.length + 1
       continue
     }
@@ -264,42 +316,42 @@ function preprocessPreviewMarkdown(markdown: string, notePaths: string[], source
       const kind = escapeHtml(callout[1].toLowerCase())
       const title = escapeHtml(callout[1].toUpperCase())
       const rest = callout[2].trim()
-      out.push(htmlPlaceholder(`<div class="preview-callout preview-callout-${kind}"><div class="preview-callout-title">${title}</div>`, snippets))
-      if (rest) out.push(renderInlinePreviewSyntax(rest, notePaths, sourcePath, snippets))
+      push(htmlPlaceholder(`<div class="preview-callout preview-callout-${kind}" data-source-line="${sourceLine}" data-source-end="${sourceLine + 1}"><div class="preview-callout-title">${title}</div>`, snippets))
+      if (rest) push(renderInlinePreviewSyntax(rest, notePaths, sourcePath, snippets))
       lineStart += line.length + 1
       continue
     }
 
-    if (/^\s*>\s*$/.test(renderedLine) && isCalloutOpenPlaceholder(out[out.length - 1], snippets)) {
-      out.push(htmlPlaceholder('</div>', snippets))
+    if (/^\s*>\s*$/.test(renderedLine) && isCalloutOpenPlaceholder(out[out.length - 1]?.text, snippets)) {
+      push(htmlPlaceholder('</div>', snippets))
       lineStart += line.length + 1
       continue
     }
 
-    out.push(renderInlinePreviewSyntax(renderedLine, notePaths, sourcePath, snippets))
+    push(renderInlinePreviewSyntax(renderedLine, notePaths, sourcePath, snippets))
     lineStart += line.length + 1
   }
 
-  const closed: string[] = []
+  const closed: typeof out = []
   let calloutOpen = false
   for (const line of out) {
-    if (isCalloutOpenPlaceholder(line, snippets)) {
-      if (calloutOpen) closed.push(htmlPlaceholder('</div>', snippets))
+    if (isCalloutOpenPlaceholder(line.text, snippets)) {
+      if (calloutOpen) closed.push({ text: htmlPlaceholder('</div>', snippets), line: line.line })
       calloutOpen = true
       closed.push(line)
       continue
     }
-    if (calloutOpen && line.trim() === '') {
-      closed.push(htmlPlaceholder('</div>', snippets))
+    if (calloutOpen && line.text.trim() === '') {
+      closed.push({ text: htmlPlaceholder('</div>', snippets), line: line.line })
       calloutOpen = false
       closed.push(line)
       continue
     }
     closed.push(line)
   }
-  if (calloutOpen) closed.push(htmlPlaceholder('</div>', snippets))
+  if (calloutOpen) closed.push({ text: htmlPlaceholder('</div>', snippets), line: lines.length - 1 })
 
-  return closed.join('\n')
+  return { markdown: closed.map(({ text }) => text).join('\n'), sourceLines: closed.map(({ line }) => line) }
 }
 
 function renderColorMarkupOnLine(

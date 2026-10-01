@@ -135,6 +135,12 @@ KaTeX is not a complete TeX distribution and does not support every LaTeX packag
 
 Use **View → Preview** to toggle the resizable rendered pane. It renders Markdown, wiki links, callouts, and KaTeX math. Raw HTML from notes is escaped rather than executed.
 
+Markdown Preview uses bundled **IBM Plex Sans** for prose and **Lilex** for code, with Zed-style typography: 16px body text, 1.5 line spacing, semibold headings, and a centered reading width up to 800px. The fonts work offline and also apply to Markdown printing. Preview keeps the current Bricriu theme colours; the editor and app interface keep their existing fonts.
+
+Click a position in the Markdown editor to scroll Preview to the corresponding passage while keeping keyboard focus in the editor. This works in either editor pane, including outside-vault Markdown files. Long wrapped paragraphs and code blocks use an approximate position within the rendered block. You can still scroll Preview independently; it follows again on the next editor click.
+
+This behavior is enabled by default. To disable it, close Bricriu, set `"markdownPreviewFollowCursor": false` in its `profile.json`, and reopen the app. This is a configuration-file option with no GUI control.
+
 - **File → Print preview / PDF** prints the rendered preview through the system print dialog, which may offer a save-to-PDF destination.
 - `Ctrl+P` / `Cmd+P` prints Preview; add `Shift` to print raw Markdown.
 - **File → Export PDF** on a Markdown file invokes Pandoc with Typst as the PDF engine. Both `pandoc` and `typst` must be installed and available on `PATH`.
@@ -154,6 +160,10 @@ On open:
 
 Autosave writes files; checkpoints are separate Git commits. A manual **Checkpoint** action is available, and the default periodic interval is three minutes when touched files exist. Close handling also attempts to save and checkpoint.
 
+The sidebar **Checkpoint** saves open vault notes and checkpoints all vault changes on the current branch. The toolbar and menu **Checkpoint** select files changed through Bricriu during the current session and require the `inuse` branch.
+
+If `.h/` is locked because no password was supplied, all manual Checkpoint buttons instead save and checkpoint public vault changes on the current branch. They leave `.h/`, `.horig/`, private review sidecars, and `.h.zip` unchanged, including any private paths already staged in Git.
+
 > [!WARNING]
 > The app can switch branches, stage paths, install or modify hooks for private notes, and create commits. Inspect the repository with command-line Git, keep a remote or separate backup, and do not enable this first in a complex worktree. Checkpoints are convenience history, not a backup strategy.
 
@@ -162,13 +172,13 @@ Autosave writes files; checkpoints are separate Git commits. A manual **Checkpoi
 This feature protects a committed archive; it is not full-disk encryption, a hardened secret manager, or a substitute for a tested backup.
 
 1. Create `.h/` directly in the opened vault and add private notes beneath it.
-2. Open the vault and enter a password when prompted.
+2. Open the vault, search for `.h` in the filename filter, and enter its password when prompted.
 3. The first checkpoint or commit creates an AES-256 encrypted `.h.zip` and a plaintext `.horig/` comparison baseline.
 4. Commit `.h.zip`. Never force-add `.h/` or `.horig/`.
 
 If the vault is a subfolder of a larger Git repository, paths are adjusted relative to that worktree. Bricriu adds plaintext paths to the repository's local `.git/info/exclude` and may install local pre-commit/pre-push hook integration. Existing hooks are preserved and run first. If `core.hooksPath` is already customized, the app reports a warning instead of modifying that location.
 
-On open, public notes appear first while an existing `.h.zip` is decrypted in a background worker. Private files remain out of the tree and content search until preparation completes, and checkpoints wait. Before later checkpoints or integrated command-line commits, `.h/` is compared byte-for-byte with `.horig/`; changes cause `.h.zip` to be replaced and the baseline refreshed. A pre-push that discovers an uncommitted archive update stops the push.
+Opening a vault leaves `.h/` locked, even if a password was previously saved. There is no startup password prompt or automatic decryption. Search for `.h` in the filename filter or open a private note directly to request the password. Content searches silently skip locked private notes and never prompt for a password; they include private notes only after you explicitly unlock. Cancel leaves private notes locked; successful unlock refreshes the tree and search results and resumes any requested private note. Automatic checkpoints wait; manual checkpoints can commit public changes while the private folder is locked. When private notes are unlocked, checkpoints and integrated command-line commits compare `.h/` byte-for-byte with `.horig/`; changes cause `.h.zip` to be replaced and the baseline refreshed. A pre-push that discovers an uncommitted archive update stops the push.
 
 Important boundaries:
 
@@ -214,7 +224,8 @@ The app uses WebView local storage to remember workspace state such as the last 
   "gitStatusPollIntervalMs": 300000,
   "typstPreviewDebounceMs": 250,
   "closeMarkdownBeforeTrack": true,
-  "persistRecentFiles": true
+  "persistRecentFiles": true,
+  "markdownPreviewFollowCursor": true
 }
 ```
 

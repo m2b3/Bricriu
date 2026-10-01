@@ -34,6 +34,11 @@ function harness({ vault = { root: 'C:/vault' }, tabs = [], requests = [] } = {}
     LAST_VAULT_KEY: 'last-vault', localStorage: { getItem: () => 'C:/vault' },
     samePath: (a, b) => a.toLowerCase() === b.toLowerCase(),
     isPrivateVaultPath: (path) => path.startsWith('.h/'),
+    async ensurePrivateVaultAccess(path) {
+      if (!context.privatePending || !path.startsWith('.h/')) return true
+      calls.push('request_private_unlock')
+      return new Promise((resolve) => { context.finishUnlock = resolve })
+    },
     tabId: (path, mode) => `${path}:${mode}`,
     isRawSourceMode: (mode) => mode === 'markdown' || mode === 'canvas',
     latestTabBody: (tab) => tab.body,
@@ -142,18 +147,30 @@ test('requests wait for profile loading and busy operations, and are fetched onl
   assert.equal(app.calls.filter((call) => call === 'get_next_open_note').length, 1)
 })
 
-test('private notes wait for unlock before opening and releasing the next request', async () => {
+test('explicit private file requests ask for unlock before opening and releasing the next request', async () => {
   const app = harness({ requests: [{ vaultPath: 'C:/vault', path: '.h/private.md' }] })
   app.context.privatePending = true
   await app.next()
   assert.equal(app.context.tabs.length, 0)
   assert.equal(app.context.startupNote.path, '.h/private.md')
+  assert.ok(app.calls.includes('request_private_unlock'))
   app.context.privatePending = false
-  app.openTab()
+  app.context.finishUnlock(true)
   await tick()
   assert.equal(app.context.selected, '.h/private.md:markdown')
   assert.equal(app.context.startupNote, null)
   assert.equal(app.context.openRequestsPending, true)
+})
+
+test('cancelling a private file request releases the queue without reading the file', async () => {
+  const app = harness({ requests: [{ vaultPath: 'C:/vault', path: '.h/private.md' }] })
+  app.context.privatePending = true
+  await app.next()
+  app.context.finishUnlock(false)
+  await tick()
+  assert.equal(app.context.startupNote, null)
+  assert.equal(app.context.openRequestsPending, true)
+  assert.ok(!app.calls.includes('read_note'))
 })
 
 test('TXT, CSV and JSON open in existing tabs without duplicating them', async () => {
