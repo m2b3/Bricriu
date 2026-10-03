@@ -34,7 +34,7 @@ function harness() {
     clearTimeout(key) { state.timers.delete(key) }
   }
   const context = createContext({
-    vault: { root: 'C:/vault' }, tabs: state.tabs, activeTab: tab, profile: { autosaveDelayMs: 5000 },
+    busy: false, vault: { root: 'C:/vault' }, tabs: state.tabs, activeTab: tab, profile: { autosaveDelayMs: 5000 },
     tabsRef: { current: state.tabs }, latestBodiesRef: { current: new Map([[tab.id, tab.body]]) },
     externalMonitorRef: { current: null }, externalWatchSyncRef: { current: Promise.resolve() },
     createExternalChangeMonitor(options) { state.options = options; return createExternalChangeMonitor(options) },
@@ -152,6 +152,18 @@ test('a newer editor buffer or queued replacement prevents a stale reload commit
   app.state.tabs = [{ ...app.tab, bodyVersion: 1 }]
   assert.equal(app.state.options.update(snapshot, note, true), false)
   assert.equal(app.state.tabs[0].body, 'local edits')
+  app.cleanup()
+})
+
+test('autosave waits while a native dialog or another busy operation is active', () => {
+  const app = harness()
+  app.context.busy = true
+  app.autosave()
+  assert.equal(app.state.timers.size, 0)
+  app.context.busy = false
+  const cancel = app.autosave()
+  assert.equal(app.state.timers.size, 1)
+  cancel()
   app.cleanup()
 })
 

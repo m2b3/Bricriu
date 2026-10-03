@@ -61,4 +61,6 @@ If dependencies change, commit the relevant lockfile, run `npm run notices`, rev
 
 ## Documentation style
 
+Keep the documentation in GitHub-flavored Markdown: [README.md](README.md) is the short introduction and first-use path, [USER_GUIDE.md](USER_GUIDE.md) holds task and feature instructions, and [install.md](install.md) covers installation, builds, and troubleshooting. Extend the guide with descriptive topic headings and update its linked contents when adding a section. Preserve existing heading links where possible, and link to detailed instructions instead of duplicating them in the README. Documentation-only changes do not require an app build; check relative links, heading anchors, and the documented UI labels instead.
+
 Be candid about maturity and platform coverage. Use **experimental** or **untested** where warranted. Do not describe a compiled artifact as supported until it has been installed and exercised on that platform.

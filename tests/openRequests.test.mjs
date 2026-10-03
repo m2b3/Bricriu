@@ -184,7 +184,7 @@ test('TXT, CSV and JSON open in existing tabs without duplicating them', async (
 
 test('plain-text documents retain their Save As extensions and disable Markdown transformations', () => {
   const context = createContext({})
-  for (const name of ['isPlainTextPath', 'basename', 'parentFolder', 'noteName', 'normalizeSaveAsPath', 'suggestSaveAsPath', 'noteMarkdownTools']) {
+  for (const name of ['isPlainTextPath', 'basename', 'parentFolder', 'noteName', 'saveAsDefaultPath', 'saveAsFilters', 'noteMarkdownTools']) {
     context[name] = evaluate(findNode((node) => ts.isFunctionDeclaration(node) && node.name?.text === name), context)
   }
   const commandDeclaration = findNode((node) => ts.isVariableDeclaration(node) && node.name.getText(source) === 'markdownCommand')
@@ -194,8 +194,8 @@ test('plain-text documents retain their Save As extensions and disable Markdown 
   const command = wrapCommand(() => { transformed += 1; return true })
   for (const name of ['note.txt', 'table.CSV', 'settings.json']) {
     context.pathRef.current = name
-    assert.equal(context.normalizeSaveAsPath(`nested/${name}`), `nested/${name}`)
-    assert.equal(context.suggestSaveAsPath(name, false), name.replace('.', ' copy.'))
+    assert.equal(context.saveAsDefaultPath('/vault', `nested/${name}`, false), `/vault/nested/${name}`)
+    assert.equal(context.saveAsFilters(name, 'markdown')[0].extensions[0], name.split('.').pop().toLowerCase())
     assert.equal(command({}), false)
     assert.equal(context.noteMarkdownTools(null, context.pathRef).length, 0)
   }

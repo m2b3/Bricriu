@@ -6,9 +6,54 @@
 
 Bricriu is a local-first desktop workspace for Markdown notes—and more. Open a folder as a vault, browse and search it, edit several files at once, and save your work as ordinary files that remain usable without Bricriu. Alongside its Markdown-centered workflow, Bricriu is experimenting with Typst documents, visual canvases, a vault calendar, and rich-text editing and review.
 
-**Open-source acknowledgements:** Bricriu is possible because of [Tauri](https://tauri.app/), [Rust](https://www.rust-lang.org/), [React](https://react.dev/), [CodeMirror](https://codemirror.net/), [Vite](https://vite.dev/), [Typst](https://typst.app/), [Tiptap](https://tiptap.dev/) and [ProseMirror](https://prosemirror.net/), [React Flow](https://reactflow.dev/), [FullCalendar](https://fullcalendar.io/), [markdown-it](https://github.com/markdown-it/markdown-it), [mdit-plugins](https://github.com/mdit-plugins/mdit-plugins), [KaTeX](https://katex.org/), [nspell](https://github.com/wooorm/nspell), and the broader JavaScript and Rust ecosystems. The wordmark is rendered in Dominic Stanley's OFL-licensed [Segotia](https://github.com/insert-smiley/Irishfontclub-segotia); the squaremark is an unmodified rendering in Séamas Ó Brógáin's [Gadelica](https://www.gaelchlo.com/clonna2.html). The generated [third-party inventory](THIRD_PARTY_NOTICES.md) provides the fuller attribution and attributes every package in the current JavaScript and Rust dependency graphs, including transitive, build, optional, and platform-specific dependencies.
+**[User guide](USER_GUIDE.md)** · [First steps](#first-steps-windows) · [Download Windows installer](https://raw.githubusercontent.com/m2b3/Bricriu/main/Bricriu_0.1.0_x64-setup.exe) · [Installation and troubleshooting](install.md)
 
-[Xueqing Zhai](https://github.com/jess-zhai) built the initial prototypes, whose ideas were later absorbed into Bricriu.
+## First steps (Windows)
+
+1. **Install.** Download [`Bricriu_0.1.0_x64-setup.exe`](https://raw.githubusercontent.com/m2b3/Bricriu/main/Bricriu_0.1.0_x64-setup.exe), double-click it, and follow the prompts. This experimental installer is for **64-bit Windows 10/11**. It is unsigned, so Windows may show an unknown-publisher or SmartScreen warning; see the [installation guide](install.md#install-on-windows-1011-x64). You do not need to clone the repository or install developer tools.
+2. **Launch Bricriu.** Open **Bricriu** from the Start menu, or double-click its desktop shortcut if you created one during installation.
+3. **Create a vault folder.** In File Explorer, create a folder such as `Documents\Bricriu Notes`. An empty folder is fine; you can also use a folder containing copied notes. A *vault* is simply the folder you choose for your notes—no account, import, or conversion is required. Start with disposable notes and keep an independent backup of important work.
+4. **Open that folder.** In Bricriu's sidebar, clear **Vault folder path** and click **Open** to choose the folder. Alternatively, paste the folder's full path into that field and click **Open**. The folder must already exist.
+5. **Write and save.** Click **New note**, enter `First note.md`, and click **Create**. Type something, then click **Save** or press `Ctrl+S`. Choose **View → Preview** to see the formatted Markdown. Your note is an ordinary file in the folder you chose.
+
+Continue with the **[user guide](USER_GUIDE.md)** for editing, search, tabs, shortcuts, and experimental features. For another platform or a source build, see [Install](#install).
+
+### Vault, no vault, and outside files
+
+| Situation | What it means |
+| --- | --- |
+| **Vault open** | One folder is the workspace. Its supported files appear in the tree and vault searches; new notes are created there. The folder does not need to be a Git repository. |
+| **No vault open** | No workspace folder has been selected or restored yet. **New note** and **File → Open file** require an open vault. Choose a folder to start. |
+| **Outside vault** | After opening a vault, **File → Open file** can open a supported file elsewhere in its own tab. It stays at its original location and does not join the vault's search, backlinks, or Git checkpoints. |
+
+To open an existing document directly from Windows, right-click it and choose **Open with → Bricriu**. If no vault is open, Bricriu automatically uses the file's folder, or the last vault if it contains that file. If a vault is already open, it stays selected. Installing Bricriu does not change your default editor, so double-clicking a document may still open another app. See [opening individual files](USER_GUIDE.md#open-an-individual-file).
+
+## Supported files
+
+| File type | What you can do |
+| --- | --- |
+| Markdown: `.md`, `.markdown` | Write notes with formatted preview, wiki links, backlinks, callouts, and math. This is the primary, somewhat-tested workflow. |
+| Typst: `.typ` | Edit typesetting source, preview it, and export PDF. **Highly experimental.** |
+| Plain text: `.txt`, `.csv`, `.json` | Edit the raw text and save with the original extension. CSV opens as text, not a spreadsheet; JSON has no dedicated structured editor. |
+
+Canvas content lives inside Markdown files; Track Changes also works with Markdown and stores additional review state. Other file types are not general-purpose editable documents. See the [file-format details](USER_GUIDE.md#supported-file-types).
+
+## Features
+
+- **Organize and find:** folder tree, pinned notes, filename filtering, and vault-wide content search.
+- **Write and read:** Markdown editing and preview, manual save and delayed autosave, spellcheck, word counts, wiki links, backlinks, callouts, and KaTeX math.
+- **Work across notes:** multiple tabs, a resizable two-file split view, recent files, session restoration, and three interface themes.
+- **Handle disk changes:** filesystem watching, external-change warnings, and save-conflict checks.
+- **Print and export:** preview printing and PDF workflows; direct Markdown PDF export needs [optional tools](install.md#optional-runtime-tools).
+- **Experiment:** Typst, rich-text Track Changes, visual Canvas, a vault Calendar, Git checkpoints, and encrypted private notes. These features have much less testing than ordinary Markdown editing.
+
+The [user guide contents](USER_GUIDE.md#contents) link to instructions and limitations for each feature.
+
+![Bricriu showing a demo Markdown vault](docs/images/bricriu.png)
+
+## Status and scope
+
+This is personal pre-release software at version `0.1.0`, not a polished or audited product.
 
 Bricriu was vibe-coded with OpenAI Codex and then used and tested for roughly six months by one user. The source has evolved through real use, but its bus factor, device coverage, test population, accessibility review, security review, and packaging coverage are all minimal.
 
@@ -17,38 +62,6 @@ Bricriu was vibe-coded with OpenAI Codex and then used and tested for roughly si
 
 > [!WARNING]
 > Only the ordinary Markdown workflow has received even modest real-world testing: approximately six months of use by **one person** in a Windows-oriented development environment. That is not broad or professional QA. Typst, Track Changes, Canvas, Calendar, Git automation, private-folder encryption, packaging, and all macOS/Linux behavior should be treated as **very experimental**.
-
-![Bricriu showing a demo Markdown vault](docs/images/bricriu.png)
-
-## Features
-
-The Markdown-centered workflow includes:
-
-- Folder-based vaults with no proprietary note database.
-- A nested file tree with filename filtering, pinned notes, and create, rename, and delete actions.
-- Fast non-indexed content search with file-filter scoping and jump-to-match highlighting.
-- Multiple tabs, a resizable two-file split view, recent files, and session/window restoration.
-- `Ctrl+Tab` / `Ctrl+Shift+Tab` cycle right / left through tabs, wrapping at either end. The sidebar lists open tabs after pinned notes and search results (both filename and content matches). When there are no search results, open tabs appear above the regular file directory. Files already listed in the pinned area or search results are excluded; files in the regular directory remain in the list.
-- Classic, brighter high-contrast, and dark interface themes, selectable from **Options → Theme**.
-- A CodeMirror 6 Markdown editor with manual save, delayed autosave, undo/redo, Canadian-English spellcheck, word/character counts, list helpers, and URL linkification.
-- Filesystem watching, external-change warnings, and save-conflict checks.
-- Wiki links (`[[Note]]`), link completion, backlinks, callouts, and inline/block KaTeX math.
-- A split Markdown preview that follows editor clicks by default, with escaped raw HTML, printing, and PDF workflows. Set `markdownPreviewFollowCursor` to `false` in `profile.json` to disable following.
-
-Experimental features extend the workspace beyond the core Markdown editor:
-
-- Typst editing plus embedded SVG/HTML preview and PDF export.
-- A Tiptap/ProseMirror rich-text editor and review mode, currently backed by Markdown files, with Track Changes snapshots, accept/reject tools, and sidecar state.
-- A YAML-backed visual Canvas stored inside Markdown files.
-- A vault-local Calendar with recurring events.
-- Git checkpoint commits on an app-managed `inuse` branch.
-- Password-protected AES-256 ZIP archives for an optional `.h/` private area.
-
-Bricriu currently recognizes `.md`, `.markdown`, and `.typ` files. **Only `.md` and `.markdown` files are in the somewhat-tested path.** Other file types in a vault are not general-purpose editable documents.
-
-## Status and scope
-
-This is personal pre-release software at version `0.1.0`, not a polished or audited product.
 
 The design is deliberately local-first:
 
@@ -70,7 +83,7 @@ Bricriu (approximately **BRICK-roo**) is named for the eloquent troublemaker and
 
 Bricriu now has an experimental installer for 64-bit Windows 10/11:
 
-**[Download `Bricriu_0.1.0_x64-setup.exe`](Bricriu_0.1.0_x64-setup.exe)**
+**[Download `Bricriu_0.1.0_x64-setup.exe`](https://raw.githubusercontent.com/m2b3/Bricriu/main/Bricriu_0.1.0_x64-setup.exe)**
 
 The installer is not code-signed, so Windows may identify the publisher as unknown or show a Microsoft Defender SmartScreen warning. Only continue if you obtained the file from this repository or its official Releases page. The installer and its upgrade/uninstall behavior have received very limited testing; Bricriu itself remains pre-release software. Back up your notes and begin with a disposable vault.
 
@@ -82,15 +95,15 @@ Installing the Windows package does not require Node.js, npm, Rust, or Visual St
 | macOS | **Untested.** Build on macOS with Xcode Command Line Tools. Packaging, icons, signing, notarization, and runtime behavior still need validation. |
 | Linux | **Untested.** Install the Tauri prerequisites for your distribution and build on Linux. WebKit/system-package requirements and generated packages still need validation. |
 
-**Build and install from source on Windows x64:** install the [one-time prerequisites](install.md#windows-source-build-prerequisites), save your notes and close Bricriu, then run [build-install.bat](build-install.bat) from the repository folder in PowerShell or Command Prompt:
+### Build from source
+
+For a Windows build, install the [one-time prerequisites](install.md#windows-source-build-prerequisites), save your notes and close Bricriu, then run [build-install.bat](build-install.bat) from the repository folder:
 
 ```powershell
 .\build-install.bat
 ```
 
-This runs `npm ci`, builds the app and Windows installer, and launches the installer. Follow its prompts to finish. Use the same command after updating the source to rebuild and reinstall.
-
-The script uses an already-installed compatible Node.js runtime; a line such as `v22.14.0` reports the selected version. It does not install or upgrade Node.js or install the system build prerequisites. Run `.\build-install.bat --check` to check Node and Rust availability before building. See the [full script instructions](install.md#one-command-windows-build-and-install).
+This installs project dependencies, builds the app and installer, and launches the installer. See the [full script instructions](install.md#one-command-windows-build-and-install) for prerequisites and availability checks.
 
 For development, install the platform prerequisites and run:
 
@@ -99,58 +112,7 @@ npm ci
 npm run tauri:dev
 ```
 
-To build the installer without running it:
-
-```powershell
-npm ci
-npm run build-exe
-```
-
-This writes the Tauri-generated installer below `src-tauri\target\release\bundle\nsis\` and copies it to the repository root as `Bricriu_<version>_x64-setup.exe`. The version and product name come from `src-tauri\tauri.conf.json`.
-
-To build only the unpackaged application executable on Windows, use:
-
-```powershell
-.\build-exe.bat
-```
-
-`build-exe.bat` uses an installed Node.js 22.12.0-or-newer version for that build only. With NVM for Windows, it can find a suitable installed version even when an older Node version is active, and it does not persistently switch the active version. It does not install dependencies, so rerun `npm ci` after dependency-lock changes. The current Windows build has been verified with Node.js 22.14.0. It produces `src-tauri\target\release\Bricriu.exe`, not an installer.
-
-The executable accepts one existing Markdown or Typst file, for example
-`Bricriu.exe "C:\Notes\my document.md"`. Relative paths use the terminal's current
-directory. The file opens in a new app instance, using the last vault if it
-contains the file, or the file's parent folder otherwise. Missing files produce
-an error in the app; they are not created automatically.
-
-For a `b` command, put a `b.cmd` file in a folder on your user `PATH`, with these
-contents (adjust the executable path for your checkout):
-
-```bat
-@echo off
-start "" "C:\path\to\notesproject\src-tauri\target\release\Bricriu.exe" %*
-```
-
-The trailing `%*` forwards arguments, so `b doc.md` and `b "my document.md"` work.
-Keep the caller's working directory unchanged in this launcher. Running `b`
-without a filename opens the app normally.
-
-The Markdown-It 15, KaTeX, and Tiptap 3 upgrades do not require a vault migration, a VS Code extension, or separately installed runtime plugins. Those libraries are bundled into Bricriu. Running the resulting executable does not require Node.js, npm, Rust, or the C++ build tools, although WebView2 and any feature-specific optional tools listed below are still runtime requirements.
-
-Useful checks and builds:
-
-```sh
-npm run build
-cargo check --manifest-path src-tauri/Cargo.toml
-npm run tauri:build
-```
-
-The first Rust build is large and slow. Build distributable desktop packages on each target operating system rather than expecting normal cross-platform bundles from one machine.
-
-Optional external tools:
-
-- [Git](https://git-scm.com/) is required only for Git checkpoint features.
-- Typst preview and Typst PDF export use the embedded compiler path.
-- Direct Markdown **Export PDF** requires both [Pandoc](https://pandoc.org/) and the [Typst CLI](https://github.com/typst/typst) on `PATH`. Printing the preview uses the system print dialog instead.
+The [installation and build guide](install.md) covers executable-only builds, installer packaging, platform prerequisites, optional tools, and troubleshooting. It also explains the [command-line launcher](install.md#open-a-file-from-the-command-line). See [Contributing](CONTRIBUTING.md) for development checks.
 
 ## Start safely
 
@@ -185,6 +147,12 @@ Read the [user guide](USER_GUIDE.md) before enabling Git automation or private n
 - **Search/watch/storage:** Rust `grep-*`, `ignore`, `regex`, `notify`, `serde`, and `zip` crates
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the complete dependency inventory and declared licenses.
+
+## Acknowledgements
+
+**Open-source acknowledgements:** Bricriu is possible because of [Tauri](https://tauri.app/), [Rust](https://www.rust-lang.org/), [React](https://react.dev/), [CodeMirror](https://codemirror.net/), [Vite](https://vite.dev/), [Typst](https://typst.app/), [Tiptap](https://tiptap.dev/) and [ProseMirror](https://prosemirror.net/), [React Flow](https://reactflow.dev/), [FullCalendar](https://fullcalendar.io/), [markdown-it](https://github.com/markdown-it/markdown-it), [mdit-plugins](https://github.com/mdit-plugins/mdit-plugins), [KaTeX](https://katex.org/), [nspell](https://github.com/wooorm/nspell), and the broader JavaScript and Rust ecosystems. The wordmark is rendered in Dominic Stanley's OFL-licensed [Segotia](https://github.com/insert-smiley/Irishfontclub-segotia); the squaremark is an unmodified rendering in Séamas Ó Brógáin's [Gadelica](https://www.gaelchlo.com/clonna2.html). The generated [third-party inventory](THIRD_PARTY_NOTICES.md) provides the fuller attribution and attributes every package in the current JavaScript and Rust dependency graphs, including transitive, build, optional, and platform-specific dependencies.
+
+[Xueqing Zhai](https://github.com/jess-zhai) built the initial prototypes, whose ideas were later absorbed into Bricriu.
 
 ## Documentation
 

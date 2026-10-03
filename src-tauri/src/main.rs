@@ -728,52 +728,17 @@ fn save_note_as(
     state: tauri::State<AppState>,
     path: String,
     body: String,
-) -> Result<CreateNoteResult, String> {
+    open_paths: Vec<String>,
+) -> Result<NoteContent, String> {
     let root = current_root(&state)?;
-    let (normalized, abs) = resolve_new_vault_note_path(&root, &path)?;
-    ensure_private_path_ready(&state, &normalized)?;
-    if abs.exists() {
-        return Err("A note already exists at that path.".to_string());
-    }
-
-    let parent = abs
-        .parent()
-        .ok_or_else(|| "Could not resolve note folder.".to_string())?;
-    let parent_created = !parent.exists();
-    fs::create_dir_all(parent).map_err(|err| format!("Could not create folder: {err}"))?;
-
-    let write_result = {
-        use std::io::Write;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&abs)
-            .map_err(|err| {
-                if err.kind() == std::io::ErrorKind::AlreadyExists {
-                    "A note already exists at that path.".to_string()
-                } else {
-                    format!("Could not create note: {err}")
-                }
-            })?;
-        file.write_all(body.as_bytes())
-            .map_err(|err| format!("Could not save note: {err}"))
-            .and_then(|_| {
-                file.sync_all()
-                    .map_err(|err| format!("Could not flush note: {err}"))
-            })
-    };
-    if let Err(err) = write_result {
-        let _ = fs::remove_file(&abs);
-        return Err(err);
-    }
-
-    let created_folder = parent_created
-        .then(|| parent_folder_relative(&normalized))
-        .flatten();
-    Ok(CreateNoteResult {
-        note: read_note(state, normalized)?,
-        created_folder,
-    })
+    let resolved = resolve_save_as_path(&root, &path, &open_paths)?;
+    let display = document_display_path(&root, &resolved.abs, resolved.out_of_vault)?;
+    // Check the resolved relative path so absolute paths and symlink aliases
+    // cannot bypass the private-vault lock.
+    ensure_private_path_ready(&state, &display)?;
+    // The system save dialog handles confirmation when replacing a file.
+    write_note_atomically(&resolved.abs, &body)?;
+    read_note(state, display)
 }
 
 #[tauri::command]
@@ -1297,42 +1262,35 @@ fn resolve_safe(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(root.join(clean))
 }
 
-fn resolve_new_vault_note_path(root: &Path, path: &str) -> Result<(String, PathBuf), String> {
+fn resolve_save_as_path(
+    root: &Path,
+    path: &str,
+    open_paths: &[String],
+) -> Result<ResolvedDocumentPath, String> {
     let requested = Path::new(path.trim());
-    if requested.is_absolute() {
-        return Err("Save As paths must stay inside the vault.".to_string());
+    if !is_note_file(requested) {
+        return Err("Choose a .md, .markdown, .typ, .txt, .csv, or .json file name.".to_string());
     }
-
-    let normalized = normalize_note_path(path)?;
-    let abs = resolve_safe(root, &normalized)?;
-    let parent = abs
-        .parent()
-        .ok_or_else(|| "Could not resolve note folder.".to_string())?;
-
-    // A lexical vault-relative path can still escape through an existing symlink
-    // or junction. Check the nearest existing ancestor before creating folders.
-    let mut existing_ancestor = parent;
-    while !existing_ancestor.exists() {
-        existing_ancestor = existing_ancestor
-            .parent()
-            .ok_or_else(|| "Could not resolve note folder.".to_string())?;
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        resolve_safe(root, &normalize_relative_input(path)?)?
+    };
+    let resolved = resolve_document_candidate_for_write(root, candidate)?;
+    if !requested.is_absolute() && resolved.out_of_vault {
+        return Err("Relative Save As paths must stay inside the vault.".to_string());
     }
-    let canonical_ancestor = existing_ancestor
-        .canonicalize()
-        .map_err(|err| format!("Could not resolve note folder: {err}"))?;
-    let canonical_root = root
-        .canonicalize()
-        .map_err(|err| format!("Could not resolve vault folder: {err}"))?;
-    if !path_is_inside(&canonical_ancestor, &canonical_root) {
-        return Err("Save As paths must stay inside the vault.".to_string());
+    if !is_note_file(&resolved.abs) || resolved.abs.is_dir() {
+        return Err("Choose a Markdown, Typst, TXT, CSV, or JSON file.".to_string());
     }
-
-    Ok((normalized, abs))
-}
-
-fn parent_folder_relative(path: &str) -> Option<String> {
-    path.rsplit_once('/')
-        .and_then(|(folder, _)| (!folder.is_empty()).then(|| folder.to_string()))
+    for open_path in open_paths {
+        if let Ok(open) = resolve_document_path_for_write(root, open_path) {
+            if open.abs == resolved.abs {
+                return Err("That destination is already open in another tab.".to_string());
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 struct ResolvedDocumentPath {
@@ -2936,17 +2894,58 @@ mod private_checkpoint_tests {
     }
 
     #[test]
-    fn save_as_paths_are_new_and_vault_relative() {
-        let root = test_root("save-as-path");
-        let (normalized, abs) = resolve_new_vault_note_path(&root, "folder/copy").unwrap();
-        assert_eq!(normalized, "folder/copy.md");
-        assert_eq!(abs, root.join("folder/copy.md"));
+    fn save_as_accepts_absolute_destinations_inside_and_outside_the_vault() {
+        let root = test_root("save-as-path").canonicalize().unwrap();
+        let vault = root.join("vault");
+        fs::create_dir_all(vault.join("folder")).unwrap();
+        let relative = resolve_save_as_path(&vault, "folder/copy.md", &[]).unwrap();
+        assert_eq!(relative.abs, vault.join("folder/copy.md"));
+        assert!(!relative.out_of_vault);
+        let inside = resolve_save_as_path(&vault, &vault.join("copy.md").to_string_lossy(), &[]).unwrap();
+        assert!(!inside.out_of_vault);
+        let outside = resolve_save_as_path(&vault, &root.join("copy.txt").to_string_lossy(), &[]).unwrap();
+        assert!(outside.out_of_vault);
+        assert_eq!(outside.abs, root.join("copy.txt"));
+        write_note_atomically(&outside.abs, "outside text").unwrap();
+        assert_eq!(fs::read_to_string(&outside.abs).unwrap(), "outside text");
+        assert!(resolve_save_as_path(&vault, "../outside.md", &[]).is_err());
+        assert!(resolve_save_as_path(&vault, "note.docx", &[]).is_err());
+        // Never silently change the filename after the native overwrite prompt.
+        assert!(resolve_save_as_path(&vault, "copy", &[]).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 
-        assert!(resolve_new_vault_note_path(&root, "../outside.md").is_err());
-        assert!(
-            resolve_new_vault_note_path(&root, &root.join("absolute.md").to_string_lossy())
-                .is_err()
-        );
+    #[test]
+    fn save_as_replaces_the_selected_file_and_protects_other_open_files() {
+        let root = test_root("save-as-write").canonicalize().unwrap();
+        assert!(resolve_save_as_path(&root, "missing.md", &["missing.md".into()]).is_err());
+        fs::write(root.join("original.md"), "original").unwrap();
+        fs::write(root.join("copy.md"), "old copy").unwrap();
+        let resolved = resolve_save_as_path(&root, "copy.md", &[]).unwrap();
+        write_note_atomically(&resolved.abs, "edited copy").unwrap();
+        assert_eq!(fs::read_to_string(root.join("original.md")).unwrap(), "original");
+        assert_eq!(fs::read_to_string(root.join("copy.md")).unwrap(), "edited copy");
+        assert!(resolve_save_as_path(&root, &root.join("copy.md").to_string_lossy(), &["copy.md".into()]).is_err());
+        fs::create_dir(root.join("directory.md")).unwrap();
+        assert!(resolve_save_as_path(&root, "directory.md", &[]).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_as_resolves_aliases_before_privacy_and_open_file_checks() {
+        use std::os::unix::fs::symlink;
+        let root = test_root("save-as-alias").canonicalize().unwrap();
+        let vault = root.join("vault");
+        fs::create_dir_all(vault.join(".h")).unwrap();
+        fs::write(vault.join(".h/secret.md"), "secret").unwrap();
+        symlink(&root, vault.join("outside")).unwrap();
+        symlink(vault.join(".h"), vault.join("alias")).unwrap();
+        symlink(vault.join(".h/secret.md"), vault.join("alias.md")).unwrap();
+        assert!(resolve_save_as_path(&vault, "outside/escape.md", &[]).is_err());
+        let private = resolve_save_as_path(&vault, "alias/new.md", &[]).unwrap();
+        assert_eq!(document_display_path(&vault, &private.abs, private.out_of_vault).unwrap(), ".h/new.md");
+        assert!(resolve_save_as_path(&vault, "alias.md", &[".h/secret.md".into()]).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

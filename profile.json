@@ -4,5 +4,6 @@
   "gitStatusPollIntervalMs": 300000,
   "typstPreviewDebounceMs": 250,
   "closeMarkdownBeforeTrack": true,
-  "persistRecentFiles": true
+  "persistRecentFiles": true,
+  "markdownPreviewFollowCursor": true
 }

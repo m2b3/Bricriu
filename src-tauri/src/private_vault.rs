@@ -16,7 +16,20 @@ const BASELINE_DIR: &str = ".horig";
 const ARCHIVE_FILE: &str = ".h.zip";
 const ARCHIVE_MARKER: &str = ".notesproject-private-marker";
 const SETTINGS_FILE: &str = "private-vaults.json";
+const VAULT_ID_FILE: &str = ".notesproject/private-vault-id";
 const HOOK_MARKER: &str = "# NotesProject private-vault hook";
+// These names are private/generated at every depth, independently of a vault's
+// current location. The encrypted .h.zip archive deliberately remains trackable.
+const PRIVATE_GIT_EXCLUDES: &[&str] = &[
+    "# Bricriu private files (all vault locations)",
+    ".h/",
+    ".horig/",
+    ".h.notesproject-new*",
+    ".horig.notesproject-new*",
+    ".h.zip.notesproject-tmp*",
+    "private-vaults.json",
+    "**/.notesproject/private-vault-id",
+];
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,8 +55,7 @@ impl PrivateVaultInfo {
             enabled: true,
             archive_updated: false,
             hooks_installed: false,
-            message: "Private .h is locked."
-                .to_string(),
+            message: "Private .h is locked.".to_string(),
         }
     }
 }
@@ -102,9 +114,7 @@ fn prepare_on_open_with_settings(
     // A new plaintext .h folder does not need an archive round-trip on open.
     // The first checkpoint or commit will create both .h.zip and .horig.
     if private.is_dir() && !archive.exists() {
-        if supplied_password.is_some() && stored.as_deref() != Some(password) {
-            write_password(settings_path, root, password)?;
-        }
+        write_password(settings_path, root, password)?;
         let (hooks_installed, warnings) =
             configure_git_integration(root, settings_path, is_git_repo)?;
         let mut message =
@@ -130,9 +140,8 @@ fn prepare_on_open_with_settings(
         extract_archive_to_working_copies(root, password)?;
     }
 
-    if supplied_password.is_some() && stored.as_deref() != Some(password) {
-        write_password(settings_path, root, password)?;
-    }
+    // Migrate a legacy path-keyed password only after successfully opening it.
+    write_password(settings_path, root, password)?;
 
     let (hooks_installed, warnings) = configure_git_integration(root, settings_path, is_git_repo)?;
 
@@ -196,8 +205,14 @@ fn sync_if_needed_with_settings(root: &Path, settings_path: &Path) -> Result<boo
 
 pub fn maybe_run_cli() -> Option<i32> {
     let args = env::args().collect::<Vec<_>>();
-    let marker = args.iter().position(|arg| arg == "--private-vault-sync")?;
-    if args.len() <= marker + 3 {
+    run_cli(&args)
+}
+
+fn run_cli(args: &[String]) -> Option<i32> {
+    let marker = args
+        .iter()
+        .position(|arg| arg == "--private-vault-sync" || arg == "--private-vault-sync-relative")?;
+    if args.len() != marker + 4 {
         eprintln!("Bricriu private-vault hook received invalid arguments.");
         return Some(2);
     }
@@ -205,7 +220,16 @@ pub fn maybe_run_cli() -> Option<i32> {
     let root = PathBuf::from(&args[marker + 1]);
     let settings = PathBuf::from(&args[marker + 2]);
     let hook = &args[marker + 3];
-    match sync_if_needed_with_settings(&root, &settings) {
+    let relative = args[marker] == "--private-vault-sync-relative";
+    let result = if relative {
+        env::current_dir()
+            .map_err(|err| format!("Could not locate Git working directory: {err}"))
+            .and_then(|cwd| run_relative_hook(&cwd, &root, &settings, hook))
+    } else {
+        // Old installed hooks still stage the archive themselves.
+        sync_if_needed_with_settings(&root, &settings)
+    };
+    match result {
         Ok(changed) if hook == "pre-push" && changed => {
             eprintln!("Bricriu refreshed .h.zip. Commit the updated archive before pushing.");
             Some(3)
@@ -216,6 +240,52 @@ pub fn maybe_run_cli() -> Option<i32> {
             Some(2)
         }
     }
+}
+
+fn run_relative_hook(
+    cwd: &Path,
+    relative_vault: &Path,
+    settings: &Path,
+    hook: &str,
+) -> Result<bool, String> {
+    if !matches!(hook, "pre-commit" | "pre-push") {
+        return Err("Unknown private-vault hook.".to_string());
+    }
+    if relative_vault
+        .components()
+        .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
+    {
+        return Err("Private-vault hook path must be repository-relative.".to_string());
+    }
+    let repository = git_worktree_root(cwd)?;
+    let root = repository.join(relative_vault).canonicalize().map_err(|err| {
+        format!("Could not locate private vault; reopen and unlock its new location in Bricriu: {err}")
+    })?;
+    if !root.starts_with(&repository) || !root.is_dir() {
+        return Err("Private-vault hook path must stay inside the repository.".to_string());
+    }
+    // Compare native, canonical paths here, avoiding shell/Windows path-format
+    // differences. A public checkpoint must skip both sync and archive staging.
+    let public_root = env::var_os(crate::git_checkpoint::PUBLIC_CHECKPOINT_ROOT)
+        .and_then(|path| PathBuf::from(path).canonicalize().ok());
+    if hook == "pre-commit" && public_root.as_deref() == Some(root.as_path()) {
+        return Ok(false);
+    }
+    let changed = sync_if_needed_with_settings(&root, &repository.join(settings))?;
+    if hook == "pre-commit" {
+        let archive = format!(":(literal){}", git_vault_path(&root, ARCHIVE_FILE)?);
+        let output = git_command(&repository)
+            .args(["add", "-f", "--", &archive])
+            .output()
+            .map_err(|err| format!("Could not stage private archive: {err}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Could not stage private archive: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+    Ok(changed)
 }
 
 pub fn is_configured(root: &Path) -> bool {
@@ -693,9 +763,11 @@ fn read_password(settings_path: &Path, root: &Path) -> Result<Option<String>, St
         .map_err(|err| format!("Could not read {}: {err}", settings_path.display()))?;
     let settings = serde_json::from_str::<PrivateVaultSettings>(&raw)
         .map_err(|err| format!("Could not parse {}: {err}", settings_path.display()))?;
-    Ok(settings
-        .vaults
-        .get(&vault_key(root))
+    let id_key = read_vault_id(root)?.map(|id| format!("id:{id}"));
+    Ok(id_key
+        .as_ref()
+        .and_then(|key| settings.vaults.get(key))
+        .or_else(|| settings.vaults.get(&vault_key(root)))
         .map(|entry| entry.password.clone())
         .or(settings.default_password)
         .filter(|password| !password.is_empty()))
@@ -710,8 +782,17 @@ fn write_password(settings_path: &Path, root: &Path, password: &str) -> Result<(
     } else {
         PrivateVaultSettings::default()
     };
+    let key = format!("id:{}", ensure_vault_id(root)?);
+    if settings
+        .vaults
+        .get(&key)
+        .map(|entry| entry.password.as_str())
+        == Some(password)
+    {
+        return Ok(());
+    }
     settings.vaults.insert(
-        vault_key(root),
+        key,
         VaultPassword {
             password: password.to_string(),
         },
@@ -721,6 +802,60 @@ fn write_password(settings_path: &Path, root: &Path, password: &str) -> Result<(
     fs::write(settings_path, format!("{payload}\n"))
         .map_err(|err| format!("Could not write {}: {err}", settings_path.display()))?;
     restrict_settings_permissions(settings_path)
+}
+
+fn read_vault_id(root: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(root.join(VAULT_ID_FILE)) {
+        Ok(value) => {
+            let id = value.trim();
+            if id.is_empty()
+                || id.len() > 100
+                || !id.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-')
+            {
+                return Err("Invalid local private-vault identifier.".to_string());
+            }
+            Ok(Some(id.to_string()))
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(format!(
+            "Could not read local private-vault identifier: {err}"
+        )),
+    }
+}
+
+fn ensure_vault_id(root: &Path) -> Result<String, String> {
+    if let Some(id) = read_vault_id(root)? {
+        return Ok(id);
+    }
+    // An opaque local identifier, never a password or an encryption key.
+    // Exclude it before writing it so ordinary Git staging leaves it local.
+    if git_worktree_root(root).is_ok() {
+        ensure_local_git_excludes(root)?;
+    }
+    let path = root.join(VAULT_ID_FILE);
+    fs::create_dir_all(path.parent().unwrap())
+        .map_err(|err| format!("Could not create vault metadata directory: {err}"))?;
+    let id = format!("{:x}-{:x}", timestamp(), std::process::id());
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            return read_vault_id(root)?
+                .ok_or("Missing local private-vault identifier.".to_string());
+        }
+        Err(err) => {
+            return Err(format!(
+                "Could not create local private-vault identifier: {err}"
+            ))
+        }
+    };
+    writeln!(file, "{id}")
+        .and_then(|_| file.sync_all())
+        .map_err(|err| format!("Could not write local private-vault identifier: {err}"))?;
+    Ok(id)
 }
 
 #[cfg(unix)]
@@ -749,23 +884,15 @@ fn vault_key(root: &Path) -> String {
 
 fn ensure_local_git_excludes(root: &Path) -> Result<(), String> {
     let git_dir = git_path(root, ".")?;
-    let vault_prefix = git_vault_prefix(root)?;
     let info = git_dir.join("info");
     fs::create_dir_all(&info)
         .map_err(|err| format!("Could not create Git info directory: {err}"))?;
     let exclude = info.join("exclude");
     let existing = fs::read_to_string(&exclude).unwrap_or_default();
-    let required = vec![
-        "# NotesProject private-vault plaintext".to_string(),
-        anchored_git_pattern(&vault_prefix, ".h/"),
-        anchored_git_pattern(&vault_prefix, ".horig/"),
-        anchored_git_pattern(&vault_prefix, ".h.notesproject-new*"),
-        anchored_git_pattern(&vault_prefix, ".horig.notesproject-new*"),
-        anchored_git_pattern(&vault_prefix, ".notesproject/track/.h/"),
-    ];
+    let required = PRIVATE_GIT_EXCLUDES;
     if required
         .iter()
-        .all(|line| existing.lines().any(|item| item == line))
+        .all(|line| existing.lines().any(|item| item == *line))
     {
         return Ok(());
     }
@@ -778,7 +905,7 @@ fn ensure_local_git_excludes(root: &Path) -> Result<(), String> {
         writeln!(file).map_err(|err| format!("Could not update Git exclude file: {err}"))?;
     }
     for line in required {
-        if !existing.lines().any(|item| item == line) {
+        if !existing.lines().any(|item| item == *line) {
             writeln!(file, "{line}")
                 .map_err(|err| format!("Could not update Git exclude file: {err}"))?;
         }
@@ -803,27 +930,12 @@ fn install_git_hooks(root: &Path, settings_path: &Path) -> Result<(), String> {
     }
 
     let hooks = git_path(root, "hooks")?;
-    let archive_git_path = git_vault_path(root, ARCHIVE_FILE)?;
     fs::create_dir_all(&hooks)
         .map_err(|err| format!("Could not create Git hooks folder: {err}"))?;
     let executable = env::current_exe()
         .map_err(|err| format!("Could not locate the Bricriu executable: {err}"))?;
-    install_hook(
-        &hooks,
-        "pre-commit",
-        root,
-        settings_path,
-        &executable,
-        &archive_git_path,
-    )?;
-    install_hook(
-        &hooks,
-        "pre-push",
-        root,
-        settings_path,
-        &executable,
-        &archive_git_path,
-    )
+    install_hook(&hooks, "pre-commit", root, settings_path, &executable)?;
+    install_hook(&hooks, "pre-push", root, settings_path, &executable)
 }
 
 // Older installed wrappers always synchronize .h and force-add .h.zip. Upgrade
@@ -833,8 +945,8 @@ pub fn prepare_public_checkpoint(root: &Path) -> Result<(), String> {
     if !hook.is_file() {
         return Ok(());
     }
-    let bytes = fs::read(&hook)
-        .map_err(|err| format!("Could not read private-vault hook: {err}"))?;
+    let bytes =
+        fs::read(&hook).map_err(|err| format!("Could not read private-vault hook: {err}"))?;
     let Ok(body) = String::from_utf8(bytes) else {
         // A user's binary hook is not one of our shell wrappers.
         return Ok(());
@@ -846,7 +958,9 @@ pub fn prepare_public_checkpoint(root: &Path) -> Result<(), String> {
     let Some(sync_offset) = body.find(&needle) else {
         return Ok(());
     };
-    let start = body[..sync_offset].rfind('\n').map_or(0, |offset| offset + 1);
+    let start = body[..sync_offset]
+        .rfind('\n')
+        .map_or(0, |offset| offset + 1);
     let updated = format!(
         "{}{}",
         &body[..start],
@@ -880,8 +994,48 @@ fn install_hook(
     root: &Path,
     settings_path: &Path,
     executable: &Path,
-    archive_git_path: &str,
 ) -> Result<(), String> {
+    let repository = git_worktree_root(root)?;
+    let prefix = git_vault_prefix(root)?;
+    // Settings/executable paths outside the repository refer to the local app
+    // installation. Paths inside it should follow a move of the repository.
+    let portable_path = |path: &Path| -> Result<PathBuf, String> {
+        let absolute = std::path::absolute(path)
+            .map_err(|err| format!("Could not resolve private hook path: {err}"))?;
+        // Match the canonical worktree spelling, including Windows drive/UNC
+        // prefixes. Settings need not exist yet, but their parent must exist.
+        let absolute = match absolute.canonicalize() {
+            Ok(path) => path,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => absolute
+                .parent()
+                .ok_or("Private hook path has no parent.".to_string())?
+                .canonicalize()
+                .map_err(|err| format!("Could not resolve private hook directory: {err}"))?
+                .join(
+                    absolute
+                        .file_name()
+                        .ok_or("Private hook path has no filename.".to_string())?,
+                ),
+            Err(err) => return Err(format!("Could not resolve private hook path: {err}")),
+        };
+        Ok(absolute
+            .strip_prefix(&repository)
+            .unwrap_or(&absolute)
+            .to_path_buf())
+    };
+    let executable = portable_path(executable)?;
+    let executable_arg = if executable.is_relative() {
+        hook_path_quote(&Path::new(".").join(&executable))
+    } else {
+        hook_path_quote(&executable)
+    };
+    let sync = format!(
+        "{} --private-vault-sync-relative {} {} {}",
+        executable_arg,
+        shell_quote_value(if prefix.is_empty() { "." } else { &prefix }),
+        hook_path_quote(&portable_path(settings_path)?),
+        name
+    );
     let hook = hooks.join(name);
     let backup = hooks.join(format!("{name}.notesproject-existing"));
     let mut preserved_existing = false;
@@ -910,25 +1064,9 @@ fn install_hook(
     } else {
         String::new()
     };
-    let sync = format!(
-        "{} --private-vault-sync {} {} {}",
-        shell_quote(executable),
-        shell_quote(root),
-        shell_quote(settings_path),
-        name
-    );
-    let action = if name == "pre-commit" {
-        public_checkpoint_guard(
-            root,
-            &format!(
-                "{sync} || exit $?\ngit add -f -- {} || exit $?\n",
-                shell_quote_value(archive_git_path)
-            ),
-        )
-    } else {
-        format!("{sync} || exit $?\n")
-    };
-    let body = format!("#!/bin/sh\n{HOOK_MARKER}\n{original}{action}");
+    // Git invokes these hooks from the worktree root. The Rust command resolves
+    // that root at runtime and owns sync, public-checkpoint skipping and staging.
+    let body = format!("#!/bin/sh\n{HOOK_MARKER}\n{original}{sync} || exit $?\n");
     let temporary = unique_sibling_path(hooks, &format!(".{name}.notesproject-tmp"));
     if let Err(err) = fs::write(&temporary, body) {
         if preserved_existing && !hook.exists() {
@@ -963,7 +1101,7 @@ fn git_path(root: &Path, name: &str) -> Result<PathBuf, String> {
     })
 }
 
-fn git_vault_prefix(root: &Path) -> Result<String, String> {
+fn git_worktree_root(root: &Path) -> Result<PathBuf, String> {
     let output = git_command(root)
         .args(["rev-parse", "--show-toplevel"])
         .output()
@@ -971,9 +1109,13 @@ fn git_vault_prefix(root: &Path) -> Result<String, String> {
     if !output.status.success() {
         return Err("Could not locate Git worktree for private-vault paths.".to_string());
     }
-    let worktree = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string())
         .canonicalize()
-        .map_err(|err| format!("Could not resolve Git worktree: {err}"))?;
+        .map_err(|err| format!("Could not resolve Git worktree: {err}"))
+}
+
+fn git_vault_prefix(root: &Path) -> Result<String, String> {
+    let worktree = git_worktree_root(root)?;
     let vault = root
         .canonicalize()
         .map_err(|err| format!("Could not resolve vault path: {err}"))?;
@@ -990,14 +1132,6 @@ fn git_vault_path(root: &Path, name: &str) -> Result<String, String> {
     } else {
         format!("{prefix}/{name}")
     })
-}
-
-fn anchored_git_pattern(prefix: &str, suffix: &str) -> String {
-    if prefix.is_empty() {
-        format!("/{suffix}")
-    } else {
-        format!("/{prefix}/{suffix}")
-    }
 }
 
 fn git_command(root: &Path) -> Command {
@@ -1029,6 +1163,20 @@ fn make_executable(_path: &Path) -> Result<(), String> {
 
 fn shell_quote(path: &Path) -> String {
     shell_quote_value(&path.to_string_lossy())
+}
+
+fn hook_path_quote(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    #[cfg(windows)]
+    let value = {
+        let value = value.replace('\\', "/");
+        if let Some(unc) = value.strip_prefix("//?/UNC/") {
+            format!("//{unc}")
+        } else {
+            value.strip_prefix("//?/").unwrap_or(&value).to_string()
+        }
+    };
+    shell_quote_value(&value)
 }
 
 fn shell_quote_value(value: &str) -> String {
@@ -1072,6 +1220,50 @@ fn timestamp() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Real Git hooks invoke this small shim, which runs our actual CLI handler
+    // in a child test process without starting a Tauri window.
+    fn hook_executable(root: &Path) -> PathBuf {
+        let path = root.join("private-hook-test.sh");
+        fs::write(&path, format!(
+            "#!/bin/sh\nexport BRICRIU_TEST_HOOK_FLAG=\"$1\" BRICRIU_TEST_HOOK_VAULT=\"$2\" BRICRIU_TEST_HOOK_SETTINGS=\"$3\" BRICRIU_TEST_HOOK_NAME=\"$4\"\nexec {} --exact private_vault::tests::hook_cli_process --nocapture\n",
+            hook_path_quote(&env::current_exe().unwrap())
+        )).unwrap();
+        make_executable(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn hook_cli_process() {
+        let Ok(flag) = env::var("BRICRIU_TEST_HOOK_FLAG") else {
+            return;
+        };
+        let args = vec![
+            "bricriu-test".to_string(),
+            flag,
+            env::var("BRICRIU_TEST_HOOK_VAULT").unwrap(),
+            env::var("BRICRIU_TEST_HOOK_SETTINGS").unwrap(),
+            env::var("BRICRIU_TEST_HOOK_NAME").unwrap(),
+        ];
+        std::process::exit(run_cli(&args).unwrap());
+    }
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = git_command(root).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn init_git(root: &Path) {
+        git(root, &["init", "-b", "inuse"]);
+        git(root, &["config", "user.name", "Private Vault Test"]);
+        git(root, &["config", "user.email", "private@example.invalid"]);
+        git(root, &["config", "commit.gpgSign", "false"]);
+    }
 
     fn test_root(name: &str) -> PathBuf {
         let path = env::temp_dir().join(format!(
@@ -1210,8 +1402,7 @@ mod tests {
         );
         let wrapper = fs::read_to_string(&original).unwrap();
         assert!(wrapper.contains(HOOK_MARKER));
-        assert!(wrapper.contains("--private-vault-sync"));
-        assert!(wrapper.contains("git add -f -- '.h.zip'"));
+        assert!(wrapper.contains("--private-vault-sync-relative '.'"));
         assert!(fs::read_to_string(hooks.join("pre-push"))
             .unwrap()
             .contains("pre-push"));
@@ -1227,10 +1418,18 @@ mod tests {
     #[test]
     fn public_checkpoint_skips_only_private_sync_in_new_and_legacy_hooks() {
         for legacy in [false, true] {
-            let root = test_root(if legacy { "public-legacy-hook" } else { "public-hook" });
+            let root = test_root(if legacy {
+                "public-legacy-hook"
+            } else {
+                "public-hook"
+            });
             let git = |args: &[&str]| {
                 let output = git_command(&root).args(args).output().unwrap();
-                assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
                 output
             };
             git(&["init"]);
@@ -1246,24 +1445,45 @@ mod tests {
             let user_hook = "#!/bin/sh\nprintf ran > .git/user-hook-ran\n";
             fs::write(&original, user_hook).unwrap();
             make_executable(&original).unwrap();
-            install_hook(&hooks, "pre-commit", &root, &root.join("missing-passwords.json"),
-                &root.join("private-sync-must-not-run"), ".h.zip").unwrap();
+            install_hook(
+                &hooks,
+                "pre-commit",
+                &root,
+                &root.join("missing-passwords.json"),
+                &hook_executable(&root),
+            )
+            .unwrap();
             if legacy {
-                let body = fs::read_to_string(&original).unwrap();
-                let body = body.lines().filter(|line| !line.starts_with("if [") && *line != "fi")
-                    .collect::<Vec<_>>().join("\n") + "\n";
+                let body = format!(
+                    "#!/bin/sh\n{HOOK_MARKER}\n\"$(dirname \"$0\")/pre-commit.notesproject-existing\" \"$@\" || exit $?\n{} --private-vault-sync {} {} pre-commit || exit $?\ngit add -f -- '.h.zip' || exit $?\n",
+                    shell_quote(&root.join("private-sync-must-not-run")),
+                    shell_quote(&root), shell_quote(&root.join("missing-passwords.json"))
+                );
                 fs::write(&original, body).unwrap();
             }
             prepare_public_checkpoint(&root).unwrap();
             assert!(crate::git_checkpoint::checkpoint_public(&root).unwrap());
-            assert_eq!(fs::read_to_string(root.join(".git/user-hook-ran")).unwrap(), "ran");
+            assert_eq!(
+                fs::read_to_string(root.join(".git/user-hook-ran")).unwrap(),
+                "ran"
+            );
             assert!(!root.join(".h.zip").exists());
-            assert_eq!(fs::read_to_string(hooks.join("pre-commit.notesproject-existing")).unwrap(), user_hook);
+            assert_eq!(
+                fs::read_to_string(hooks.join("pre-commit.notesproject-existing")).unwrap(),
+                user_hook
+            );
             // Ordinary commits must still attempt the private sync.
-            let normal = git_command(&root).args(["commit", "--allow-empty", "-m", "normal"]).output().unwrap();
+            let normal = git_command(&root)
+                .args(["commit", "--allow-empty", "-m", "normal"])
+                .output()
+                .unwrap();
             assert!(!normal.status.success());
             let head = git(&["rev-parse", "HEAD"]).stdout;
-            fs::write(hooks.join("pre-commit.notesproject-existing"), "#!/bin/sh\nexit 23\n").unwrap();
+            fs::write(
+                hooks.join("pre-commit.notesproject-existing"),
+                "#!/bin/sh\nexit 23\n",
+            )
+            .unwrap();
             fs::write(root.join("public.md"), "changed public note").unwrap();
             assert!(crate::git_checkpoint::checkpoint_public(&root).is_err());
             assert_eq!(git(&["rev-parse", "HEAD"]).stdout, head);
@@ -1289,16 +1509,235 @@ mod tests {
 
         let git_dir = git_path(&vault, ".").unwrap();
         let exclude = fs::read_to_string(git_dir.join("info/exclude")).unwrap();
-        assert!(exclude.lines().any(|line| line == "/mydocs/.h/"));
-        assert!(exclude.lines().any(|line| line == "/mydocs/.horig/"));
-        assert!(exclude
-            .lines()
-            .any(|line| line == "/mydocs/.notesproject/track/.h/"));
-        assert!(!exclude.lines().any(|line| line == "/.h/"));
+        assert!(exclude.lines().any(|line| line == ".h/"));
+        assert!(exclude.lines().any(|line| line == ".horig/"));
+        assert!(!exclude.contains("mydocs"));
 
         let hook = fs::read_to_string(git_dir.join("hooks/pre-commit")).unwrap();
-        assert!(hook.contains("git add -f -- 'mydocs/.h.zip'"));
+        assert!(hook.contains("--private-vault-sync-relative 'mydocs' 'test-private-vaults.json'"));
+        assert!(!hook.contains(repository.to_str().unwrap()));
         fs::remove_dir_all(repository).unwrap();
+    }
+
+    #[test]
+    fn private_exclusions_survive_vault_rename_without_unlocking() {
+        let repository = test_root("ignore-after-rename");
+        init_git(&repository);
+        let vault = repository.join("mydocs");
+        fs::create_dir(&vault).unwrap();
+        let exclude = git_path(&vault, "info/exclude")
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let old_rules = "# User rule\nlocal-cache/\n# Older Bricriu rule\n/mydocs/.h/\n";
+        fs::write(&exclude, old_rules).unwrap();
+        ensure_local_git_excludes(&vault).unwrap();
+        let updated = fs::read_to_string(&exclude).unwrap();
+        assert!(updated.starts_with(old_rules));
+        ensure_local_git_excludes(&vault).unwrap();
+        assert_eq!(fs::read_to_string(&exclude).unwrap(), updated);
+
+        let private_paths = [
+            ".h/secret.md",
+            ".horig/secret.md",
+            ".notesproject/track/.h/secret.json",
+            ".notesproject/private-vault-id",
+            ".h.notesproject-new-1/secret.md",
+            ".horig.notesproject-new-1/secret.md",
+            ".h.zip.notesproject-tmp-1",
+            "private-vaults.json",
+            "nested/.h/secret.md",
+        ];
+        for relative in private_paths {
+            let path = vault.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "private test data").unwrap();
+        }
+        fs::write(vault.join(".h.zip"), "encrypted archive fixture").unwrap();
+        fs::write(vault.join("public.md"), "public note").unwrap();
+        fs::write(
+            repository.join("private-vaults.json"),
+            "local password fixture",
+        )
+        .unwrap();
+        let renamed = repository.join("new location/renamed docs [1]");
+        fs::create_dir_all(renamed.parent().unwrap()).unwrap();
+        fs::rename(&vault, &renamed).unwrap();
+        // No reopening, unlocking, or rule regeneration after the rename.
+        for relative in private_paths {
+            git(&renamed, &["check-ignore", "--", relative]);
+        }
+        git(&repository, &["add", "-A"]);
+        let staged = git(&repository, &["diff", "--cached", "--name-only"]);
+        assert_eq!(
+            staged.lines().collect::<Vec<_>>(),
+            vec![
+                "new location/renamed docs [1]/.h.zip",
+                "new location/renamed docs [1]/public.md",
+            ]
+        );
+        assert_eq!(fs::read_to_string(&exclude).unwrap(), updated);
+        fs::remove_dir_all(repository).unwrap();
+    }
+
+    #[test]
+    fn hooks_and_saved_password_follow_a_moved_repository() {
+        // Include shell metacharacters and pathspec globs to exercise literal
+        // argument handling as well as root and nested vaults.
+        for prefix in ["", "my docs' [1]"] {
+            let parent = test_root("move-repository");
+            let repository = parent.join("old repo");
+            let vault = repository.join(prefix);
+            fs::create_dir_all(vault.join(PRIVATE_DIR)).unwrap();
+            init_git(&repository);
+            fs::write(
+                repository.join(".gitignore"),
+                "private-vaults.json\nprivate-hook-test.sh\n",
+            )
+            .unwrap();
+            fs::write(vault.join(".h/secret.md"), "v1").unwrap();
+            let settings = repository.join("private-vaults.json");
+            // A legacy absolute-path entry must migrate without re-entering it.
+            fs::write(
+                &settings,
+                serde_json::to_vec(&serde_json::json!({
+                    "vaults": { vault_key(&vault): { "password": "test password" } }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            prepare_on_open_with_settings(&vault, None, true, &settings).unwrap();
+            assert!(read_vault_id(&vault).unwrap().is_some());
+            let executable = hook_executable(&repository);
+            let hooks = git_path(&vault, "hooks").unwrap();
+            for name in ["pre-commit", "pre-push"] {
+                install_hook(&hooks, name, &vault, &settings, &executable).unwrap();
+            }
+            let moved = parent.join("new repo's location");
+            fs::rename(&repository, &moved).unwrap();
+            let vault = moved.join(prefix);
+            let settings = moved.join("private-vaults.json");
+            assert_eq!(
+                read_password(&settings, &vault).unwrap().as_deref(),
+                Some("test password")
+            );
+            fs::write(vault.join("public.md"), "public").unwrap();
+            git(&vault, &["add", "--", "public.md"]);
+            git(&vault, &["commit", "-m", "after move"]);
+            let archive = git_vault_path(&vault, ARCHIVE_FILE).unwrap();
+            let tracked = git(&moved, &["ls-files"]);
+            assert!(tracked.lines().any(|line| line == archive));
+            assert!(!tracked.contains("secret.md"));
+            assert!(!tracked.contains("private-vault-id"));
+            assert!(
+                git(&vault, &["check-ignore", "--", VAULT_ID_FILE]).contains("private-vault-id")
+            );
+            assert!(git(&vault, &["check-ignore", "--", ".h/secret.md"]).contains("secret.md"));
+
+            // Locked public checkpoints still leave the archive untouched.
+            let before = fs::read(vault.join(ARCHIVE_FILE)).unwrap();
+            fs::write(vault.join(".h/secret.md"), "v2").unwrap();
+            fs::write(vault.join("public.md"), "updated").unwrap();
+            assert!(crate::git_checkpoint::checkpoint_public(&vault).unwrap());
+            assert_eq!(fs::read(vault.join(ARCHIVE_FILE)).unwrap(), before);
+
+            let remote = parent.join("remote.git");
+            git(&moved, &["init", "--bare", remote.to_str().unwrap()]);
+            git(
+                &moved,
+                &["remote", "add", "origin", remote.to_str().unwrap()],
+            );
+            let push = git_command(&vault)
+                .args(["push", "origin", "inuse"])
+                .output()
+                .unwrap();
+            assert!(!push.status.success());
+            assert!(String::from_utf8_lossy(&push.stderr).contains("Commit the updated archive"));
+            let extracted = parent.join("extracted");
+            fs::create_dir(&extracted).unwrap();
+            extract_encrypted_archive(&vault.join(ARCHIVE_FILE), &extracted, "test password")
+                .unwrap();
+            assert_eq!(
+                fs::read_to_string(extracted.join("secret.md")).unwrap(),
+                "v2"
+            );
+            git(&vault, &["commit", "--allow-empty", "-m", "archive update"]);
+            git(&vault, &["push", "origin", "inuse"]);
+
+            if !prefix.is_empty() {
+                let renamed = moved.join("renamed vault");
+                fs::rename(&vault, &renamed).unwrap();
+                assert_eq!(
+                    read_password(&settings, &renamed).unwrap().as_deref(),
+                    Some("test password")
+                );
+                // Reopening the vault updates its relative registration.
+                prepare_on_open_with_settings(&renamed, None, true, &settings).unwrap();
+                install_hook(
+                    &git_path(&renamed, "hooks").unwrap(),
+                    "pre-commit",
+                    &renamed,
+                    &settings,
+                    &moved.join("private-hook-test.sh"),
+                )
+                .unwrap();
+                git(
+                    &renamed,
+                    &["commit", "--allow-empty", "-m", "renamed vault"],
+                );
+            }
+            fs::remove_dir_all(parent).unwrap();
+        }
+    }
+
+    #[test]
+    fn relative_hook_rejects_paths_outside_the_repository() {
+        let root = test_root("invalid-hook-path");
+        init_git(&root);
+        for path in [root.clone(), PathBuf::from("../outside")] {
+            assert!(
+                run_relative_hook(&root, &path, Path::new("missing.json"), "pre-commit").is_err()
+            );
+        }
+        assert!(
+            run_relative_hook(&root, Path::new("."), Path::new("missing.json"), "unknown").is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_unlock_does_not_migrate_password_or_create_identifier() {
+        let root = test_root("failed-migration");
+        fs::create_dir(root.join(PRIVATE_DIR)).unwrap();
+        fs::write(root.join(".h/secret.md"), "secret").unwrap();
+        preserve_plaintext_changes(&root, "correct password").unwrap();
+        let settings = root.join("private-vaults.json");
+        let original = serde_json::to_vec(&serde_json::json!({
+            "vaults": { vault_key(&root): { "password": "correct password" } }
+        }))
+        .unwrap();
+        fs::write(&settings, &original).unwrap();
+        assert!(
+            prepare_on_open_with_settings(&root, Some("wrong password"), false, &settings).is_err()
+        );
+        assert_eq!(fs::read(&settings).unwrap(), original);
+        assert!(read_vault_id(&root).unwrap().is_none());
+        prepare_on_open_with_settings(&root, None, false, &settings).unwrap();
+        assert!(read_vault_id(&root).unwrap().is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_hook_paths_support_windows_canonical_paths() {
+        assert_eq!(
+            hook_path_quote(Path::new(r"\\?\C:\notes app\bricriu.exe")),
+            "'C:/notes app/bricriu.exe'"
+        );
+        assert_eq!(
+            hook_path_quote(Path::new(r"\\?\UNC\server\share\bricriu.exe")),
+            "'//server/share/bricriu.exe'"
+        );
     }
 
     #[test]

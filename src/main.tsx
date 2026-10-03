@@ -4,7 +4,7 @@ import { flushSync } from 'react-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { availableMonitors, getCurrentWindow, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/window'
-import { confirm as confirmDialog, open as openFileDialog, type ConfirmDialogOptions } from '@tauri-apps/plugin-dialog'
+import { confirm as confirmDialog, open as openFileDialog, save as saveFileDialog, type ConfirmDialogOptions, type DialogFilter } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import {
   Annotation,
@@ -365,10 +365,6 @@ function App(): JSX.Element {
   const [newNoteOpen, setNewNoteOpen] = useState(false)
   const [newNotePath, setNewNotePath] = useState('')
   const [newNoteError, setNewNoteError] = useState<string | null>(null)
-  const [saveAsOpen, setSaveAsOpen] = useState(false)
-  const [saveAsPath, setSaveAsPath] = useState('')
-  const [saveAsSourceId, setSaveAsSourceId] = useState<string | null>(null)
-  const [saveAsError, setSaveAsError] = useState<string | null>(null)
   const [privatePasswordOpen, setPrivatePasswordOpen] = useState(false)
   const [privatePassword, setPrivatePassword] = useState('')
   const [privatePasswordPath, setPrivatePasswordPath] = useState('')
@@ -427,7 +423,7 @@ function App(): JSX.Element {
   const mainPaneSlotRef = useRef<HTMLDivElement | null>(null)
   const splitPaneSlotRef = useRef<HTMLDivElement | null>(null)
   const newNoteInputRef = useRef<HTMLInputElement | null>(null)
-  const saveAsInputRef = useRef<HTMLInputElement | null>(null)
+  const saveAsRunningRef = useRef(false)
   const tabsRef = useRef<OpenTab[]>([])
   const latestBodiesRef = useRef<Map<string, string>>(new Map())
   const activeIdRef = useRef<string | null>(null)
@@ -658,13 +654,6 @@ function App(): JSX.Element {
     })
   }, [newNoteOpen])
 
-  useEffect(() => {
-    if (!saveAsOpen) return
-    window.requestAnimationFrame(() => {
-      saveAsInputRef.current?.focus()
-      saveAsInputRef.current?.select()
-    })
-  }, [saveAsOpen])
 
   useEffect(() => {
     splitOpenRef.current = splitOpen
@@ -2146,112 +2135,109 @@ function App(): JSX.Element {
     }
   }, [clearStatusLater, newNotePath, refreshTree, rememberRecentPath, selectMainTab])
 
-  const openSaveAsDialog = useCallback(() => {
-    if (!vault || !activeTab || busy) return
-    setSaveAsPath(suggestSaveAsPath(activeTab.path, activeTab.outOfVault === true))
-    setSaveAsSourceId(activeTab.id)
-    setSaveAsError(null)
-    setSaveAsOpen(true)
-  }, [activeTab, busy, vault])
-
-  const saveAsAction = useCallback(async () => {
-    const requestedPath = saveAsPath.trim()
-    if (!requestedPath) {
-      setSaveAsError('Enter a note path.')
-      return
-    }
-
-    const sourceTab = tabsRef.current.find((tab) => tab.id === saveAsSourceId)
-    if (!sourceTab) {
-      setSaveAsError('The source note is no longer open.')
-      return
-    }
-
-    const destinationPath = normalizeSaveAsPath(requestedPath)
-    if (sourceTab.mode === 'track' && !isMarkdownPath(destinationPath)) {
-      setSaveAsError('Track Changes notes must be saved as .md or .markdown files.')
-      return
-    }
-
-    const affectedTabs = tabsRef.current.filter((tab) => (
-      tab.id === sourceTab.id
-      || (isRawSourceMode(sourceTab.mode) && isRawSourceMode(tab.mode) && samePath(tab.path, sourceTab.path))
-    ))
-    const affectedIds = new Set(affectedTabs.map((tab) => tab.id))
-    if (tabsRef.current.some((tab) => !affectedIds.has(tab.id) && samePath(tab.path, destinationPath))) {
-      setSaveAsError('That destination is already open in another tab.')
-      return
-    }
-
-    const body = latestTabBody(sourceTab)
+  const openSaveAsDialog = useCallback(async () => {
+    if (!vault || !activeTab || busy || saveAsRunningRef.current) return
+    const sourceId = activeTab.id
+    saveAsRunningRef.current = true
     setBusy(true)
     setError(null)
-    setSaveAsError(null)
     try {
-      const result = await invoke<CreateNoteResult>('save_note_as', {
-        path: requestedPath,
-        body
+      const selectedPath = await saveFileDialog({
+        title: 'Save As',
+        defaultPath: saveAsDefaultPath(vault.root, activeTab.path, activeTab.outOfVault === true),
+        filters: saveAsFilters(activeTab.path, activeTab.mode)
       })
-      const { note } = result
-      const idChanges = new Map<string, string>()
-      for (const tab of affectedTabs) {
-        const nextId = tabId(note.path, tab.mode)
-        idChanges.set(tab.id, nextId)
-        latestBodiesRef.current.delete(tab.id)
-        latestBodiesRef.current.set(nextId, note.body)
+      if (!selectedPath) return
+
+      const sourceTab = tabsRef.current.find((tab) => tab.id === sourceId)
+      if (!sourceTab) throw new Error('The source note is no longer open.')
+      const destinationPath = saveAsRequestPath(vault.root, selectedPath, vault.pathsCaseSensitive)
+      if (sourceTab.mode === 'track' && !isMarkdownPath(destinationPath)) {
+        throw new Error('Track Changes notes must be saved as .md or .markdown files.')
       }
+      const affectedTabs = tabsRef.current.filter((tab) => (
+        tab.id === sourceTab.id
+        || (isRawSourceMode(sourceTab.mode) && isRawSourceMode(tab.mode) && samePath(tab.path, sourceTab.path))
+      ))
+      const affectedIds = new Set(affectedTabs.map((tab) => tab.id))
+      const body = latestTabBody(sourceTab)
+      const note = await invoke<NoteContent>('save_note_as', {
+        path: destinationPath,
+        body,
+        // The backend compares canonical paths, including aliases through symlinks.
+        openPaths: tabsRef.current.filter((tab) => !affectedIds.has(tab.id)).map((tab) => tab.path)
+      })
+      const textOnly = note.outOfVault || !isMarkdownPath(note.path)
+      const idChanges = new Map(affectedTabs.map((tab) => [
+        tab.id, tabId(note.path, textOnly ? 'markdown' : tab.mode)
+      ]))
 
       let trackStateError: string | null = null
-      const nextTrackState = sourceTab.trackState
+      const nextTrackState = !textOnly && sourceTab.trackState
         ? { ...sourceTab.trackState, path: note.path }
         : undefined
       if (sourceTab.mode === 'track' && nextTrackState) {
         try {
           await invoke('save_track_state', { path: note.path, trackState: nextTrackState })
         } catch (err) {
-          trackStateError = `The note was created, but its Track Changes metadata could not be saved: ${String(err)}`
+          trackStateError = `The note was saved, but its Track Changes metadata could not be saved: ${String(err)}`
         }
       }
 
-      setTabs((prev) => prev.map((tab) => {
-        if (!affectedIds.has(tab.id)) return tab
-        return {
-          ...tab,
-          id: idChanges.get(tab.id) ?? tab.id,
-          path: note.path,
-          body: note.body,
-          savedBody: note.body,
-          bodyVersion: tab.bodyVersion + 1,
-          updatedAt: note.updatedAt,
-          size: note.size,
-          trackState: tab.id === sourceTab.id ? nextTrackState : tab.trackState,
-          externalStatus: undefined,
-          outOfVault: false
-        }
-      }))
+      // Capture any edits made while the write was in flight before remapping IDs.
+      const nextBodies = new Map(affectedTabs.map((tab) => [tab.id, latestTabBody(tab)]))
+      for (const tab of affectedTabs) latestBodiesRef.current.delete(tab.id)
+      for (const tab of affectedTabs) {
+        latestBodiesRef.current.set(idChanges.get(tab.id)!, nextBodies.get(tab.id)!)
+      }
+      setTabs((prev) => {
+        const seen = new Set<string>()
+        return prev.map((tab) => {
+          if (!affectedIds.has(tab.id)) return tab
+          return {
+            ...tab,
+            id: idChanges.get(tab.id) ?? tab.id,
+            path: note.path,
+            mode: textOnly ? 'markdown' as const : tab.mode,
+            body: nextBodies.get(tab.id) ?? note.body,
+            savedBody: note.body,
+            bodyVersion: tab.bodyVersion + 1,
+            updatedAt: note.updatedAt,
+            size: note.size,
+            trackState: textOnly ? undefined : tab.id === sourceTab.id ? nextTrackState : tab.trackState,
+            externalStatus: undefined,
+            outOfVault: note.outOfVault
+          }
+        }).filter((tab) => {
+          if (seen.has(tab.id)) return false
+          seen.add(tab.id)
+          return true
+        })
+      })
+      const nextMainId = activeId ? idChanges.get(activeId) ?? activeId : null
+      const nextSplitId = splitId ? idChanges.get(splitId) ?? splitId : null
       setActiveId((current) => current ? idChanges.get(current) ?? current : current)
-      setSplitId((current) => current ? idChanges.get(current) ?? current : current)
-      setTouchedPaths((prev) => new Set([...prev, note.path]))
+      if (nextSplitId && nextSplitId === nextMainId) closeSplitPane()
+      else setSplitId((current) => current ? idChanges.get(current) ?? current : current)
       rememberRecentPath(note.path)
-      await refreshTree()
-      if (result.createdFolder) {
-        setExpanded((prev) => new Set([...prev, ...folderAncestors(result.createdFolder ?? '')]))
+      if (!note.outOfVault) {
+        setTouchedPaths((prev) => new Set([...prev, note.path]))
+        await refreshTree()
+        const folder = parentFolder(note.path)
+        if (folder) setExpanded((prev) => new Set([...prev, ...folderAncestors(folder)]))
       }
-      setSaveAsOpen(false)
-      setSaveAsPath('')
-      setSaveAsSourceId(null)
-      if (sourceTab.mode === 'markdown') setEditorFocusRequest((request) => request + 1)
-
+      if (textOnly || sourceTab.mode === 'markdown') setEditorFocusRequest((request) => request + 1)
       const message = `Saved as ${note.path}`
       setNotice(message)
       clearStatusLater('notice', message)
       if (trackStateError) setError(trackStateError)
     } catch (err) {
-      setSaveAsError(String(err))
+      setError(String(err))
     } finally {
+      saveAsRunningRef.current = false
       setBusy(false)
     }
-  }, [clearStatusLater, latestTabBody, refreshTree, rememberRecentPath, saveAsPath, saveAsSourceId])
+  }, [activeId, activeTab, busy, clearStatusLater, closeSplitPane, latestTabBody, refreshTree, rememberRecentPath, splitId, vault])
 
   const createFolderAction = useCallback(async () => {
     if (!vault) return
@@ -2574,6 +2560,7 @@ function App(): JSX.Element {
   }, [])
 
   useEffect(() => {
+    if (busy) return
     const dirtyTabs = uniqueSaveTargets(tabs.filter((tab) => (
       isTabDirty(tab) && !(tab.outOfVault && (tab.externalStatus || externalMonitorRef.current?.isBlocked(tab.path)))
     )))
@@ -2584,7 +2571,7 @@ function App(): JSX.Element {
       }
     }, profile.autosaveDelayMs)
     return () => window.clearTimeout(timer)
-  }, [isTabDirty, profile.autosaveDelayMs, saveTab, tabs])
+  }, [busy, isTabDirty, profile.autosaveDelayMs, saveTab, tabs])
 
   useEffect(() => {
     if (privatePending || !vault?.git.isRepo || vault.git.currentBranch !== 'inuse') return
@@ -3861,62 +3848,6 @@ function App(): JSX.Element {
             </button>
             <button type="submit" disabled={busy}>
               Create
-            </button>
-          </div>
-        </form>
-      </div>
-    )}
-    {saveAsOpen && (
-      <div className="modal-backdrop" role="presentation" onMouseDown={() => !busy && setSaveAsOpen(false)}>
-        <form
-          className="new-note-dialog"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="save-as-title"
-          onMouseDown={(event) => event.stopPropagation()}
-          onSubmit={(event) => {
-            event.preventDefault()
-            void saveAsAction()
-          }}
-        >
-          <header>
-            <strong id="save-as-title">Save As</strong>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={() => setSaveAsOpen(false)}
-              aria-label="Close Save As dialog"
-              disabled={busy}
-            >
-              x
-            </button>
-          </header>
-          <label>
-            <span>Path in vault</span>
-            <input
-              ref={saveAsInputRef}
-              value={saveAsPath}
-              onChange={(event) => {
-                setSaveAsPath(event.target.value)
-                setSaveAsError(null)
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Escape' && !busy) {
-                  event.preventDefault()
-                  setSaveAsOpen(false)
-                }
-              }}
-              placeholder="note copy.md"
-              spellCheck={false}
-            />
-          </label>
-          {saveAsError && <div className="dialog-error">{saveAsError}</div>}
-          <div className="dialog-actions">
-            <button type="button" className="secondary-button" onClick={() => setSaveAsOpen(false)} disabled={busy}>
-              Cancel
-            </button>
-            <button type="submit" disabled={busy}>
-              Save
             </button>
           </div>
         </form>
@@ -7282,17 +7213,35 @@ function noteName(path: string): string {
   return name || 'untitled.md'
 }
 
-function normalizeSaveAsPath(path: string): string {
-  const normalized = path.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
-  return /\.(md|markdown|typ|txt|csv|json)$/i.test(normalized) ? normalized : `${normalized}.md`
+function saveAsDefaultPath(root: string, path: string, outOfVault: boolean): string {
+  if (!path) return root
+  if (outOfVault) return path
+  return `${root.replace(/\\/g, '/').replace(/\/+$/, '')}/${path.replace(/\\/g, '/')}`
 }
 
-function suggestSaveAsPath(path: string, outOfVault: boolean): string {
-  const name = noteName(path)
-  const extension = name.match(/\.(markdown|md|typ|txt|csv|json)$/i)?.[0] ?? '.md'
-  const stem = name.slice(0, -extension.length) || 'untitled'
-  const folder = outOfVault ? '' : parentFolder(path)
-  return `${folder ? `${folder}/` : ''}${stem} copy${extension}`
+function saveAsRequestPath(root: string, selectedPath: string, caseSensitive: boolean): string {
+  const prefix = `${root.replace(/\\/g, '/').replace(/\/+$/, '')}/`
+  const normalized = selectedPath.replace(/\\/g, '/')
+  const inside = caseSensitive
+    ? normalized.startsWith(prefix)
+    : normalized.toLowerCase().startsWith(prefix.toLowerCase())
+  return inside ? normalized.slice(prefix.length) : selectedPath
+}
+
+function saveAsFilters(path: string, mode: EditorMode): DialogFilter[] {
+  const extension = path.match(/\.([^.\/\\]+)$/)?.[1].toLowerCase()
+  const markdown = { name: 'Markdown', extensions: extension === 'markdown' ? ['markdown', 'md'] : ['md', 'markdown'] }
+  if (mode === 'track') return [markdown]
+  const filters = [
+    markdown,
+    { name: 'Typst', extensions: ['typ'] },
+    { name: 'Plain text', extensions: ['txt'] },
+    { name: 'CSV', extensions: ['csv'] },
+    { name: 'JSON', extensions: ['json'] }
+  ]
+  const preferred = filters.findIndex((filter) => filter.extensions.includes(extension ?? 'md'))
+  if (preferred > 0) filters.unshift(...filters.splice(preferred, 1))
+  return filters
 }
 
 function folderAncestors(path: string): string[] {

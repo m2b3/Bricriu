@@ -1,25 +1,91 @@
 # Bricriu User Guide
 
+[README](README.md) · [Download and installation](install.md) · [Troubleshooting](install.md#troubleshooting)
+
+Start with [Getting started](#getting-started) for your first note, or use the contents to go directly to a task. This guide covers the desktop app; developer setup and packaging are in the [installation and build guide](install.md).
+
+## Contents
+
+- [Getting started](#getting-started)
+- [Open a vault](#open-a-vault)
+  - [Vault, no vault, and outside files](#vault-no-vault-and-outside-files)
+  - [Open an individual file](#open-an-individual-file)
+- [Supported file types](#supported-file-types)
+- [Files and folders](#files-and-folders)
+- [Tabs, panes, and recent files](#tabs-panes-and-recent-files)
+- [Appearance](#appearance)
+- [Editing Markdown](#editing-markdown)
+- [Autosave and external changes](#autosave-and-external-changes)
+- [Search](#search)
+- [Wiki links and backlinks](#wiki-links-and-backlinks)
+- [Callouts and math](#callouts-and-math)
+- [Preview, print, and PDF](#preview-print-and-pdf)
+- [Git checkpoints (experimental)](#git-checkpoints-experimental)
+- [Private `.h/` notes (highly experimental)](#private-h-notes-highly-experimental)
+- [Typst (highly experimental)](#typst-highly-experimental)
+- [Track Changes (highly experimental)](#track-changes-highly-experimental)
+- [Canvas (highly experimental)](#canvas-highly-experimental)
+- [Calendar (highly experimental)](#calendar-highly-experimental)
+- [Session and preference storage](#session-and-preference-storage)
+- [Known limits](#known-limits)
+
 > [!CAUTION]
 > Use a disposable test vault first. Keep important notes in an independent versioned backup and commit them regularly if the vault uses Git. File deletion, autosave, Git automation, and private-note encryption can all change data on disk.
 
 The ordinary Markdown editor is the only workflow with approximately six months of single-user testing. Every feature explicitly marked **experimental** below, plus all macOS and Linux behavior, has much less assurance.
 
+## Getting started
+
+On 64-bit Windows 10/11, [download the installer](install.md#install-on-windows-1011-x64), double-click it, and follow the prompts. Developer tools are not needed to use the installer.
+
+1. **Launch the app.** Open **Bricriu** from the Start menu, or double-click its desktop shortcut if you created one during installation.
+2. **Create a folder for notes.** Use File Explorer to create a folder such as `Documents\Bricriu Notes`. This ordinary folder will be your *vault*. It can start empty, or contain copied `.md` notes. You can also choose an existing notes folder; files stay where they are and are not imported into a database.
+3. **Choose the folder in Bricriu.** Clear the sidebar's **Vault folder path** field and click **Open** to use the folder picker. Select the folder you just created. Alternatively, enter its full path and click **Open**. Opening a vault requires an existing folder; entering a new name here does not create it.
+4. **Make your first note.** Click **New note**, enter `First note.md` in **Path**, and click **Create**. Type `# My first note`, then a few lines of text. Click **Save** or press `Ctrl+S`.
+5. **Read and find it.** Choose **View → Preview** to see the formatted note. Select the note in the sidebar to reopen it; use **File name** to filter names or **Content** to search the vault's text.
+
+Your note is saved as `First note.md` inside the folder you chose and can also be opened in another text editor. Autosave normally writes edits after five seconds; keep an independent backup of important notes. No account or Git setup is required for ordinary editing.
+
 ## Open a vault
 
-A vault is an ordinary folder containing notes. Enter its path and select **Open**. To choose a folder with the system folder picker instead, leave the path field blank and select **Open**. Bricriu recursively shows supported files beneath that folder:
-
-- `.md` and `.markdown` — the primary, somewhat-tested path;
-- `.typ` — experimental Typst support.
+A vault is an ordinary folder containing notes and any subfolders. To create one, make a folder in File Explorer and open it in Bricriu; there is no special vault file to create. Enter its full path in **Vault folder path** and select **Open**. To choose a folder with the system folder picker instead, clear that field and select **Open**. Bricriu recursively shows [supported files](#supported-file-types) beneath that folder. **New folder** creates a subfolder inside the open vault.
 
 Hidden folders are normally omitted. Search can reveal that a matching note exists under a hidden folder, after which the interface can explicitly reveal that folder. The special private `.h/` folder has separate behavior described below.
 
-**File → Open file** can open a supported individual file outside the current vault. The app labels it **Outside vault** and disables vault-only behavior such as checkpoints, backlinks, and private-vault handling for that file.
+### Vault, no vault, and outside files
+
+| State | Available behavior |
+| --- | --- |
+| **Vault open** | The selected folder supplies the file tree, vault-wide search, note creation, and relationships between notes. Git checkpoints are optional and require a Git repository. |
+| **No vault open** | No workspace folder has been selected or restored. **New note** and **File → Open file** are unavailable until you open a folder. This is a starting state, not a separate editor mode. |
+| **Outside vault** | A file elsewhere is open in a tab while your selected vault stays open. You can edit and save it in place, but it is not included in that vault's tree, search, backlinks, checkpoints, or private-vault handling. |
+
+### Open an individual file
+
+With a vault open, choose **File → Open file** (`Ctrl+O`) and select a supported document. If it is outside the selected folder, Bricriu labels it **Outside vault** (also shown as **OUT** on the tab). Opening it does not copy or move the file into the vault.
+
+After installing on Windows, you can also right-click a document in File Explorer and choose **Open with → Bricriu**, or **Choose another app → Bricriu**. If Bricriu is running, the file opens as a tab in that window; an already-open file selects its tab and keeps unsaved edits. If no vault is open, Bricriu uses the last vault if it contains the document, or the document's parent folder otherwise. You do not need to create a separate notes folder for this route, but Bricriu still opens a folder as its workspace.
+
+Installing Bricriu does not change your default editor. Double-clicking a document opens Bricriu only if you have chosen it as that file type's default app in Windows. The app's own shortcut launches Bricriu regardless. [Command-line opening](install.md#open-a-file-from-the-command-line) follows the same folder-selection rules.
+
+## Supported file types
+
+| Format | Extensions | Editing behavior |
+| --- | --- | --- |
+| Markdown | `.md`, `.markdown` | Source editing with formatted preview, wiki links, backlinks, callouts, and KaTeX math. The primary, somewhat-tested workflow. |
+| Typst | `.typ` | Typesetting source with embedded preview and PDF export. [Highly experimental](#typst-highly-experimental). |
+| Plain text | `.txt` | Raw text editing; Markdown syntax stays literal. |
+| CSV | `.csv` | Raw text editing with the original extension, rather than a spreadsheet grid. |
+| JSON | `.json` | Raw text editing with the original extension; no dedicated structured editor. |
+
+These extensions are recognized in the vault and when opening individual documents. Other file types can remain in the folder, but are not general-purpose editable documents in Bricriu. In particular, PDF is an export format, not a supported document editor.
+
+[Canvas](#canvas-highly-experimental) stores a YAML block inside a Markdown file. [Track Changes](#track-changes-highly-experimental) uses Markdown plus separate review state, and [Calendar](#calendar-highly-experimental) keeps its own event data inside the vault. These are experimental features, not additional import formats.
 
 ## Files and folders
 
 - **New note** creates a Markdown file by default. Supplying `.typ` creates an experimental Typst document.
-- **File → Save As** creates a new vault-relative copy and continues editing it. Existing files are never overwritten.
+- **File → Save As** opens the system save dialog, starting in the current file’s folder (or the vault root for a file without a saved path). Choose a filename and any folder, including outside the vault. The system dialog confirms replacement of an existing file. Bricriu continues editing the chosen file; outside files use the Text view without vault-only features or Track Changes metadata.
 - **New folder** creates a folder within the vault.
 - Tree-row actions pin, open in Track mode, rename, or delete a note; folder rows can be renamed or deleted.
 - Pinned notes remain near the top of the sidebar.
@@ -32,7 +98,8 @@ Treat delete as permanent unless you have independently confirmed recovery throu
 - Open notes appear in tabs; a modified marker identifies dirty tabs.
 - **Split** opens a resizable second editor pane. **Move right** moves the main tab into it.
 - `Ctrl+W` / `Cmd+W` closes the focused split pane or current tab.
-- Switch main tabs with `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+PageUp`, `Ctrl+PageDown`, `Ctrl+[`, or `Ctrl+]` (use `Cmd` where the platform maps it).
+- Switch main tabs with `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+PageUp`, `Ctrl+PageDown`, `Ctrl+[`, or `Ctrl+]` (use `Cmd` where the platform maps it). `Ctrl+Tab` moves right and `Ctrl+Shift+Tab` moves left, wrapping at either end.
+- The sidebar lists open tabs after pinned notes and filename/content search results, above the regular file directory. Files already shown as pins or search results are omitted from this open-tab list; files in the regular directory remain in it.
 - Use the top-bar Back/Forward buttons or `Alt+Left` / `Alt+Right` to move through the focused pane's document history. Closed documents are reopened from disk when revisited.
 - **File → Recent** reopens recently closed files. **Persist recent files** controls whether that history survives an app restart.
 
@@ -52,7 +119,7 @@ The Text view is a CodeMirror 6 source editor. Markdown remains visible and the 
 
 - **Raw** switches the CodeMirror editor to source-only display by hiding in-editor processed widgets such as rendered math and Canvas summaries. It does not disable syntax highlighting or change the separately rendered Preview pane.
 - Save with **Save** or `Ctrl+S` / `Cmd+S`.
-- Save to a new vault-relative path with **File → Save As** or `Ctrl+Shift+S` / `Cmd+Shift+S`.
+- Choose a filename and folder with **File → Save As** or `Ctrl+Shift+S` / `Cmd+Shift+S`.
 - Create a note with `Ctrl+N` / `Cmd+N`.
 - Open a file with `Ctrl+O` / `Cmd+O`.
 - Undo/redo uses CodeMirror history and remains available while the tab is open.
@@ -61,7 +128,7 @@ The Text view is a CodeMirror 6 source editor. Markdown remains visible and the 
 - `Ctrl+L` / `Cmd+L` toggles Markdown links around URLs in the selection.
 - Canadian-English spellcheck underlines unknown words and offers suggestions or a personal dictionary entry.
 
-Before saving, Bricriu compares the current disk text with the version last loaded or saved. If they differ, the save is blocked; an unreadable or missing file also blocks the save. For Markdown files inside the vault, a conflict saves your editor version to a separate merge candidate. For outside files, use **Save As** to preserve your version separately.
+For Save and autosave, Bricriu compares the current disk text with the version last loaded or saved. If they differ, the save is blocked; an unreadable or missing file also blocks the save. For Markdown files inside the vault, a conflict saves your editor version to a separate merge candidate. For outside files, use **Save As** to preserve your version separately.
 
 ## Autosave and external changes
 
@@ -176,7 +243,11 @@ This feature protects a committed archive; it is not full-disk encryption, a har
 3. The first checkpoint or commit creates an AES-256 encrypted `.h.zip` and a plaintext `.horig/` comparison baseline.
 4. Commit `.h.zip`. Never force-add `.h/` or `.horig/`.
 
-If the vault is a subfolder of a larger Git repository, paths are adjusted relative to that worktree. Bricriu adds plaintext paths to the repository's local `.git/info/exclude` and may install local pre-commit/pre-push hook integration. Existing hooks are preserved and run first. If `core.hooksPath` is already customized, the app reports a warning instead of modifying that location.
+If the vault is a subfolder of a larger Git repository, paths are adjusted relative to that worktree. Bricriu adds rules for private folder names, temporary private files, password settings, and the local vault identifier to the repository's `.git/info/exclude`. These rules apply at every folder depth, survive vault renames, and leave the encrypted `.h.zip` archive trackable. Bricriu may install local pre-commit/pre-push hook integration. Existing hooks are preserved and run first. If `core.hooksPath` is already customized, the app reports a warning instead of modifying that location.
+
+Unlocking the private folder upgrades Bricriu's hooks to resolve the vault relative to the repository at runtime. After that, moving or renaming the enclosing repository preserves private-note commits and pushes, provided the Bricriu executable and local password settings remain accessible. Paths to either of those inside the repository also move with it. A local, Git-ignored `.notesproject/private-vault-id` lets saved passwords follow the vault; existing path-based password entries are migrated on successful unlock. Keep that identifier when moving the vault. Passwords remain in `private-vaults.json`, not in the identifier file.
+
+Once these repository-wide exclusions are installed, private files stay ignored when you rename a vault subfolder, even before reopening or unlocking it. Reopen its new location and unlock `.h/` before committing or pushing so Bricriu refreshes the hook paths used to synchronize the archive. Ignore rules do not unstage or untrack files that were already added. The app's remembered vault path, tabs, and layout still use the full path and do not automatically migrate after a move.
 
 Opening a vault leaves `.h/` locked, even if a password was previously saved. There is no startup password prompt or automatic decryption. Search for `.h` in the filename filter or open a private note directly to request the password. Content searches silently skip locked private notes and never prompt for a password; they include private notes only after you explicitly unlock. Cancel leaves private notes locked; successful unlock refreshes the tree and search results and resumes any requested private note. Automatic checkpoints wait; manual checkpoints can commit public changes while the private folder is locked. When private notes are unlocked, checkpoints and integrated command-line commits compare `.h/` byte-for-byte with `.horig/`; changes cause `.h.zip` to be replaced and the baseline refreshed. A pre-push that discovers an uncommitted archive update stops the push.
 

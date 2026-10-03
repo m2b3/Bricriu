@@ -1,5 +1,7 @@
 # Installation and Build Guide
 
+[README](README.md) · [User guide](USER_GUIDE.md) · [First steps](USER_GUIDE.md#getting-started)
+
 Bricriu provides an experimental NSIS installer for 64-bit Windows 10/11. It is unsigned and has not received broad install, upgrade, or uninstall testing. macOS and Linux packages are not currently provided; those platforms must be built from source and remain untested.
 
 > [!CAUTION]
@@ -7,13 +9,13 @@ Bricriu provides an experimental NSIS installer for 64-bit Windows 10/11. It is 
 
 ## Install on Windows 10/11 x64
 
-Download **[`Bricriu_0.1.0_x64-setup.exe`](Bricriu_0.1.0_x64-setup.exe)** from this repository. A copy may also be attached to an official GitHub release when one is published. Do not download the installer from an unrelated mirror or third-party download site.
+Download **[`Bricriu_0.1.0_x64-setup.exe`](https://raw.githubusercontent.com/m2b3/Bricriu/main/Bricriu_0.1.0_x64-setup.exe)** from this repository. This link downloads the installer directly; on the [GitHub file page](https://github.com/m2b3/Bricriu/blob/main/Bricriu_0.1.0_x64-setup.exe), use **Download raw file**. A copy may also be attached to an official GitHub release when one is published. Do not download the installer from an unrelated mirror or third-party download site.
 
 1. Back up any notes you plan to open, then create a disposable test vault containing copies.
 2. Close an older running copy of Bricriu, if applicable.
-3. Run `Bricriu_0.1.0_x64-setup.exe` and follow the installer prompts.
+3. Double-click `Bricriu_0.1.0_x64-setup.exe` and follow the installer prompts.
 4. Because the installer is not code-signed, Windows may report an unknown publisher or show a Microsoft Defender SmartScreen warning. Continue only after confirming that the filename and download source are correct.
-5. Launch Bricriu, open the disposable vault, and complete the checks in [Verify before using real notes](#verify-before-using-real-notes).
+5. Open **Bricriu** from the Start menu, or double-click its desktop shortcut if you created one. Follow the user guide's [first-vault walkthrough](USER_GUIDE.md#getting-started), then complete the checks in [Verify before using real notes](#verify-before-using-real-notes).
 
 The installed app does not require Node.js, npm, Rust, or Visual Studio Build Tools. It does require the Microsoft Edge WebView2 Runtime, which is included with most current Windows 10/11 installations. If Bricriu opens to a blank window or reports a WebView2 problem, follow the [WebView2 troubleshooting](#webview2-errors-on-windows) steps.
 
@@ -155,6 +157,25 @@ npm run tauri -- build --debug
 Tauri writes bundle output below `src-tauri/target/release/bundle/` or the corresponding debug target directory. Do not publish an artifact merely because it compiled; test installation, launch, editing copied notes, saving, upgrading, and uninstalling on a clean machine first.
 
 Node.js, npm, Rust, and the native compiler are not required to run a successfully built Bricriu executable. The target machine still needs the WebView2 Runtime on Windows. Existing vaults require no conversion after the Markdown-It 15, KaTeX plugin, or Tiptap 3 dependency upgrades because those are application implementation dependencies rather than vault-installed plugins.
+
+## Open a file from the command line
+
+The executable accepts one existing supported document, for example:
+
+```powershell
+Bricriu.exe "C:\Notes\my document.md"
+```
+
+Markdown, Typst, TXT, CSV, and JSON files are accepted. Relative paths use the terminal's current directory. If Bricriu is already running, the file opens in that window without switching its vault; selecting an already-open file preserves unsaved edits. With no vault open, Bricriu uses the last vault if it contains the file, or the file's parent folder otherwise. Missing files produce an error; they are not created automatically.
+
+For a `b` command, put a `b.cmd` file in a folder on your user `PATH`, with these contents (adjust the executable path for your installation or checkout):
+
+```bat
+@echo off
+start "" "C:\path\to\notesproject\src-tauri\target\release\Bricriu.exe" %*
+```
+
+The trailing `%*` forwards arguments, so `b doc.md` and `b "my document.md"` work. Keep the caller's working directory unchanged in this launcher. Running `b` without a filename opens the app normally. See the [user guide](USER_GUIDE.md#open-an-individual-file) for the distinction between vault notes and outside files.
 
 ## Optional runtime tools
 
