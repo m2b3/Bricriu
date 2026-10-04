@@ -1831,6 +1831,7 @@ input:focus {
 
 .pane-toolbar {
   display: flex;
+  flex-wrap: wrap;
   min-height: 34px;
   flex: 0 0 auto;
   align-items: center;
@@ -1845,10 +1846,17 @@ input:focus {
 }
 
 .pane-toolbar span {
+  flex: 1 1 100px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.pane-toolbar .split-file-select {
+  flex: 1 1 128px;
+  min-width: 0;
+  max-width: none;
 }
 
 .pane-toolbar button {

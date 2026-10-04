@@ -431,6 +431,7 @@ function App(): JSX.Element {
   const activeIdHistoryRef = useRef<string[]>([])
   const lastMainActiveIdRef = useRef<string | null>(null)
   const splitOpenRef = useRef(false)
+  const splitIdRef = useRef<string | null>(null)
   const splitPathRef = useRef<string | null>(null)
   const splitModeRef = useRef<EditorMode | null>(null)
   const expandedRef = useRef<Set<string>>(new Set())
@@ -523,6 +524,7 @@ function App(): JSX.Element {
 
   const mainTab = useMemo(
     () => {
+      if (activeId == null) return null
       const byId = tabs.find((tab) => tab.id === activeId)
       if (byId) return byId
       const hint = activeTabHintRef.current
@@ -616,7 +618,7 @@ function App(): JSX.Element {
   }, [rememberPaneNavigation, splitOpen, splitTab?.mode, splitTab?.path, vault?.root])
 
   useEffect(() => {
-    if (activeTab) activeTabHintRef.current = { path: activeTab.path, mode: activeTab.mode }
+    if (mainTab) activeTabHintRef.current = { path: mainTab.path, mode: mainTab.mode }
     if (mainTab && mainTab.id !== activeId) setActiveId(mainTab.id)
     activeIdRef.current = activeTab?.id ?? activeId
     activePathRef.current = activeTab?.path ?? null
@@ -657,9 +659,10 @@ function App(): JSX.Element {
 
   useEffect(() => {
     splitOpenRef.current = splitOpen
+    splitIdRef.current = splitId
     splitPathRef.current = splitOpen ? splitTab?.path ?? null : null
     splitModeRef.current = splitOpen ? splitTab?.mode ?? null : null
-  }, [splitOpen, splitTab])
+  }, [splitId, splitOpen, splitTab])
 
   const selectMainTab = useCallback((id: string | null) => {
     if (id === splitId) setSplitId(null)
@@ -965,10 +968,12 @@ function App(): JSX.Element {
         // The file may have been moved or deleted outside the app.
       }
     }
-    const active = restoredTabs.find((tab) => tab.id === session.activeId)
-      ?? restoredTabs.find((tab) => session.activePath != null && samePath(tab.path, session.activePath))
-      ?? restoredTabs[0]
-      ?? null
+    const active = session.activeId === null && session.activePath == null
+      ? null
+      : restoredTabs.find((tab) => tab.id === session.activeId)
+        ?? restoredTabs.find((tab) => session.activePath != null && samePath(tab.path, session.activePath))
+        ?? restoredTabs[0]
+        ?? null
     const split = session.splitOpen
       ? restoredTabs.find((tab) =>
           session.splitPath != null &&
@@ -976,7 +981,7 @@ function App(): JSX.Element {
           samePath(tab.path, session.splitPath)
         ) ?? null
       : null
-    const splitId = split && active && split.id !== active.id ? split.id : null
+    const splitId = split && split.id !== active?.id ? split.id : null
     return {
       tabs: restoredTabs,
       activeId: active?.id ?? null,
@@ -1410,7 +1415,7 @@ function App(): JSX.Element {
     writeStoredSession(vault.root, withDeferredPrivateTabs({
       openTabs: tabs.map((tab) => ({ path: tab.path, mode: tab.mode })),
       activeId,
-      activePath,
+      activePath: mainTab?.path ?? null,
       splitOpen,
       splitPath: splitOpen ? splitTab?.path ?? null : null,
       splitMode: splitOpen ? splitTab?.mode ?? null : null,
@@ -1420,7 +1425,7 @@ function App(): JSX.Element {
       fileQuery,
       contentUsesFileFilter
     }, deferredPrivateRestoreRef.current?.session))
-  }, [activeId, activePath, contentUsesFileFilter, expanded, fileQuery, pinnedPaths, privatePending, profile.persistRecentFiles, recentPaths, splitOpen, splitTab, tabs, vault])
+  }, [activeId, contentUsesFileFilter, expanded, fileQuery, mainTab?.path, pinnedPaths, privatePending, profile.persistRecentFiles, recentPaths, splitOpen, splitTab, tabs, vault])
 
   const openExternalLink = useCallback((rawUrl: string) => {
     try {
@@ -2059,8 +2064,8 @@ function App(): JSX.Element {
     if (vault) {
       writeStoredSession(vault.root, withDeferredPrivateTabs({
         openTabs: tabsRef.current.map((tab) => ({ path: tab.path, mode: tab.mode })),
-        activeId: activeIdRef.current,
-        activePath: activePathRef.current,
+        activeId: lastMainActiveIdRef.current,
+        activePath: tabsRef.current.find((tab) => tab.id === lastMainActiveIdRef.current)?.path ?? null,
         splitOpen: splitOpenRef.current,
         splitPath: splitPathRef.current,
         splitMode: splitModeRef.current,
@@ -2496,13 +2501,14 @@ function App(): JSX.Element {
         const index = prev.findIndex((tab) => tab.id === id)
         if (index < 0) return prev
         const next = prev.filter((tab) => tab.id !== id)
-        if (activeIdRef.current === id) {
-          const liveNextIds = new Set(next.map((tab) => tab.id))
-          const recentId = activeIdHistoryRef.current.find((candidate) => liveNextIds.has(candidate)) ?? null
-          const replacement = next.find((tab) => tab.id === recentId) ?? next[Math.min(index, next.length - 1)] ?? null
-          setActiveId(replacement?.id ?? null)
-          setSplitId((current) => current === replacement?.id ? null : current)
-        }
+        // Only replace the left selection if its document was closed. Never
+        // take a replacement from the right pane or change the pane layout.
+        const candidates = next.filter((tab) => tab.id !== splitIdRef.current)
+        const recentId = activeIdHistoryRef.current.find((candidate) => candidates.some((tab) => tab.id === candidate))
+        const replacement = candidates.find((tab) => tab.id === recentId)
+          ?? candidates[Math.min(index, candidates.length - 1)]
+          ?? null
+        setActiveId((current) => current === id ? replacement?.id ?? null : current)
         setSplitId((current) => current === id ? null : current)
         activeIdHistoryRef.current = activeIdHistoryRef.current.filter(
           (candidate) => candidate !== id && next.some((tab) => tab.id === candidate)
@@ -2714,14 +2720,8 @@ function App(): JSX.Element {
       }
 
       if (key === 'w') {
-        if (focusedPane === 'split' && splitOpen) {
-          event.preventDefault()
-          closeSplitPane()
-          return
-        }
-        if (!activeTab) return
         event.preventDefault()
-        void closeTab(activeTab.id)
+        if (activeTab) void closeTab(activeTab.id)
         return
       }
 
@@ -2742,7 +2742,7 @@ function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTab, closeSplitPane, closeTab, focusedPane, mainTab, navigateDocumentHistory, openDocumentDialog, openNewNoteDialog, openSaveAsDialog, printActiveDocument, saveActive, selectMainTab, splitOpen, tabs, vault])
+  }, [activeTab, closeTab, mainTab, navigateDocumentHistory, openDocumentDialog, openNewNoteDialog, openSaveAsDialog, printActiveDocument, saveActive, selectMainTab, tabs, vault])
 
   useEffect(() => {
     setSearchRevealedFolders(new Set())
@@ -3521,11 +3521,19 @@ function App(): JSX.Element {
               ? { flex: `${(splitOpen ? editorSplitRatio : 1) * editorAreaRatio} 1 0` }
               : undefined}
             onMouseDown={() => setFocusedPane('main')}
+            onFocusCapture={() => setFocusedPane('main')}
           >
             {splitOpen && (
               <div className="pane-toolbar">
                 <span>{mainTab?.path ?? 'Left pane'}</span>
-                <button type="button" onClick={closeMainPane} disabled={!splitTab}>Close left</button>
+                <button
+                  type="button"
+                  aria-label="Close document in left pane"
+                  title="Close document (Ctrl+W / Cmd+W)"
+                  onClick={() => mainTab && void closeTab(mainTab.id)}
+                  disabled={!mainTab}
+                >Close document</button>
+                <button type="button" onClick={closeMainPane} disabled={!splitTab} aria-label="Close left pane">Close pane</button>
               </div>
             )}
             {mainTab?.mode === 'track' && mainTab.trackState ? (
@@ -3615,6 +3623,7 @@ function App(): JSX.Element {
               className={focusedPane === 'split' ? 'editor-pane-slot active' : 'editor-pane-slot'}
               style={{ flex: `${(1 - editorSplitRatio) * editorAreaRatio} 1 0` }}
               onMouseDown={() => setFocusedPane('split')}
+              onFocusCapture={() => setFocusedPane('split')}
             >
               <div className="pane-toolbar">
                 <select
@@ -3637,7 +3646,14 @@ function App(): JSX.Element {
                     </option>
                   ))}
                 </select>
-                <button type="button" onClick={closeSplitPane}>Close right</button>
+                <button
+                  type="button"
+                  aria-label="Close document in right pane"
+                  title="Close document (Ctrl+W / Cmd+W)"
+                  onClick={() => splitTab && void closeTab(splitTab.id)}
+                  disabled={!splitTab}
+                >Close document</button>
+                <button type="button" onClick={closeSplitPane} aria-label="Close right pane">Close pane</button>
               </div>
               {splitTab?.mode === 'track' && splitTab.trackState ? (
                 <React.Suspense fallback={<EditorLoading label="Loading Track editor..." />}>
@@ -7621,7 +7637,7 @@ function readStoredSession(root: string): StoredSession | null {
       openPaths: Array.isArray(parsed.openPaths)
         ? parsed.openPaths.filter((path): path is string => typeof path === 'string')
         : [],
-      activeId: typeof parsed.activeId === 'string' ? parsed.activeId : null,
+      activeId: typeof parsed.activeId === 'string' ? parsed.activeId : parsed.activeId === null ? null : undefined,
       activePath: typeof parsed.activePath === 'string' ? parsed.activePath : null,
       splitOpen: parsed.splitOpen === true,
       splitPath: typeof parsed.splitPath === 'string' ? parsed.splitPath : null,

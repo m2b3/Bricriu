@@ -97,7 +97,8 @@ Treat delete as permanent unless you have independently confirmed recovery throu
 
 - Open notes appear in tabs; a modified marker identifies dirty tabs.
 - **Split** opens a resizable second editor pane. **Move right** moves the main tab into it.
-- `Ctrl+W` / `Cmd+W` closes the focused split pane or current tab.
+- `Ctrl+W` / `Cmd+W` closes the document in the focused pane and keeps the pane open. Each split pane also has a **Close document** button. Unsaved edits require confirmation before discarding.
+- **Close pane** and **Close split** remove a pane without closing its document tab. Closing a document leaves the other pane unchanged; an empty pane stays available for another document.
 - Switch main tabs with `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+PageUp`, `Ctrl+PageDown`, `Ctrl+[`, or `Ctrl+]` (use `Cmd` where the platform maps it). `Ctrl+Tab` moves right and `Ctrl+Shift+Tab` moves left, wrapping at either end.
 - The sidebar lists open tabs after pinned notes and filename/content search results, above the regular file directory. Files already shown as pins or search results are omitted from this open-tab list; files in the regular directory remain in it.
 - Use the top-bar Back/Forward buttons or `Alt+Left` / `Alt+Right` to move through the focused pane's document history. Closed documents are reopened from disk when revisited.

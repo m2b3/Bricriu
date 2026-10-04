@@ -42,7 +42,7 @@ function deferred() {
 function harness({ dirty = true, latestBody } = {}) {
   const tab = { id: 'note.md:markdown', path: 'note.md', mode: 'markdown', body: dirty ? 'edited' : 'saved', savedBody: 'saved' }
   const other = { ...tab, id: 'other.md:markdown', path: 'other.md', body: 'saved' }
-  const state = { tabs: [tab, other], activeId: tab.id, splitId: null, error: null, busy: false, finalized: 0, destroyed: 0 }
+  const state = { tabs: [tab, other], activeId: tab.id, splitId: null, splitOpen: false, error: null, busy: false, finalized: 0, destroyed: 0 }
   const prompts = []
   globalThis.window = {}
   mockIPC((command, payload) => {
@@ -56,12 +56,21 @@ function harness({ dirty = true, latestBody } = {}) {
     tabsRef: { current: state.tabs },
     latestBodiesRef: { current: new Map(latestBody === undefined ? [] : [[tab.id, latestBody]]) },
     activeIdRef: { current: tab.id },
+    splitIdRef: { current: null },
     activeIdHistoryRef: { current: [tab.id, other.id] },
     pendingTabCloseIdsRef: { current: new Set() },
     closingRef: { current: false },
     setTabs(update) { state.tabs = update(state.tabs); context.tabsRef.current = state.tabs },
-    setActiveId(value) { state.activeId = value; context.activeIdRef.current = value },
-    setSplitId(update) { state.splitId = typeof update === 'function' ? update(state.splitId) : update },
+    setActiveId(update) {
+      state.activeId = typeof update === 'function' ? update(state.activeId) : update
+      context.activeIdRef.current = state.activeId
+    },
+    setSplitId(update) {
+      state.splitId = typeof update === 'function' ? update(state.splitId) : update
+      context.splitIdRef.current = state.splitId
+    },
+    setSplitOpen(value) { state.splitOpen = value },
+    setFocusedPane(value) { state.focusedPane = value },
     setError(value) { state.error = value },
     setBusy(value) { state.busy = value },
     uniqueSaveTargets(tabs) { return tabs },
@@ -76,7 +85,43 @@ function harness({ dirty = true, latestBody } = {}) {
     && ts.isPropertyAccessExpression(node.expression)
     && node.expression.name.text === 'onCloseRequested')
   context.onCloseRequested = evaluate(onClose.arguments[0], context)
+  context.closeSplitPane = callback('closeSplitPane', context)
+  const keyHandler = findNode((node) => ts.isVariableDeclaration(node)
+    && node.name.getText(source) === 'onKeyDown'
+    && node.initializer.getText(source).includes('void closeTab('))
+  context.onKeyDown = evaluate(keyHandler.initializer, context)
   return { state, context, prompts, tab, other }
+}
+
+function splitHarness(options) {
+  const app = harness(options)
+  app.state.splitOpen = app.context.splitOpen = true
+  app.context.setSplitId(app.other.id)
+  app.context.mainTab = app.tab
+  app.context.splitTab = app.other
+  app.context.activeTab = app.other
+  app.context.focusedPane = 'split'
+  app.context.activeIdRef.current = app.other.id
+  return app
+}
+
+function pressClose(context, mac = false) {
+  let prevented = false
+  context.onKeyDown({ key: 'w', ctrlKey: !mac, metaKey: mac, altKey: false,
+    preventDefault() { prevented = true } })
+  assert.equal(prevented, true)
+}
+
+function paneDocumentButton(pane, context) {
+  const attribute = (node, name) => node.attributes.properties.find((attr) => attr.name?.getText(source) === name)?.initializer
+  const button = findNode((node) => ts.isJsxOpeningElement(node)
+    && node.tagName.getText(source) === 'button'
+    && attribute(node, 'aria-label')?.text === `Close document in ${pane} pane`)
+  assert.ok(button)
+  return {
+    click: evaluate(attribute(button, 'onClick').expression, context),
+    disabled: () => evaluate(attribute(button, 'disabled').expression, context)
+  }
 }
 
 afterEach(() => {
@@ -130,6 +175,123 @@ test('saved tabs close without prompting', async () => {
   await context.closeTab(tab.id)
   assert.equal(state.tabs.length, 1)
   assert.equal(prompts.length, 0)
+})
+
+test('Ctrl+W and Cmd+W close the right document while preserving both panes and the left document', () => {
+  for (const mac of [false, true]) {
+    const { state, context, tab, other } = splitHarness({ dirty: false })
+    pressClose(context, mac)
+    assert.equal(state.splitOpen, true)
+    assert.equal(state.splitId, null)
+    assert.equal(state.activeId, tab.id)
+    assert.ok(!state.tabs.some((item) => item.id === other.id))
+  }
+})
+
+test('closing the left document leaves it empty when only the right document remains', () => {
+  const { state, context, tab, other } = splitHarness({ dirty: false })
+  context.activeTab = tab
+  context.focusedPane = 'main'
+  context.activeIdRef.current = tab.id
+  pressClose(context)
+  assert.equal(state.splitOpen, true)
+  assert.equal(state.activeId, null)
+  assert.equal(state.splitId, other.id)
+  assert.equal(state.tabs[0].id, other.id)
+
+  // A stale hint must not silently move the right document back into the left.
+  context.activeId = null
+  context.tabs = state.tabs
+  context.activeTabHintRef = { current: { path: other.path, mode: other.mode } }
+  context.samePath = (a, b) => a === b
+  assert.equal(callback('mainTab', context)(), null)
+})
+
+test('closing the left document selects a background tab without taking the right document', async () => {
+  const { state, context, tab, other } = splitHarness({ dirty: false })
+  const background = { ...tab, id: 'third.md:markdown', path: 'third.md' }
+  state.tabs.push(background)
+  context.activeIdHistoryRef.current = [other.id, background.id]
+  await context.closeTab(tab.id)
+  assert.equal(state.activeId, background.id)
+  assert.equal(state.splitId, other.id)
+  assert.equal(state.splitOpen, true)
+})
+
+test('a right document with unsaved edits stays open until discard is confirmed', async () => {
+  const { state, context, prompts, tab, other } = splitHarness({ dirty: false })
+  context.latestBodiesRef.current.set(other.id, 'unsaved right text')
+  for (const answer of ['Keep editing', 'Discard changes']) {
+    const closing = context.closeTab(other.id)
+    assert.equal(state.splitId, other.id)
+    assert.equal(state.splitOpen, true)
+    prompts.at(-1).resolve(answer)
+    await closing
+    assert.equal(state.activeId, tab.id)
+    assert.equal(state.splitOpen, true)
+  }
+  assert.equal(state.splitId, null)
+})
+
+test('Ctrl+W in an empty pane does nothing to documents or layout', () => {
+  const { state, context, tab } = splitHarness({ dirty: false })
+  context.activeTab = null
+  context.setSplitId(null)
+  pressClose(context)
+  assert.equal(state.tabs.length, 2)
+  assert.equal(state.activeId, tab.id)
+  assert.equal(state.splitOpen, true)
+})
+
+test('each Close document button closes its own document and leaves the split open', async () => {
+  for (const pane of ['left', 'right']) {
+    const { state, context, tab, other } = splitHarness({ dirty: false })
+    const button = paneDocumentButton(pane, context)
+    assert.equal(button.disabled(), false)
+    button.click()
+    assert.equal(state.splitOpen, true)
+    assert.ok(!state.tabs.some((item) => item.id === (pane === 'left' ? tab.id : other.id)))
+    context[pane === 'left' ? 'mainTab' : 'splitTab'] = null
+    assert.equal(button.disabled(), true)
+  }
+})
+
+test('Close pane still removes the right pane without closing either document', () => {
+  const { state, context } = splitHarness({ dirty: false })
+  context.closeSplitPane()
+  assert.equal(state.splitOpen, false)
+  assert.equal(state.tabs.length, 2)
+})
+
+test('saving and restoring a split keeps the left selection separate from the focused right document', async () => {
+  for (const emptyLeft of [false, true]) {
+    const { context, tab, other } = splitHarness({ dirty: false })
+    let session
+    Object.assign(context, {
+      lastMainActiveIdRef: { current: emptyLeft ? null : tab.id },
+      vaultRef: { current: { root: '/vault', git: { isRepo: false } } },
+      splitOpenRef: { current: true }, splitPathRef: { current: other.path },
+      splitModeRef: { current: 'markdown' },
+      expandedRef: { current: new Set() }, pinnedPathsRef: { current: new Set() },
+      fileQueryRef: { current: '' }, contentUsesFileFilterRef: { current: false },
+      deferredPrivateRestoreRef: { current: null }, touchedPathsRef: { current: new Set() },
+      privatePendingRef: { current: false }, profile: { persistRecentFiles: false },
+      withDeferredPrivateTabs: (value) => value,
+      writeStoredSession(_root, value) { session = value },
+      tabId: (path, mode) => `${path}:${mode}`, samePath: (a, b) => a === b,
+      async invoke(command, payload) {
+        assert.equal(command, 'read_note')
+        return { path: payload.path, body: 'saved', outOfVault: false }
+      }
+    })
+    await callback('finalizeBeforeClose', context)()
+    assert.equal(session.activeId, emptyLeft ? null : tab.id)
+    assert.equal(session.activePath, emptyLeft ? null : tab.path)
+    const restored = await callback('loadStoredSession', context)('/vault', true, session)
+    assert.equal(restored.activeId, session.activeId)
+    assert.equal(restored.splitId, other.id)
+    assert.equal(restored.splitOpen, true)
+  }
 })
 
 test('an edit ahead of React state still requires confirmation', async () => {
