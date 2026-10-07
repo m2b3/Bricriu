@@ -1846,8 +1846,16 @@ input:focus {
   padding: 5px 8px;
 }
 
-.pane-toolbar span {
-  flex: 1 1 100px;
+.pane-document-picker {
+  display: flex;
+  flex: 1 1 240px;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.pane-file-path {
+  flex: 1 1 120px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -95,12 +95,13 @@ Treat delete as permanent unless you have independently confirmed recovery throu
 
 ## Tabs, panes, and recent files
 
-- Open notes appear in tabs; a modified marker identifies dirty tabs.
-- **Split** opens a resizable second editor pane. **Move right** moves the main tab into it.
+- Open notes appear in tabs; a modified marker identifies dirty tabs. Click inside a pane to make it active; clicking a tab then displays that document in the active pane. The highlighted tab follows the active pane. If the selected document is already in the other pane, the two panes swap documents. If the active pane was empty, the document moves into it and its previous pane becomes empty.
+- **Split** opens a resizable second editor pane. **Move right** moves the main tab into it. Each pane has a document dropdown listing open tabs, excluding the document already shown in the other pane. Choosing a document changes only that pane; choosing **Choose file** leaves the pane empty without closing the tab.
+- Both pane toolbars show the current file path to the left of the dropdown: the filename and at most its two nearest parent folders. Paths inside the vault show only folders within the vault; a root-level note shows just its filename. Deeper paths start with `…/`. Hover over the label for the full path (vault-relative for files inside the vault).
 - `Ctrl+W` / `Cmd+W` closes the document in the focused pane and keeps the pane open. Each split pane also has a **Close document** button. Unsaved edits require confirmation before discarding.
 - **Close pane** and **Close split** remove a pane without closing its document tab. Closing a document leaves the other pane unchanged; an empty pane stays available for another document.
-- Switch main tabs with `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+PageUp`, `Ctrl+PageDown`, `Ctrl+[`, or `Ctrl+]` (use `Cmd` where the platform maps it). `Ctrl+Tab` moves right and `Ctrl+Shift+Tab` moves left, wrapping at either end.
-- The sidebar lists open tabs after pinned notes and filename/content search results, above the regular file directory. Files already shown as pins or search results are omitted from this open-tab list; files in the regular directory remain in it.
+- Switch the focused pane's document with `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+PageUp`, `Ctrl+PageDown`, `Ctrl+[`, or `Ctrl+]` (use `Cmd` where the platform maps it). `Ctrl+Tab` moves right and `Ctrl+Shift+Tab` moves left, wrapping at either end.
+- The sidebar lists open tabs after pinned notes and filename/content search results, above the regular file directory. Clicking an entry in **Open tabs** also selects it in the active pane. Files already shown as pins or search results are omitted from this open-tab list; files in the regular directory remain in it.
 - Use the top-bar Back/Forward buttons or `Alt+Left` / `Alt+Right` to move through the focused pane's document history. Closed documents are reopened from disk when revisited.
 - **File → Recent** reopens recently closed files. **Persist recent files** controls whether that history survives an app restart.
 

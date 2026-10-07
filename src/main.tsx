@@ -553,6 +553,10 @@ function App(): JSX.Element {
     () => tabs.find((tab) => tab.id === splitId) ?? null,
     [splitId, tabs]
   )
+  const mainCandidates = useMemo(
+    () => tabs.filter((tab) => tab.id !== splitId),
+    [splitId, tabs]
+  )
   const splitCandidates = useMemo(
     () => tabs.filter((tab) => tab.id !== activeId),
     [activeId, tabs]
@@ -692,15 +696,17 @@ function App(): JSX.Element {
     }
 
     if (id === activeId) {
-      const replacement = splitId && splitId !== id
-        ? splitId
-        : tabsRef.current.find((tab) => tab.id !== id)?.id ?? null
-      setActiveId(replacement)
+      setActiveId(splitId && splitId !== id ? splitId : null)
     }
     setSplitOpen(true)
     setSplitId(id)
     setFocusedPane('split')
   }, [activeId, splitId])
+
+  const selectFocusedTab = useCallback((id: string) => {
+    setWorkspaceMode('notes')
+    selectTabInPane(id, splitOpen ? focusedPane : 'main')
+  }, [focusedPane, selectTabInPane, splitOpen])
 
   useEffect(() => {
     if (splitId && splitId === activeId) setSplitId(null)
@@ -2662,17 +2668,16 @@ function App(): JSX.Element {
     const onTabKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Tab' || !event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return
       if (document.querySelector('[role="dialog"][aria-modal="true"]')) return
-      const tabForNavigation = mainTab ?? activeTab ?? tabs[0]
+      const tabForNavigation = activeTab ?? tabs[0]
       if (!tabForNavigation) return
       event.preventDefault()
       event.stopPropagation()
-      setWorkspaceMode('notes')
-      selectAdjacentTab(tabs, tabForNavigation.id, event.shiftKey ? -1 : 1, selectMainTab)
+      selectAdjacentTab(tabs, tabForNavigation.id, event.shiftKey ? -1 : 1, selectFocusedTab)
     }
     // Handle tab switching before an editor or the webview can consume the key.
     window.addEventListener('keydown', onTabKeyDown, true)
     return () => window.removeEventListener('keydown', onTabKeyDown, true)
-  }, [activeTab, mainTab, selectMainTab, tabs])
+  }, [activeTab, selectFocusedTab, tabs])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2735,23 +2740,23 @@ function App(): JSX.Element {
       }
 
       if (key === 'pagedown' || key === ']') {
-        const tabForNavigation = mainTab ?? activeTab
+        const tabForNavigation = activeTab ?? tabs[0]
         if (tabs.length <= 1 || !tabForNavigation) return
         event.preventDefault()
-        selectAdjacentTab(tabs, tabForNavigation.id, event.shiftKey ? -1 : 1, selectMainTab)
+        selectAdjacentTab(tabs, tabForNavigation.id, event.shiftKey ? -1 : 1, selectFocusedTab)
         return
       }
 
       if (key === 'pageup' || key === '[') {
-        const tabForNavigation = mainTab ?? activeTab
+        const tabForNavigation = activeTab ?? tabs[0]
         if (tabs.length <= 1 || !tabForNavigation) return
         event.preventDefault()
-        selectAdjacentTab(tabs, tabForNavigation.id, -1, selectMainTab)
+        selectAdjacentTab(tabs, tabForNavigation.id, -1, selectFocusedTab)
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTab, closeTab, mainTab, navigateDocumentHistory, openDocumentDialog, openNewNoteDialog, openSaveAsDialog, printActiveDocument, saveActive, selectMainTab, tabs, vault])
+  }, [activeTab, closeTab, navigateDocumentHistory, openDocumentDialog, openNewNoteDialog, openSaveAsDialog, printActiveDocument, saveActive, selectFocusedTab, tabs, vault])
 
   useEffect(() => {
     setSearchRevealedFolders(new Set())
@@ -3074,10 +3079,7 @@ function App(): JSX.Element {
       tabs={otherOpenTabs}
       activeId={activeTab?.id ?? null}
       isDirty={isTabDirty}
-      onSelect={(id) => {
-        setWorkspaceMode('notes')
-        selectMainTab(id)
-      }}
+      onSelect={selectFocusedTab}
     />
   )
 
@@ -3498,12 +3500,9 @@ function App(): JSX.Element {
         {workspaceMode === 'notes' && (
           <TabStrip
             tabs={tabs}
-            activeId={activeId}
+            activeId={activeTab?.id ?? null}
             isDirty={isTabDirty}
-            onSelect={(id) => {
-              setWorkspaceMode('notes')
-              selectMainTab(id)
-            }}
+            onSelect={selectFocusedTab}
             onClose={closeTab}
           />
         )}
@@ -3536,7 +3535,26 @@ function App(): JSX.Element {
           >
             {splitOpen && (
               <div className="pane-toolbar">
-                <span>{mainTab?.path ?? 'Left pane'}</span>
+                <div className="pane-document-picker">
+                  <span className="pane-file-path" title={mainTab?.path}>
+                    {mainTab ? panePathLabel(mainTab.path) : 'Left pane'}
+                  </span>
+                  <select
+                    className="split-file-select"
+                    value={mainTab?.id ?? ''}
+                    onChange={(event) => selectMainTab(event.target.value || null)}
+                    disabled={mainCandidates.length === 0}
+                    aria-label="Left pane document"
+                    title="Left pane document"
+                  >
+                    <option value="">Choose file</option>
+                    {mainCandidates.map((tab) => (
+                      <option key={tab.id} value={tab.id}>
+                        {tabLabel(tab)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 <button
                   type="button"
                   aria-label="Close document in left pane"
@@ -3637,26 +3655,32 @@ function App(): JSX.Element {
               onFocusCapture={() => setFocusedPane('split')}
             >
               <div className="pane-toolbar">
-                <select
-                  className="split-file-select"
-                  value={splitTab?.id ?? ''}
-                  onChange={(event) => {
-                    if (event.target.value) selectTabInPane(event.target.value, 'split')
-                    else {
-                      setSplitId(null)
-                      setFocusedPane('split')
-                    }
-                  }}
-                  disabled={splitCandidates.length === 0}
-                  title="Split pane file"
-                >
-                  <option value="">Choose file</option>
-                  {splitCandidates.map((tab) => (
-                    <option key={tab.id} value={tab.id}>
-                      {tabLabel(tab)}
-                    </option>
-                  ))}
-                </select>
+                <div className="pane-document-picker">
+                  <span className="pane-file-path" title={splitTab?.path}>
+                    {splitTab ? panePathLabel(splitTab.path) : 'Right pane'}
+                  </span>
+                  <select
+                    className="split-file-select"
+                    value={splitTab?.id ?? ''}
+                    onChange={(event) => {
+                      if (event.target.value) selectTabInPane(event.target.value, 'split')
+                      else {
+                        setSplitId(null)
+                        setFocusedPane('split')
+                      }
+                    }}
+                    disabled={splitCandidates.length === 0}
+                    aria-label="Right pane document"
+                    title="Right pane document"
+                  >
+                    <option value="">Choose file</option>
+                    {splitCandidates.map((tab) => (
+                      <option key={tab.id} value={tab.id}>
+                        {tabLabel(tab)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
                 <button
                   type="button"
                   aria-label="Close document in right pane"
@@ -7250,6 +7274,13 @@ function collectDirPaths(entries: TreeEntry[]): string[] {
 function basename(path: string): string {
   const normalized = path.replace(/\\/g, '/')
   return normalized.split('/').filter(Boolean).pop() ?? path
+}
+
+function panePathLabel(path: string): string {
+  // In-vault tab paths are already vault-relative; never prepend the vault root.
+  const parts = path.replace(/\\/g, '/').split('/').filter(Boolean)
+  const label = parts.slice(-3).join('/')
+  return parts.length > 3 ? `…/${label}` : label
 }
 
 function parentFolder(path: string): string {
