@@ -42,7 +42,8 @@ Canvas content lives inside Markdown files; Track Changes also works with Markdo
 
 - **Organize and find:** folder tree, pinned notes, filename filtering, and vault-wide content search.
 - **Write and read:** Markdown editing and preview, manual save and delayed autosave, spellcheck, word counts, wiki links, backlinks, callouts, and KaTeX math.
-- **Work across notes:** multiple tabs, a resizable two-file split view, recent files, session restoration, and three interface themes.
+- **Work across notes:** multiple tabs, a resizable two-file split view, recent files, and session restoration.
+- **Choose your appearance:** Classic, Bright contrast, or neutral VS Code Dark+; import VS Code JSON themes or Bricriu CSS palettes through **Options → Import theme…**. See [where to get themes and how to import them](USER_GUIDE.md#where-to-get-themes) for One Dark Pro, GitHub Theme, and Dracula. Imports apply immediately and are remembered, without rebuilding the app.
 - **Handle disk changes:** filesystem watching, external-change warnings, and save-conflict checks.
 - **Print and export:** preview printing and PDF workflows; direct Markdown PDF export needs [optional tools](install.md#optional-runtime-tools).
 - **Experiment:** Typst, rich-text Track Changes, visual Canvas, a vault Calendar, Git checkpoints, and encrypted private notes. These features have much less testing than ordinary Markdown editing.

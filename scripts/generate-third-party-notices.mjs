@@ -62,6 +62,10 @@ Package names link to their npm, crates.io, or upstream project pages. License e
 - [Lilex](https://github.com/mishamyrt/Lilex) is bundled as unmodified variable WOFF2 files. Copyright 2019 The Lilex Project Authors. [Complete SIL Open Font License 1.1](public/fonts/lilex/OFL.txt).
 - [Font provenance and checksums](public/fonts/sources.json) record the upstream commits and exact distributed files. The fonts remain under their own licences.
 
+## Theme Palette
+
+- The dark palette and editable CSS example adapt colors from [Visual Studio Code Dark+](https://github.com/microsoft/vscode/tree/main/extensions/theme-defaults/themes). Copyright (c) 2015 - present Microsoft Corporation, MIT License. The [complete license](public/themes/vscode-LICENSE.txt) ships with the theme assets. The palette is adapted to Bricriu's interface and CodeMirror tokens.
+
 Regenerate this file after changing dependencies:
 
 \`\`\`sh

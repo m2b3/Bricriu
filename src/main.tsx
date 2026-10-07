@@ -52,6 +52,7 @@ import { collectMarkdownHeadings, findHeadingOffset, slugifyHeading } from './ma
 import { markdownToTiptap } from './track/markdown'
 import { resolveWikiDocumentPath } from './wikiPaths'
 import { createExternalChangeMonitor } from './externalChanges'
+import { applyAppearance, MAX_THEME_BYTES, parseThemeFile, readAppearance, saveAppearance, type Appearance, type AppTheme } from './appearance'
 import type { PreviewFollowRequest } from './preview/sourceNavigation'
 import type { CalendarEvent } from './calendar/CalendarView'
 import type { TrackState } from './track/types'
@@ -193,7 +194,6 @@ type SearchView = 'file' | 'content'
 type EditorPane = 'main' | 'split'
 type CanvasMarkdownDisplayMode = 'summary' | 'raw'
 type CanvasDocumentDisplayMode = 'node' | 'panel'
-type AppTheme = 'classic' | 'bright' | 'dark'
 
 type OpenTab = {
   id: string
@@ -270,7 +270,6 @@ const SESSION_KEY_PREFIX = 'notesproject:session:'
 const WINDOW_PLACEMENT_KEY = 'notesproject:window-placement'
 const CANVAS_MARKDOWN_DISPLAY_KEY = 'notesproject:canvas-markdown-display'
 const CANVAS_DOCUMENT_DISPLAY_KEY = 'notesproject:canvas-document-display'
-const THEME_KEY = 'notesproject:theme'
 const SIDEBAR_WIDTH_KEY = 'notesproject:sidebar-width'
 const EDITOR_SPLIT_RATIO_KEY = 'notesproject:editor-split-ratio'
 const PREVIEW_SPLIT_RATIO_KEY = 'notesproject:preview-split-ratio'
@@ -397,10 +396,10 @@ function App(): JSX.Element {
   const startupNoteOpeningRef = useRef(false)
   const [showPreview, setShowPreview] = useState(false)
   const [previewFollowRequest, setPreviewFollowRequest] = useState<PreviewFollowRequest | null>(null)
-  const [theme, setTheme] = useState<AppTheme>(() => {
-    const storedTheme = readStoredTheme()
-    document.documentElement.dataset.theme = storedTheme
-    return storedTheme
+  const [appearance, setAppearance] = useState<Appearance>(() => {
+    const stored = readAppearance()
+    applyAppearance(stored)
+    return stored
   })
   const [canvasMarkdownDisplayMode, setCanvasMarkdownDisplayMode] = useState<CanvasMarkdownDisplayMode>(() => readCanvasMarkdownDisplayMode())
   const [canvasDocumentDisplayMode, setCanvasDocumentDisplayMode] = useState<CanvasDocumentDisplayMode>(() => readCanvasDocumentDisplayMode())
@@ -489,15 +488,25 @@ function App(): JSX.Element {
     }
   }, [])
 
-  const updateTheme = useCallback((nextTheme: AppTheme) => {
-    setTheme(nextTheme)
-    document.documentElement.dataset.theme = nextTheme
-    try {
-      localStorage.setItem(THEME_KEY, nextTheme)
-    } catch {
-      // Ignore storage failures; the in-memory setting still applies.
+  const updateAppearance = useCallback((next: Appearance) => {
+    setAppearance(next)
+    applyAppearance(next)
+    if (!saveAppearance(next)) {
+      setError('Theme applied, but could not save the preference for the next launch.')
     }
   }, [])
+
+  const importTheme = useCallback(async (file: File) => {
+    try {
+      if (file.size > MAX_THEME_BYTES) throw new Error('Theme files must be smaller than 512 KB.')
+      const custom = parseThemeFile(await file.text(), file.name)
+      setError(null)
+      updateAppearance({ selected: 'custom', custom })
+      setNotice(`Theme loaded: ${custom.name}`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }, [updateAppearance])
 
   const isTabDirty = useCallback((tab: OpenTab) => (
     latestTabBody(tab) !== tab.savedBody
@@ -3338,7 +3347,8 @@ function App(): JSX.Element {
               recentClosedPaths={recentClosedPaths}
               showBacklinks={showBacklinks}
               showPreview={showPreview}
-              theme={theme}
+              theme={appearance.selected}
+              importedThemeName={appearance.custom?.name ?? null}
               typstPreviewFormat={typstPreviewFormat}
               vaultOpen={!!vault}
               onCheckpoint={() => void (privatePending ? checkpointVaultNow() : checkpointNow())}
@@ -3350,7 +3360,8 @@ function App(): JSX.Element {
               onOpenRecent={(path) => void openNote(path)}
               onSaveAs={openSaveAsDialog}
               onSetCanvasDocumentDisplay={updateCanvasDocumentDisplayMode}
-              onSetTheme={updateTheme}
+              onSetTheme={(selected) => updateAppearance({ ...appearance, selected })}
+              onImportTheme={importTheme}
               onSetTypstPreviewFormat={setTypstPreviewFormat}
               onToggleBacklinks={() => setShowBacklinks((current) => !current)}
               onToggleHistory={(persistRecentFiles) => updateProfile({ ...profile, persistRecentFiles })}
@@ -4025,6 +4036,7 @@ function AppMenuBar({
   showBacklinks,
   showPreview,
   theme,
+  importedThemeName,
   typstPreviewFormat,
   vaultOpen,
   onCheckpoint,
@@ -4035,6 +4047,7 @@ function AppMenuBar({
   onSaveAs,
   onSetCanvasDocumentDisplay,
   onSetTheme,
+  onImportTheme,
   onSetTypstPreviewFormat,
   onToggleBacklinks,
   onToggleHistory,
@@ -4055,6 +4068,7 @@ function AppMenuBar({
   showBacklinks: boolean
   showPreview: boolean
   theme: AppTheme
+  importedThemeName: string | null
   typstPreviewFormat: TypstPreviewFormat
   vaultOpen: boolean
   onCheckpoint: () => void
@@ -4065,6 +4079,7 @@ function AppMenuBar({
   onSaveAs: () => void
   onSetCanvasDocumentDisplay: (mode: CanvasDocumentDisplayMode) => void
   onSetTheme: (theme: AppTheme) => void
+  onImportTheme: (file: File) => Promise<void>
   onSetTypstPreviewFormat: React.Dispatch<React.SetStateAction<TypstPreviewFormat>>
   onToggleBacklinks: () => void
   onToggleHistory: (persistRecentFiles: boolean) => void
@@ -4079,6 +4094,7 @@ function AppMenuBar({
   const activeOutOfVault = activeTab?.outOfVault === true
   const [openMenu, setOpenMenu] = useState<'file' | 'edit' | 'view' | 'options' | null>(null)
   const menuRef = useRef<HTMLElement | null>(null)
+  const themeFileRef = useRef<HTMLInputElement | null>(null)
 
   useEffect(() => {
     if (!openMenu) return
@@ -4259,14 +4275,31 @@ function AppMenuBar({
           <label className="app-menu-field">
             <span>Theme</span>
             <select
+              aria-label="Theme"
               value={theme}
               onChange={(event) => onSetTheme(event.target.value as AppTheme)}
             >
               <option value="classic">Classic</option>
               <option value="bright">Bright contrast</option>
-              <option value="dark">Dark</option>
+              <option value="dark">Dark — VS Code Dark+</option>
+              {importedThemeName && <option value="custom">Imported: {importedThemeName}</option>}
             </select>
           </label>
+          <input
+            ref={themeFileRef}
+            type="file"
+            accept=".css,.json,.jsonc"
+            aria-label="Import theme file"
+            hidden
+            onChange={(event) => {
+              const file = event.currentTarget.files?.[0]
+              event.currentTarget.value = ''
+              if (file) void onImportTheme(file)
+            }}
+          />
+          <button type="button" onClick={() => themeFileRef.current?.click()}>
+            Import theme…
+          </button>
           <label className="app-menu-field">
             <span>Canvas document</span>
             <select
@@ -7577,15 +7610,6 @@ function readCanvasDocumentDisplayMode(): CanvasDocumentDisplayMode {
   }
 }
 
-function readStoredTheme(): AppTheme {
-  try {
-    const stored = localStorage.getItem(THEME_KEY)
-    if (stored === 'bright' || stored === 'dark') return stored
-  } catch {
-    // Fall through to the original theme when storage is unavailable.
-  }
-  return 'classic'
-}
 
 function windowPlacementIsVisible(
   placement: StoredWindowPlacement,

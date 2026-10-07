@@ -110,9 +110,59 @@ Choose an interface palette under **Options → Theme**:
 
 - **Classic** preserves Bricriu's original cream-and-green appearance.
 - **Bright contrast** keeps the editor light while using stronger borders, deeper green accents, darker surrounding chrome, and clearer surface separation.
-- **Dark** applies a dark palette across the app chrome, Markdown editor, preview, calendar, canvas, and Track Changes surfaces. Typst output remains paper-white because it represents the rendered document.
+- **Dark — VS Code Dark+** uses neutral charcoal surfaces, gray borders, blue accents, and syntax colors adapted from VS Code Dark+. It applies across the app chrome, Markdown editor, preview, calendar, canvas, and Track Changes surfaces. Typst output remains paper-white because it represents the rendered document.
 
 The selected theme is stored locally and restored the next time Bricriu starts.
+
+### Where to get themes
+
+VS Code color themes are the easiest source of additional palettes. Some starting points:
+
+- [One Dark Pro](https://marketplace.visualstudio.com/items?itemName=zhuangtongfa.Material-theme) uses dark blue-gray surfaces. Its [JSON theme file](https://raw.githubusercontent.com/Binaryify/OneDark-Pro/master/themes/OneDark-Pro.json) can be downloaded directly.
+- [GitHub Theme](https://marketplace.visualstudio.com/items?itemName=GitHub.github-vscode-theme) includes **Dark Default** and **Dark Dimmed** variants.
+- [Dracula](https://draculatheme.com/visual-studio-code) uses purple-gray surfaces with colorful highlighting.
+
+To try One Dark Pro without installing VS Code:
+
+1. Open the **JSON theme file** link above.
+2. Use your browser's **Save as** command (`Ctrl+S` on Windows) and save it as `OneDark-Pro.json`, keeping the `.json` extension.
+3. In Bricriu, choose **Options → Import theme…** and select that file.
+
+For themes obtained through the VS Code Marketplace, follow [Export a theme from VS Code](#export-a-theme-from-vs-code) below. Bricriu imports the theme's colors rather than installing its VS Code extension. The built-in Dark+ palette needs no download.
+
+### Import theme files
+
+**Options → Import theme…** loads a palette immediately, without restarting or rebuilding the app. Choose either:
+
+- A VS Code `.json` / `.jsonc` color theme. The importer maps common interface colors and broad syntax scopes to Bricriu; it does not reproduce every VS Code token rule, semantic token, or font style. Themes that reference other files need to be [exported from VS Code](#export-a-theme-from-vs-code) first.
+- A Bricriu `.css` palette, such as [public/themes/dark-plus.css](public/themes/dark-plus.css). Edit a copy, then import it. Palette files use one `:root` block containing `color-scheme: dark` (or `light`) and Bricriu color variables with hex values. Arbitrary stylesheets from other editors use different selectors and need adapting.
+
+For example:
+
+```css
+:root {
+  color-scheme: dark;
+  --editor-bg: #1e1e1e;
+  --editor-bg-alt: #1e1e1e;
+  --code-editor-bg: #1e1e1e;
+  --panel: #252526;
+  --text: #d4d4d4;
+  --accent: #75beff;
+}
+```
+
+The most recently imported palette appears in the Theme list. Its colors are saved locally, so the original file is not needed on later launches. Edit and reimport a file to reload it; files are not watched automatically. Select any built-in theme to remove its overrides. Invalid imports leave the current theme unchanged. Theme files must be at most 512 KB.
+
+If **Options → Import theme…** is missing, update Bricriu to a build that includes theme importing. Once the feature is available, changing palettes needs no recompilation.
+
+### Export a theme from VS Code
+
+1. Install the theme in VS Code and select it through **Preferences: Color Theme**. For a theme with several variants, select the variant you want to export.
+2. Press **Ctrl+Shift+P** on Windows/Linux or **Cmd+Shift+P** on macOS to open the Command Palette.
+3. Run **Developer: Generate Color Theme From Current Settings** and save the generated document as a `.json` file.
+4. In Bricriu, choose **Options → Import theme…** and select the saved file.
+
+This produces a self-contained palette, including colors inherited from other theme files. The export command is documented in the [VS Code theme guide](https://code.visualstudio.com/api/extension-guides/color-theme).
 
 ## Editing Markdown
 
